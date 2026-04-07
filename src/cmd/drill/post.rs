@@ -112,6 +112,7 @@ pub fn handle_action(
         Action::Reveal => {
             if !mutable.reveal {
                 mutable.reveal = true;
+                mutable.card_shown_at = Some(Timestamp::now());
             }
             Ok(ActionResult::Continue)
         }
@@ -131,6 +132,7 @@ pub fn handle_action(
                 mutable.cache.update(hash, performance)?;
                 mutable.finished_at = None;
                 mutable.reveal = false;
+                mutable.card_shown_at = None;
             }
             Ok(ActionResult::Continue)
         }
@@ -151,6 +153,10 @@ pub fn handle_action(
         Action::Forgot | Action::Hard | Action::Good | Action::Easy => {
             if mutable.reveal {
                 let reviewed_at: Timestamp = Timestamp::now();
+                let duration_ms: Option<i64> = mutable.card_shown_at.map(|shown_at| {
+                    (reviewed_at.into_inner() - shown_at.into_inner()).num_milliseconds()
+                });
+                mutable.card_shown_at = None;
                 let card: Card = mutable.cards.remove(0);
                 let hash: CardHash = card.hash();
                 let grade: Grade = action.grade();
@@ -166,6 +172,7 @@ pub fn handle_action(
                     interval_raw: performance.interval_raw,
                     interval_days: performance.interval_days,
                     due_date: performance.due_date,
+                    duration_ms,
                 };
 
                 mutable
@@ -220,6 +227,7 @@ mod tests {
             cards: Vec::new(),
             reviews: Vec::new(),
             finished_at: None,
+            card_shown_at: None,
         }
     }
 

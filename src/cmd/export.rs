@@ -257,6 +257,7 @@ mod tests {
                 difficulty: 3.0,
                 interval_raw: 1.0,
                 interval_days: 1,
+                duration_ms: None,
                 due_date: now.date(),
             };
             reviews.push(review);

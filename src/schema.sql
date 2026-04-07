@@ -34,5 +34,6 @@ create table reviews (
     difficulty real not null,
     interval_raw real not null,
     interval_days integer not null,
-    due_date text not null
+    due_date text not null,
+    duration_ms integer
 ) strict;

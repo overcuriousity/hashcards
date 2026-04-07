@@ -157,7 +157,7 @@ Improvements to make hashcards work better for short mobile study sessions.
 | 5 | Completion UX | S | High | ✅ Done (PR #8) |
 | 4a | PWA manifest | S | High | ✅ Done |
 | 3 | Quick session sizing | M | High | ✅ Done |
-| 6 | Per-card timing | M | Medium | ⬜ Not started |
+| 6 | Per-card timing | M | Medium | ✅ Done |
 | 2 | Session persistence | M–L | High | ⬜ Not started |
 | 4b | Service worker | M | Medium | ⬜ Not started |
 | 7 | Multi-user + auth | XL | High | ⬜ Later |
@@ -166,7 +166,7 @@ Improvements to make hashcards work better for short mobile study sessions.
 
 1. ~~**4a — Icons**~~ ✅ Done — 192×192 and 512×512 PNG icons added, served from `/icons/`, referenced in manifest.
 2. ~~**3 — Quick session sizing**~~ ✅ Done — `limit` form field on session start; `<select>` on browse page.
-3. **6 — Per-card timing**: `card_shown_at` in `SessionState`; `duration_ms` in reviews; slowest-card row on completion page.
+3. ~~**6 — Per-card timing**~~ ✅ Done — `card_shown_at` in `MutableState`; `duration_ms` in reviews; median pace + slowest-card row on completion page.
 4. **2 — Session persistence**: write each review to DB immediately on grade; undo via `voided` flag.
 5. **4b — Service worker**: cache static assets; minimal offline page.
 6. **7 — Multi-user auth**: separate project.

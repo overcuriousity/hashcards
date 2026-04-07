@@ -48,6 +48,8 @@ pub struct MutableState {
     pub cards: Vec<Card>,
     pub reviews: Vec<Review>,
     pub finished_at: Option<Timestamp>,
+    /// Timestamp when the current card was revealed (for per-card timing).
+    pub card_shown_at: Option<Timestamp>,
 }
 
 #[derive(Clone)]
@@ -60,6 +62,7 @@ pub struct Review {
     pub interval_raw: f64,
     pub interval_days: i64,
     pub due_date: Date,
+    pub duration_ms: Option<i64>,
 }
 
 impl Review {
@@ -77,6 +80,7 @@ impl Review {
             interval_raw: self.interval_raw,
             interval_days: self.interval_days,
             due_date: self.due_date,
+            duration_ms: self.duration_ms,
         }
     }
 }
