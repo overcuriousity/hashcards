@@ -43,6 +43,7 @@ pub struct ReviewRecord {
     pub interval_raw: f64,
     pub interval_days: i64,
     pub due_date: Date,
+    pub duration_ms: Option<i64>,
 }
 
 pub struct SessionRow {
@@ -64,8 +65,10 @@ impl Database {
             let tx = conn.transaction()?;
             if !probe_schema_exists(&tx)? {
                 tx.execute_batch(include_str!("schema.sql"))?;
-                tx.commit()?;
+            } else {
+                migrate_add_duration_ms(&tx)?;
             }
+            tx.commit()?;
         }
         Ok(Self { conn })
     }
@@ -236,7 +239,7 @@ impl Database {
         let sql = "insert into sessions (started_at, ended_at) values (?, ?) returning session_id;";
         let session_id: i64 = tx.query_row(sql, params![started_at, ended_at], |row| row.get(0))?;
         for review in reviews {
-            let sql = "insert into reviews (session_id, card_hash, reviewed_at, grade, stability, difficulty, interval_raw, interval_days, due_date) values (?, ?, ?, ?, ?, ?, ?, ?, ?);";
+            let sql = "insert into reviews (session_id, card_hash, reviewed_at, grade, stability, difficulty, interval_raw, interval_days, due_date, duration_ms) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);";
             tx.execute(
                 sql,
                 params![
@@ -248,7 +251,8 @@ impl Database {
                     review.difficulty,
                     review.interval_raw,
                     review.interval_days as i32,
-                    review.due_date
+                    review.due_date,
+                    review.duration_ms
                 ],
             )?;
         }
@@ -304,7 +308,7 @@ impl Database {
 
     /// Get the list of all reviews for a given session.
     pub fn get_reviews_for_session(&self, session_id: i64) -> Fallible<Vec<ReviewRow>> {
-        let sql = "select review_id, card_hash, reviewed_at, grade, stability, difficulty, interval_raw, interval_days, due_date from reviews where session_id = ? order by reviewed_at;";
+        let sql = "select review_id, card_hash, reviewed_at, grade, stability, difficulty, interval_raw, interval_days, due_date, duration_ms from reviews where session_id = ? order by reviewed_at;";
         let mut stmt = self.conn.prepare(sql)?;
         let review_iter = stmt.query_map(params![session_id], |row| {
             Ok(ReviewRow {
@@ -318,6 +322,7 @@ impl Database {
                     interval_raw: row.get(6)?,
                     interval_days: row.get(7)?,
                     due_date: row.get(8)?,
+                    duration_ms: row.get(9)?,
                 },
             })
         })?;
@@ -327,6 +332,15 @@ impl Database {
         }
         Ok(reviews)
     }
+}
+
+fn migrate_add_duration_ms(tx: &Transaction) -> Fallible<()> {
+    let sql = "select count(*) from pragma_table_info('reviews') where name = 'duration_ms';";
+    let count: i64 = tx.query_row(sql, [], |row| row.get(0))?;
+    if count == 0 {
+        tx.execute_batch("alter table reviews add column duration_ms integer;")?;
+    }
+    Ok(())
 }
 
 fn probe_schema_exists(tx: &Transaction) -> Fallible<bool> {
@@ -450,6 +464,7 @@ mod tests {
             interval_raw: 1.0,
             interval_days: 1,
             due_date: now.date(),
+            duration_ms: Some(3500),
         };
         db.save_session(now, now, vec![review])?;
 
@@ -469,6 +484,7 @@ mod tests {
         assert_eq!(fetched_review.data.interval_raw, 1.0);
         assert_eq!(fetched_review.data.interval_days, 1);
         assert_eq!(fetched_review.data.due_date, now.date());
+        assert_eq!(fetched_review.data.duration_ms, Some(3500));
         Ok(())
     }
 

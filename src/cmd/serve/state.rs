@@ -79,6 +79,7 @@ impl DrillSession {
                 cards,
                 reviews: Vec::new(),
                 finished_at: None,
+                card_shown_at: None,
             },
         }
     }

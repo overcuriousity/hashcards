@@ -20,6 +20,9 @@
                 Browse page now has a session limit selector (All / 10 / 20 / 50 cards) next to the Drill button for quick commute-length sessions.
             </change>
             <change author="mstoeck3">
+                Per-card review time is now tracked: each card's duration (from Reveal to grade) is stored as `duration_ms` in the reviews table. The session completion page shows median pace and the slowest card (deck + duration).
+            </change>
+            <change author="mstoeck3">
                 Wrapper button colors (landing, browse, completion) simplified to flat black-and-white; colored drop-shadows and blue accents removed.
             </change>
             <change author="overcuriousity">

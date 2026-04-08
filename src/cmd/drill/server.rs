@@ -180,6 +180,7 @@ pub async fn start_server(config: ServerConfig) -> Fallible<()> {
             cards: due_today,
             reviews: Vec::new(),
             finished_at: None,
+            card_shown_at: None,
         })),
         shutdown_tx: Arc::new(Mutex::new(Some(shutdown_tx))),
         answer_controls: config.answer_controls,

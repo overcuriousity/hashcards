@@ -249,13 +249,38 @@ pub fn render_completion_page(ctx: &RenderContext, mutable: &MutableState) -> Fa
     let start = ctx.session_started_at.into_inner();
     let end = mutable.finished_at.unwrap().into_inner();
     let duration_s = (end - start).num_seconds();
-    let pace: f64 = if cards_reviewed == 0 {
-        0.0
+
+    // Compute per-card durations for median pace and slowest card.
+    let mut durations_ms: Vec<i64> = mutable
+        .reviews
+        .iter()
+        .filter_map(|r| r.duration_ms)
+        .collect();
+    durations_ms.sort_unstable();
+
+    let median_pace_s: Option<f64> = if durations_ms.is_empty() {
+        None
     } else {
-        duration_s as f64 / cards_reviewed as f64
+        let n = durations_ms.len();
+        let median_ms = if n % 2 == 1 {
+            durations_ms[n / 2] as f64
+        } else {
+            (durations_ms[n / 2 - 1] as f64 + durations_ms[n / 2] as f64) / 2.0
+        };
+        Some(median_ms / 1000.0)
     };
-    let pace_rounded = pace.round() as i64;
-    let pace = format!("{:.2}", pace);
+
+    let slowest_card: Option<(&str, f64)> = mutable
+        .reviews
+        .iter()
+        .filter_map(|r| r.duration_ms.map(|ms| (r.card.deck_name().as_str(), ms)))
+        .max_by_key(|&(_, ms)| ms)
+        .map(|(name, ms)| (name, ms as f64 / 1000.0));
+
+    let pace_rounded = median_pace_s.unwrap_or_else(|| {
+        if cards_reviewed == 0 { 0.0 } else { duration_s as f64 / cards_reviewed as f64 }
+    }).round() as i64;
+
     let start_ts = start.format(TS_FORMAT).to_string();
     let end_ts = end.format(TS_FORMAT).to_string();
     let duration_min = duration_s / 60;
@@ -331,9 +356,17 @@ pub fn render_completion_page(ctx: &RenderContext, mutable: &MutableState) -> Fa
                                 td .key { "Duration (seconds)" }
                                 td .val { (duration_s) }
                             }
-                            tr {
-                                td .key { "Pace (s/card)" }
-                                td .val { (pace) }
+                            @if let Some(median_s) = median_pace_s {
+                                tr {
+                                    td .key { "Median pace (s/card)" }
+                                    td .val { (format!("{:.1}", median_s)) }
+                                }
+                            }
+                            @if let Some((deck, slowest_s)) = slowest_card {
+                                tr {
+                                    td .key { "Slowest card" }
+                                    td .val { (format!("{deck} ({slowest_s:.1} s)")) }
+                                }
                             }
                         }
                     }
