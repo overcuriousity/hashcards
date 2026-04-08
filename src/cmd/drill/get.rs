@@ -265,7 +265,7 @@ pub fn render_completion_page(ctx: &RenderContext, mutable: &MutableState) -> Fa
         let median_ms = if n % 2 == 1 {
             durations_ms[n / 2] as f64
         } else {
-            (durations_ms[n / 2 - 1] + durations_ms[n / 2]) as f64 / 2.0
+            (durations_ms[n / 2 - 1] as f64 + durations_ms[n / 2] as f64) / 2.0
         };
         Some(median_ms / 1000.0)
     };
