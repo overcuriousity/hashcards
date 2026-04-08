@@ -154,7 +154,9 @@ pub fn handle_action(
             if mutable.reveal {
                 let reviewed_at: Timestamp = Timestamp::now();
                 let duration_ms: Option<i64> = mutable.card_shown_at.map(|shown_at| {
-                    (reviewed_at.into_inner() - shown_at.into_inner()).num_milliseconds()
+                    (reviewed_at.into_inner() - shown_at.into_inner())
+                        .num_milliseconds()
+                        .max(0)
                 });
                 mutable.card_shown_at = None;
                 let card: Card = mutable.cards.remove(0);

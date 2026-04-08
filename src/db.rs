@@ -65,8 +65,10 @@ impl Database {
             let tx = conn.transaction()?;
             if !probe_schema_exists(&tx)? {
                 tx.execute_batch(include_str!("schema.sql"))?;
-                tx.commit()?;
+            } else {
+                migrate_add_duration_ms(&tx)?;
             }
+            tx.commit()?;
         }
         Ok(Self { conn })
     }
@@ -330,6 +332,15 @@ impl Database {
         }
         Ok(reviews)
     }
+}
+
+fn migrate_add_duration_ms(tx: &Transaction) -> Fallible<()> {
+    let sql = "select count(*) from pragma_table_info('reviews') where name = 'duration_ms';";
+    let count: i64 = tx.query_row(sql, [], |row| row.get(0))?;
+    if count == 0 {
+        tx.execute_batch("alter table reviews add column duration_ms integer;")?;
+    }
+    Ok(())
 }
 
 fn probe_schema_exists(tx: &Transaction) -> Fallible<bool> {
