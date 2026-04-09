@@ -128,9 +128,8 @@ pub fn handle_action(
                 let card: Card = last_review.card;
                 let hash: CardHash = card.hash();
                 mutable.cards.insert(0, card);
-                // Void the review in the DB and restore prior performance.
-                mutable.db.void_review(last_review.review_id)?;
-                mutable.db.update_card_performance(hash, last_review.prev_performance)?;
+                // Void the review and restore prior performance atomically.
+                mutable.db.void_review_and_restore_performance(last_review.review_id, hash, last_review.prev_performance)?;
                 mutable.cache.update(hash, last_review.prev_performance)?;
                 mutable.finished_at = None;
                 mutable.reveal = false;
@@ -197,9 +196,9 @@ pub fn handle_action(
                     duration_ms,
                 };
                 let new_performance = Performance::Reviewed(performance);
-                // Write to DB immediately so progress survives a dropped connection.
-                let review_id = mutable.db.insert_review_immediately(mutable.session_id, &record)?;
-                mutable.db.update_card_performance(hash, new_performance)?;
+                // Write review and card performance atomically so a crash between
+                // the two operations cannot leave the DB inconsistent.
+                let review_id = mutable.db.insert_review_and_update_performance(mutable.session_id, &record, new_performance)?;
                 mutable.cache.update(hash, new_performance)?;
                 let review = Review {
                     card: card.clone(),

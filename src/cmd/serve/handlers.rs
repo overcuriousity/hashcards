@@ -357,9 +357,15 @@ pub async fn collection_post_handler(
 }
 
 fn collection_post_inner(state: &AppState, slug: &str, action: Action) -> Fallible<Redirect> {
-    // Home action: drop session without needing to hold lock during DB work
+    // Home action: close the session and drop it without needing to hold the
+    // global lock during DB work.
     if matches!(action, Action::Home) {
-        state.sessions.lock().unwrap().remove(slug);
+        let session = state.sessions.lock().unwrap().remove(slug);
+        if let Some(s) = session {
+            if s.mutable.finished_at.is_none() {
+                let _ = s.mutable.db.close_session(s.mutable.session_id, Timestamp::now());
+            }
+        }
 
         // Snapshot inputs, then compute + update in background (don't block response).
         let sources_snapshot = state.hedgedoc_sources.lock().unwrap().clone();
@@ -388,6 +394,9 @@ fn collection_post_inner(state: &AppState, slug: &str, action: Action) -> Fallib
 
     match result {
         ActionResult::Home => {
+            if session.mutable.finished_at.is_none() {
+                let _ = session.mutable.db.close_session(session.mutable.session_id, Timestamp::now());
+            }
             // Snapshot inputs, then compute + update in background (don't block response).
             let sources_snapshot = state.hedgedoc_sources.lock().unwrap().clone();
             let static_collections = state.config.collections.clone();

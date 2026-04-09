@@ -218,10 +218,10 @@ pub async fn start_server(config: ServerConfig) -> Fallible<()> {
     // Check if session was complete when server shut down
     let mutable = state.mutable.lock().unwrap();
     if mutable.finished_at.is_some() {
-        // Session was complete, exit with code 0
         Ok(())
     } else {
-        // Session was not complete, exit with error code
+        // Mark the session as closed so ended_at reflects the actual stop time.
+        let _ = mutable.db.close_session(mutable.session_id, Timestamp::now());
         fail("Session interrupted before completion")
     }
 }

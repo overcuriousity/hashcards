@@ -19,12 +19,16 @@ use crate::error::fail;
 use crate::types::card_hash::CardHash;
 use crate::types::performance::Performance;
 
-/// An in-memory cache of card performance changes made during the current
-/// session. We use this so that updates are only persisted to the database
-/// when the session ends. This makes undo simpler to implement, and allows a
-/// user to abort a study session without persisting their changes.
+/// An in-memory snapshot of card performance for the current session.
+///
+/// Each card's latest performance is held here so that:
+/// - grading can compute the new performance without an extra DB read, and
+/// - undo has the previous performance readily available to restore.
+///
+/// Card performance is now written to the DB immediately on each grade; this
+/// cache is not the source of truth — it is a fast-access mirror.
 pub struct Cache {
-    /// A map of card IDs to their performance changes.
+    /// A map of card IDs to their current in-session performance.
     changes: HashMap<CardHash, Performance>,
 }
 

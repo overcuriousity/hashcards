@@ -247,7 +247,62 @@ impl Database {
         Ok(session_id)
     }
 
-    /// Insert a single review immediately. Returns the review_id.
+    /// Atomically insert a review and update the card's performance.
+    ///
+    /// Both operations run inside a single transaction so a crash between them
+    /// cannot leave the DB in an inconsistent state. Returns the new review_id.
+    pub fn insert_review_and_update_performance(
+        &mut self,
+        session_id: i64,
+        review: &ReviewRecord,
+        performance: Performance,
+    ) -> Fallible<i64> {
+        let tx = self.conn.transaction()?;
+        let review_id: i64 = {
+            let sql = "insert into reviews (session_id, card_hash, reviewed_at, grade, stability, difficulty, interval_raw, interval_days, due_date, duration_ms) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) returning review_id;";
+            tx.query_row(
+                sql,
+                params![
+                    session_id,
+                    review.card_hash,
+                    review.reviewed_at,
+                    review.grade,
+                    review.stability,
+                    review.difficulty,
+                    review.interval_raw,
+                    review.interval_days as i32,
+                    review.due_date,
+                    review.duration_ms
+                ],
+                |row| row.get(0),
+            )?
+        };
+        update_card_performance_tx(&tx, review.card_hash, performance)?;
+        tx.commit()?;
+        Ok(review_id)
+    }
+
+    /// Atomically void a review and restore prior card performance (undo).
+    ///
+    /// Both operations run inside a single transaction so a crash between them
+    /// cannot leave the DB in an inconsistent state.
+    pub fn void_review_and_restore_performance(
+        &mut self,
+        review_id: i64,
+        card_hash: CardHash,
+        prev_performance: Performance,
+    ) -> Fallible<()> {
+        let tx = self.conn.transaction()?;
+        tx.execute("update reviews set voided = 1 where review_id = ?;", params![review_id])?;
+        update_card_performance_tx(&tx, card_hash, prev_performance)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Insert a single review. Returns the review_id.
+    ///
+    /// Prefer [`insert_review_and_update_performance`] in production grading
+    /// paths to get atomic review + card-performance updates.
     pub fn insert_review_immediately(
         &self,
         session_id: i64,
@@ -273,7 +328,10 @@ impl Database {
         Ok(review_id)
     }
 
-    /// Mark a review as voided (undo).
+    /// Mark a review as voided.
+    ///
+    /// Prefer [`void_review_and_restore_performance`] in production undo paths
+    /// to get atomic void + card-performance restore.
     pub fn void_review(&self, review_id: i64) -> Fallible<()> {
         let sql = "update reviews set voided = 1 where review_id = ?;";
         self.conn.execute(sql, params![review_id])?;
@@ -412,9 +470,9 @@ impl Database {
         Ok(count as usize)
     }
 
-    /// Count the number of reviews performed in the given date.
+    /// Count the number of non-voided reviews performed on the given date.
     pub fn count_reviews_in_date(&self, date: Date) -> Fallible<usize> {
-        let sql = "select count(*) from reviews where substr(reviewed_at, 1, 10) = ?;";
+        let sql = "select count(*) from reviews where substr(reviewed_at, 1, 10) = ? and voided = 0;";
         let count: i64 = self.conn.query_row(sql, params![date], |row| row.get(0))?;
         Ok(count as usize)
     }
@@ -463,6 +521,44 @@ impl Database {
         }
         Ok(reviews)
     }
+}
+
+fn update_card_performance_tx(tx: &Transaction, card_hash: CardHash, performance: Performance) -> Fallible<()> {
+    let (
+        last_reviewed_at,
+        stability,
+        difficulty,
+        interval_raw,
+        interval_days,
+        due_date,
+        review_count,
+    ) = match performance {
+        Performance::New => (None, None, None, None, None, None, 0i32),
+        Performance::Reviewed(rp) => (
+            Some(rp.last_reviewed_at),
+            Some(rp.stability),
+            Some(rp.difficulty),
+            Some(rp.interval_raw),
+            Some(rp.interval_days as i32),
+            Some(rp.due_date),
+            rp.review_count as i32,
+        ),
+    };
+    let sql = "update cards set last_reviewed_at = ?, stability = ?, difficulty = ?, interval_raw = ?, interval_days = ?, due_date = ?, review_count = ? where card_hash = ?;";
+    tx.execute(
+        sql,
+        params![
+            last_reviewed_at,
+            stability,
+            difficulty,
+            interval_raw,
+            interval_days,
+            due_date,
+            review_count,
+            card_hash
+        ],
+    )?;
+    Ok(())
 }
 
 fn migrate_add_duration_ms(tx: &Transaction) -> Fallible<()> {
