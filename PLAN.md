@@ -110,6 +110,29 @@ Improvements to make hashcards work better for short mobile study sessions.
 
 ---
 
+## 8. Background sync (offline grade queuing) *(larger task — later)*
+
+**Problem:** The app is fully server-rendered. If the mobile connection drops mid-session, grade POSTs can't reach the server and the user is stuck. They can't continue drilling and any in-flight grade is lost.
+
+**Goal:** Cards already graded (POSTs that landed) are safe after #2. This item covers the remaining gap: grades submitted *while* offline should be queued in the browser and replayed when connectivity returns. Full offline drilling is out of scope — the server still controls session state.
+
+**Design:**
+- At session start, the server sends the ordered card queue to the client (card hashes + sequence), stored in the browser via a service worker / IndexedDB.
+- A service worker intercepts grade POSTs. When offline, it queues them in IndexedDB using the Background Sync API and returns a synthetic "continue" response so the UI can advance.
+- Card content (HTML) is pre-fetched and cached at session start so the browser can show the next card without a round-trip.
+- When connectivity returns, the service worker replays queued POSTs in order. The server reconciles (idempotency key per grade action prevents double-writes).
+- Limitation: if the card queue deviates from server state (e.g. repeated cards from Forgot/Hard), the offline queue may desync. Acceptable for v1 — a resync on reconnect is sufficient.
+
+**Architectural notes:**
+- This is a significant shift: the server needs to expose the card queue at session start (new endpoint or embedded JSON), and grade endpoints need idempotency keys.
+- FSRS scheduling stays server-side. The client is only a queue buffer.
+- Background Sync API has broad support on Android Chrome; iOS Safari is limited — a fallback (retry on visibility change) is needed.
+
+**Files (new):** `sw.js`, `src/cmd/drill/sync.rs`
+**Files (modified):** `src/cmd/drill/server.rs`, `src/cmd/serve/handlers.rs`, `src/cmd/drill/post.rs`, `src/cmd/drill/template.rs`
+
+---
+
 ## 7. Multi-user support with authentication *(larger task — later)*
 
 **Problem:** hashcards assumes a single user. Collections, review history, and session state are global. To share an instance (family, study group, multiple devices) users need isolated data and access control.
@@ -158,8 +181,9 @@ Improvements to make hashcards work better for short mobile study sessions.
 | 4a | PWA manifest | S | High | ✅ Done |
 | 3 | Quick session sizing | M | High | ✅ Done |
 | 6 | Per-card timing | M | Medium | ✅ Done |
-| 2 | Session persistence | M–L | High | ⬜ Not started |
+| 2 | Session persistence | M–L | High | ✅ Done |
 | 4b | Service worker | M | Medium | ⬜ Not started |
+| 8 | Background sync | L | High | ⬜ Later |
 | 7 | Multi-user + auth | XL | High | ⬜ Later |
 
 ### Remaining work (in order)
@@ -167,6 +191,7 @@ Improvements to make hashcards work better for short mobile study sessions.
 1. ~~**4a — Icons**~~ ✅ Done — 192×192 and 512×512 PNG icons added, served from `/icons/`, referenced in manifest.
 2. ~~**3 — Quick session sizing**~~ ✅ Done — `limit` form field on session start; `<select>` on browse page.
 3. ~~**6 — Per-card timing**~~ ✅ Done — `card_shown_at` in `MutableState`; `duration_ms` in reviews; median pace + slowest-card row on completion page.
-4. **2 — Session persistence**: write each review to DB immediately on grade; undo via `voided` flag.
+4. ~~**2 — Session persistence**~~ ✅ Done — session row created at session start; each grade writes review + card performance to DB immediately; undo voids the review row and restores prior performance.
 5. **4b — Service worker**: cache static assets; minimal offline page.
-6. **7 — Multi-user auth**: separate project.
+6. **8 — Background sync**: pre-fetch card queue at session start; service worker queues grade POSTs when offline; replay on reconnect.
+7. **7 — Multi-user auth**: separate project.

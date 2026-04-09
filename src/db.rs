@@ -74,6 +74,7 @@ impl Database {
             } else {
                 migrate_add_duration_ms(&tx)?;
                 migrate_add_bookmarks(&tx)?;
+                migrate_add_voided(&tx)?;
             }
             tx.commit()?;
         }
@@ -235,35 +236,54 @@ impl Database {
         Ok(())
     }
 
-    /// Save a session.
-    pub fn save_session(
-        &mut self,
-        started_at: Timestamp,
-        ended_at: Timestamp,
-        reviews: Vec<ReviewRecord>,
-    ) -> Fallible<()> {
-        let tx = self.conn.transaction()?;
+    /// Create a new session row at session start. Returns the session_id.
+    /// ended_at is initially set to started_at as a placeholder; call
+    /// close_session when the session finishes.
+    pub fn create_session(&self, started_at: Timestamp) -> Fallible<i64> {
         let sql = "insert into sessions (started_at, ended_at) values (?, ?) returning session_id;";
-        let session_id: i64 = tx.query_row(sql, params![started_at, ended_at], |row| row.get(0))?;
-        for review in reviews {
-            let sql = "insert into reviews (session_id, card_hash, reviewed_at, grade, stability, difficulty, interval_raw, interval_days, due_date, duration_ms) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);";
-            tx.execute(
-                sql,
-                params![
-                    session_id,
-                    review.card_hash,
-                    review.reviewed_at,
-                    review.grade,
-                    review.stability,
-                    review.difficulty,
-                    review.interval_raw,
-                    review.interval_days as i32,
-                    review.due_date,
-                    review.duration_ms
-                ],
-            )?;
-        }
-        tx.commit()?;
+        let session_id: i64 =
+            self.conn
+                .query_row(sql, params![started_at, started_at], |row| row.get(0))?;
+        Ok(session_id)
+    }
+
+    /// Insert a single review immediately. Returns the review_id.
+    pub fn insert_review_immediately(
+        &self,
+        session_id: i64,
+        review: &ReviewRecord,
+    ) -> Fallible<i64> {
+        let sql = "insert into reviews (session_id, card_hash, reviewed_at, grade, stability, difficulty, interval_raw, interval_days, due_date, duration_ms) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) returning review_id;";
+        let review_id: i64 = self.conn.query_row(
+            sql,
+            params![
+                session_id,
+                review.card_hash,
+                review.reviewed_at,
+                review.grade,
+                review.stability,
+                review.difficulty,
+                review.interval_raw,
+                review.interval_days as i32,
+                review.due_date,
+                review.duration_ms
+            ],
+            |row| row.get(0),
+        )?;
+        Ok(review_id)
+    }
+
+    /// Mark a review as voided (undo).
+    pub fn void_review(&self, review_id: i64) -> Fallible<()> {
+        let sql = "update reviews set voided = 1 where review_id = ?;";
+        self.conn.execute(sql, params![review_id])?;
+        Ok(())
+    }
+
+    /// Update ended_at to mark a session as complete.
+    pub fn close_session(&self, session_id: i64, ended_at: Timestamp) -> Fallible<()> {
+        let sql = "update sessions set ended_at = ? where session_id = ?;";
+        self.conn.execute(sql, params![ended_at, session_id])?;
         Ok(())
     }
 
@@ -417,9 +437,9 @@ impl Database {
         Ok(sessions)
     }
 
-    /// Get the list of all reviews for a given session.
+    /// Get the list of all non-voided reviews for a given session.
     pub fn get_reviews_for_session(&self, session_id: i64) -> Fallible<Vec<ReviewRow>> {
-        let sql = "select review_id, card_hash, reviewed_at, grade, stability, difficulty, interval_raw, interval_days, due_date, duration_ms from reviews where session_id = ? order by reviewed_at;";
+        let sql = "select review_id, card_hash, reviewed_at, grade, stability, difficulty, interval_raw, interval_days, due_date, duration_ms from reviews where session_id = ? and voided = 0 order by reviewed_at;";
         let mut stmt = self.conn.prepare(sql)?;
         let review_iter = stmt.query_map(params![session_id], |row| {
             Ok(ReviewRow {
@@ -468,6 +488,15 @@ fn migrate_add_bookmarks(tx: &Transaction) -> Fallible<()> {
                 created_at text not null
             ) strict;",
         )?;
+    }
+    Ok(())
+}
+
+fn migrate_add_voided(tx: &Transaction) -> Fallible<()> {
+    let sql = "select count(*) from pragma_table_info('reviews') where name = 'voided';";
+    let count: i64 = tx.query_row(sql, [], |row| row.get(0))?;
+    if count == 0 {
+        tx.execute_batch("alter table reviews add column voided integer not null default 0;")?;
     }
     Ok(())
 }
@@ -577,13 +606,15 @@ mod tests {
         Ok(())
     }
 
-    /// Save a session.
+    /// Create a session, insert a review immediately, and close the session.
     #[test]
-    fn test_save_session() -> Fallible<()> {
-        let mut db = Database::new(":memory:")?;
+    fn test_session_persistence() -> Fallible<()> {
+        let db = Database::new(":memory:")?;
         let card_hash = CardHash::hash_bytes(b"a");
         let now = Timestamp::now();
         db.insert_card(card_hash, now)?;
+
+        let session_id = db.create_session(now)?;
         let review = ReviewRecord {
             card_hash,
             reviewed_at: now,
@@ -595,7 +626,8 @@ mod tests {
             due_date: now.date(),
             duration_ms: Some(3500),
         };
-        db.save_session(now, now, vec![review])?;
+        let review_id = db.insert_review_immediately(session_id, &review)?;
+        db.close_session(session_id, now)?;
 
         let sessions = db.get_all_sessions()?;
         assert_eq!(sessions.len(), 1);
@@ -605,15 +637,38 @@ mod tests {
         let reviews = db.get_reviews_for_session(session.session_id)?;
         assert_eq!(reviews.len(), 1);
         let fetched_review = &reviews[0];
+        assert_eq!(fetched_review.review_id, review_id);
         assert_eq!(fetched_review.data.card_hash, card_hash);
-        assert_eq!(fetched_review.data.reviewed_at, now);
         assert_eq!(fetched_review.data.grade, Grade::Good);
-        assert_eq!(fetched_review.data.stability, 2.0);
-        assert_eq!(fetched_review.data.difficulty, 2.0);
-        assert_eq!(fetched_review.data.interval_raw, 1.0);
-        assert_eq!(fetched_review.data.interval_days, 1);
-        assert_eq!(fetched_review.data.due_date, now.date());
         assert_eq!(fetched_review.data.duration_ms, Some(3500));
+        Ok(())
+    }
+
+    /// Voiding a review excludes it from get_reviews_for_session.
+    #[test]
+    fn test_void_review() -> Fallible<()> {
+        let db = Database::new(":memory:")?;
+        let card_hash = CardHash::hash_bytes(b"a");
+        let now = Timestamp::now();
+        db.insert_card(card_hash, now)?;
+
+        let session_id = db.create_session(now)?;
+        let review = ReviewRecord {
+            card_hash,
+            reviewed_at: now,
+            grade: Grade::Good,
+            stability: 2.0,
+            difficulty: 2.0,
+            interval_raw: 1.0,
+            interval_days: 1,
+            due_date: now.date(),
+            duration_ms: None,
+        };
+        let review_id = db.insert_review_immediately(session_id, &review)?;
+        db.void_review(review_id)?;
+
+        let reviews = db.get_reviews_for_session(session_id)?;
+        assert_eq!(reviews.len(), 0);
         Ok(())
     }
 

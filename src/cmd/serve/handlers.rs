@@ -310,6 +310,9 @@ fn create_session(
         cache.insert(card.hash(), performance)?;
     }
 
+    // Create the session row immediately so reviews can be written as they happen.
+    let session_id = collection.db.create_session(session_started_at)?;
+
     let answer_controls = state.config.defaults.answer_controls.into();
 
     Ok(Some(DrillSession::new(
@@ -318,6 +321,7 @@ fn create_session(
         due_cards,
         cache,
         session_started_at,
+        session_id,
         answer_controls,
         collection.db,
     )))

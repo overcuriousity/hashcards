@@ -62,6 +62,7 @@ impl DrillSession {
         cards: Vec<crate::types::card::Card>,
         cache: Cache,
         session_started_at: Timestamp,
+        session_id: i64,
         answer_controls: AnswerControls,
         db: crate::db::Database,
     ) -> Self {
@@ -75,6 +76,7 @@ impl DrillSession {
             mutable: MutableState {
                 reveal: false,
                 db,
+                session_id,
                 cache,
                 cards,
                 reviews: Vec::new(),

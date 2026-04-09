@@ -262,7 +262,11 @@ mod tests {
             };
             reviews.push(review);
         }
-        coll.db.save_session(now, now, reviews)?;
+        let session_id = coll.db.create_session(now)?;
+        for review in &reviews {
+            coll.db.insert_review_immediately(session_id, review)?;
+        }
+        coll.db.close_session(session_id, now)?;
         // Export.
         export_collection(Some(dir.clone()), None)?;
         let tmp = create_tmp_directory()?;

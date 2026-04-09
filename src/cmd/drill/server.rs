@@ -164,6 +164,9 @@ pub async fn start_server(config: ServerConfig) -> Fallible<()> {
         cache.insert(card.hash(), performance)?;
     }
 
+    // Create the session row immediately so reviews can be written as they happen.
+    let session_id = db.create_session(config.session_started_at)?;
+
     // Create shutdown channel
     let (shutdown_tx, shutdown_rx) = channel();
 
@@ -176,6 +179,7 @@ pub async fn start_server(config: ServerConfig) -> Fallible<()> {
         mutable: Arc::new(Mutex::new(MutableState {
             reveal: false,
             db,
+            session_id,
             cache,
             cards: due_today,
             reviews: Vec::new(),

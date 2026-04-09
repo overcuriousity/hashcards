@@ -128,10 +128,10 @@ pub fn handle_action(
                 let card: Card = last_review.card;
                 let hash: CardHash = card.hash();
                 mutable.cards.insert(0, card);
-                // Restore the performance cache to the value in the database
-                // if it exists.
-                let performance = mutable.db.get_card_performance(hash)?;
-                mutable.cache.update(hash, performance)?;
+                // Void the review in the DB and restore prior performance.
+                mutable.db.void_review(last_review.review_id)?;
+                mutable.db.update_card_performance(hash, last_review.prev_performance)?;
+                mutable.cache.update(hash, last_review.prev_performance)?;
                 mutable.finished_at = None;
                 mutable.reveal = false;
                 mutable.card_shown_at = None;
@@ -182,11 +182,11 @@ pub fn handle_action(
                 let card: Card = mutable.cards.remove(0);
                 let hash: CardHash = card.hash();
                 let grade: Grade = action.grade();
-                let performance: Performance = mutable.cache.get(hash)?;
+                let prev_performance: Performance = mutable.cache.get(hash)?;
                 let performance: ReviewedPerformance =
-                    update_performance(performance, grade, reviewed_at);
-                let review = Review {
-                    card: card.clone(),
+                    update_performance(prev_performance, grade, reviewed_at);
+                let record = ReviewRecord {
+                    card_hash: hash,
                     reviewed_at,
                     grade,
                     stability: performance.stability,
@@ -196,10 +196,18 @@ pub fn handle_action(
                     due_date: performance.due_date,
                     duration_ms,
                 };
-
-                mutable
-                    .cache
-                    .update(hash, Performance::Reviewed(performance))?;
+                let new_performance = Performance::Reviewed(performance);
+                // Write to DB immediately so progress survives a dropped connection.
+                let review_id = mutable.db.insert_review_immediately(mutable.session_id, &record)?;
+                mutable.db.update_card_performance(hash, new_performance)?;
+                mutable.cache.update(hash, new_performance)?;
+                let review = Review {
+                    card: card.clone(),
+                    review_id,
+                    grade: record.grade,
+                    duration_ms: record.duration_ms,
+                    prev_performance,
+                };
                 if review.should_repeat() {
                     mutable.cards.push(card.clone());
                 }
@@ -217,20 +225,11 @@ pub fn handle_action(
     }
 }
 
-fn finish_session(mutable: &mut MutableState, session_started_at: Timestamp) -> Fallible<()> {
+fn finish_session(mutable: &mut MutableState, _session_started_at: Timestamp) -> Fallible<()> {
     log::debug!("Session completed");
     let session_ended_at = Timestamp::now();
-    let reviews: Vec<Review> = mutable.reviews.clone();
-    let reviews: Vec<ReviewRecord> = reviews.into_iter().map(Review::into_record).collect();
-    mutable
-        .db
-        .save_session(session_started_at, session_ended_at, reviews)?;
+    mutable.db.close_session(mutable.session_id, session_ended_at)?;
     mutable.finished_at = Some(session_ended_at);
-    for (card_hash, performance) in mutable.cache.iter() {
-        mutable
-            .db
-            .update_card_performance(*card_hash, *performance)?;
-    }
     Ok(())
 }
 
@@ -242,9 +241,12 @@ mod tests {
     use crate::db::Database;
 
     fn make_mutable() -> MutableState {
+        let db = Database::new(":memory:").unwrap();
+        let session_id = db.create_session(Timestamp::now()).unwrap();
         MutableState {
             reveal: false,
-            db: Database::new(":memory:").unwrap(),
+            session_id,
+            db,
             cache: Cache::new(),
             cards: Vec::new(),
             reviews: Vec::new(),

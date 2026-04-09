@@ -69,9 +69,6 @@ impl Cache {
         }
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = (&CardHash, &Performance)> {
-        self.changes.iter()
-    }
 }
 
 #[cfg(test)]
@@ -185,8 +182,8 @@ mod tests {
         let card_hash = CardHash::hash_bytes(b"a");
         let performance = Performance::New;
         cache.insert(card_hash, performance)?;
-        let mut iter = cache.iter();
-        let (key, value) = iter.next().unwrap();
+        let mut iter = cache.changes.iter();
+        let (key, value): (&CardHash, &Performance) = iter.next().unwrap();
         assert_eq!(*key, card_hash);
         assert!(value.is_new());
         assert!(iter.next().is_none());
