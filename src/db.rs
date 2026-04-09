@@ -293,7 +293,10 @@ impl Database {
         prev_performance: Performance,
     ) -> Fallible<()> {
         let tx = self.conn.transaction()?;
-        tx.execute("update reviews set voided = 1 where review_id = ?;", params![review_id])?;
+        let rows = tx.execute("update reviews set voided = 1 where review_id = ? and card_hash = ?;", params![review_id, card_hash])?;
+        if rows != 1 {
+            return fail("review not found or does not belong to this card");
+        }
         update_card_performance_tx(&tx, card_hash, prev_performance)?;
         tx.commit()?;
         Ok(())
@@ -735,7 +738,13 @@ mod tests {
         let fetched_review = &reviews[0];
         assert_eq!(fetched_review.review_id, review_id);
         assert_eq!(fetched_review.data.card_hash, card_hash);
+        assert_eq!(fetched_review.data.reviewed_at, now);
         assert_eq!(fetched_review.data.grade, Grade::Good);
+        assert_eq!(fetched_review.data.stability, 2.0);
+        assert_eq!(fetched_review.data.difficulty, 2.0);
+        assert_eq!(fetched_review.data.interval_raw, 1.0);
+        assert_eq!(fetched_review.data.interval_days, 1);
+        assert_eq!(fetched_review.data.due_date, now.date());
         assert_eq!(fetched_review.data.duration_ms, Some(3500));
         Ok(())
     }
