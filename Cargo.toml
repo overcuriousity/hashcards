@@ -16,7 +16,7 @@ clap = { version = "4.6.0", features = ["derive"] }
 env_logger = "0.11.10"
 log = "0.4.29"
 maud = "0.27.0"
-open = "5.3.3"
+open = "5.3.4"
 percent-encoding = "2.3.2"
 pulldown-cmark = "0.13.3"
 rusqlite = { version = "0.39.0", features = ["bundled"] }
