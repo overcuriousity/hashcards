@@ -95,6 +95,7 @@ pub fn render_session_page(ctx: &RenderContext, mutable: &MutableState) -> Falli
     };
     let progress_bar_style = format!("width: {}%;", percent_done);
     let card = mutable.cards[0].clone();
+    let is_bookmarked = mutable.db.bookmark_exists(card.hash())?;
     let coll_path = ctx.directory.to_path_buf();
     let deck_path = card.relative_file_path(&coll_path)?;
     let config = MarkdownRenderConfig {
@@ -122,6 +123,7 @@ pub fn render_session_page(ctx: &RenderContext, mutable: &MutableState) -> Falli
         html! {
             form action=(form_action) method="post" {
                 (undo_button(undo_disabled))
+                (bookmark_button(is_bookmarked))
                 div.spacer {}
                 div.grades {
                     (grades)
@@ -134,6 +136,7 @@ pub fn render_session_page(ctx: &RenderContext, mutable: &MutableState) -> Falli
         html! {
             form action=(form_action) method="post" {
                 (undo_button(undo_disabled))
+                (bookmark_button(is_bookmarked))
                 div.spacer {}
                 input id="reveal" type="submit" name="action" value="Reveal" title="Show the answer. Shortcut: space.";
                 div.spacer {}
@@ -393,5 +396,23 @@ fn undo_button(disabled: bool) -> Markup {
 fn end_button() -> Markup {
     html! {
         input id="end" type="submit" name="action" value="End" title="End the session (changes are saved)";
+    }
+}
+
+fn bookmark_button(is_bookmarked: bool) -> Markup {
+    if is_bookmarked {
+        html! {
+            button #bookmark .bookmark-active type="submit" name="action" value="Unbookmark"
+                title="Remove bookmark. Shortcut: b." {
+                "\u{2605} Bookmarked"
+            }
+        }
+    } else {
+        html! {
+            button #bookmark type="submit" name="action" value="Bookmark"
+                title="Bookmark this card for later editing. Shortcut: b." {
+                "\u{2606} Bookmark"
+            }
+        }
     }
 }

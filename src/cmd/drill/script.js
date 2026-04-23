@@ -40,14 +40,18 @@ document.addEventListener("DOMContentLoaded", function () {
 });
 
 document.addEventListener("keydown", function (event) {
-  // Skip during text input.
-  if (event.target.tagName === "INPUT" && event.target.type === "text") {
+  // Skip during text input or textarea.
+  if (
+    (event.target.tagName === "INPUT" && event.target.type === "text") ||
+    event.target.tagName === "TEXTAREA"
+  ) {
     return;
   }
 
   const keybindings = {
     " ": "reveal", // Space
     u: "undo",
+    b: "bookmark",
     1: "forgot",
     2: "hard",
     3: "good",

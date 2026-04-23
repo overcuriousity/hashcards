@@ -57,6 +57,12 @@ pub struct ReviewRow {
     pub data: ReviewRecord,
 }
 
+pub struct Bookmark {
+    pub card_hash: CardHash,
+    pub note: Option<String>,
+    pub created_at: Timestamp,
+}
+
 impl Database {
     pub fn new(database_path: &str) -> Fallible<Self> {
         let mut conn = Connection::open(database_path)?;
@@ -67,6 +73,7 @@ impl Database {
                 tx.execute_batch(include_str!("schema.sql"))?;
             } else {
                 migrate_add_duration_ms(&tx)?;
+                migrate_add_bookmarks(&tx)?;
             }
             tx.commit()?;
         }
@@ -275,10 +282,114 @@ impl Database {
     }
 
     /// Does a card with the given hash exist?
-    fn card_exists(&self, card_hash: CardHash) -> Fallible<bool> {
+    pub fn card_exists(&self, card_hash: CardHash) -> Fallible<bool> {
         let sql = "select count(*) from cards where card_hash = ?;";
         let count: i64 = self.conn.query_row(sql, [card_hash], |row| row.get(0))?;
         Ok(count > 0)
+    }
+
+    /// Insert a card only if it doesn't already exist.
+    pub fn insert_card_if_new(&self, card_hash: CardHash, added_at: Timestamp) -> Fallible<()> {
+        if !self.card_exists(card_hash)? {
+            self.insert_card(card_hash, added_at)?;
+        }
+        Ok(())
+    }
+
+    /// Rename a card hash in-place. Updates `reviews` and `bookmarks` via ON UPDATE CASCADE.
+    pub fn rename_card_hash(&self, old_hash: CardHash, new_hash: CardHash) -> Fallible<()> {
+        if !self.card_exists(old_hash)? {
+            return fail("Original card not found");
+        }
+        if self.card_exists(new_hash)? {
+            return fail("A card with the new content already exists");
+        }
+        let sql = "update cards set card_hash = ? where card_hash = ?;";
+        self.conn.execute(sql, params![new_hash, old_hash])?;
+        Ok(())
+    }
+
+    /// Does a bookmark for this card hash exist?
+    pub fn bookmark_exists(&self, card_hash: CardHash) -> Fallible<bool> {
+        let sql = "select count(*) from bookmarks where card_hash = ?;";
+        let count: i64 = self.conn.query_row(sql, [card_hash], |row| row.get(0))?;
+        Ok(count > 0)
+    }
+
+    /// Insert or replace a bookmark. If the card has no DB row yet, it is created first.
+    ///
+    /// Unlike reviews, bookmarks write to the DB mid-session so they survive aborted sessions.
+    pub fn insert_bookmark(
+        &self,
+        card_hash: CardHash,
+        note: Option<String>,
+        now: Timestamp,
+    ) -> Fallible<()> {
+        let sql = "insert or replace into bookmarks (card_hash, note, created_at) values (?, ?, ?);";
+        self.conn.execute(sql, params![card_hash, note, now])?;
+        Ok(())
+    }
+
+    /// Delete a bookmark.
+    pub fn delete_bookmark(&self, card_hash: CardHash) -> Fallible<()> {
+        let sql = "delete from bookmarks where card_hash = ?;";
+        self.conn.execute(sql, params![card_hash])?;
+        Ok(())
+    }
+
+    /// Get the bookmark for a card, if any.
+    #[allow(dead_code)]
+    pub fn get_bookmark(&self, card_hash: CardHash) -> Fallible<Option<Bookmark>> {
+        let sql = "select note, created_at from bookmarks where card_hash = ?;";
+        let mut stmt = self.conn.prepare(sql)?;
+        let mut rows = stmt.query_map(params![card_hash], |row| {
+            Ok(Bookmark {
+                card_hash,
+                note: row.get(0)?,
+                created_at: row.get(1)?,
+            })
+        })?;
+        if let Some(row) = rows.next() {
+            Ok(Some(row?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// List all bookmarks, newest first.
+    pub fn list_bookmarks(&self) -> Fallible<Vec<Bookmark>> {
+        let sql = "select card_hash, note, created_at from bookmarks order by created_at desc;";
+        let mut stmt = self.conn.prepare(sql)?;
+        let rows = stmt.query_map([], |row| {
+            Ok(Bookmark {
+                card_hash: row.get(0)?,
+                note: row.get(1)?,
+                created_at: row.get(2)?,
+            })
+        })?;
+        let mut bookmarks = Vec::new();
+        for row in rows {
+            bookmarks.push(row?);
+        }
+        Ok(bookmarks)
+    }
+
+    /// Update the note on an existing bookmark.
+    pub fn update_bookmark_note(
+        &self,
+        card_hash: CardHash,
+        note: Option<String>,
+    ) -> Fallible<()> {
+        let sql = "update bookmarks set note = ? where card_hash = ?;";
+        self.conn.execute(sql, params![note, card_hash])?;
+        Ok(())
+    }
+
+    /// Count the number of bookmarks in the database.
+    pub fn count_bookmarks(&self) -> Fallible<usize> {
+        let sql = "select count(*) from bookmarks;";
+        let count: i64 = self.conn.query_row(sql, [], |row| row.get(0))?;
+        Ok(count as usize)
     }
 
     /// Count the number of reviews performed in the given date.
@@ -339,6 +450,24 @@ fn migrate_add_duration_ms(tx: &Transaction) -> Fallible<()> {
     let count: i64 = tx.query_row(sql, [], |row| row.get(0))?;
     if count == 0 {
         tx.execute_batch("alter table reviews add column duration_ms integer;")?;
+    }
+    Ok(())
+}
+
+fn migrate_add_bookmarks(tx: &Transaction) -> Fallible<()> {
+    let sql = "select count(*) from sqlite_master where type='table' AND name='bookmarks';";
+    let count: i64 = tx.query_row(sql, [], |row| row.get(0))?;
+    if count == 0 {
+        tx.execute_batch(
+            "create table bookmarks (
+                card_hash text primary key
+                    references cards (card_hash)
+                    on update cascade
+                    on delete cascade,
+                note text,
+                created_at text not null
+            ) strict;",
+        )?;
     }
     Ok(())
 }
@@ -515,6 +644,91 @@ mod tests {
             err.to_string(),
             format!("error: No performance data found for card with hash {card_hash}")
         );
+        Ok(())
+    }
+
+    /// Round-trip bookmark insert/get/list/delete.
+    #[test]
+    fn test_bookmark_crud() -> Fallible<()> {
+        let db = Database::new(":memory:")?;
+        let hash = CardHash::hash_bytes(b"a");
+        let now = Timestamp::now();
+        db.insert_card(hash, now)?;
+
+        assert!(!db.bookmark_exists(hash)?);
+        db.insert_bookmark(hash, Some("needs rephrasing".to_string()), now)?;
+        assert!(db.bookmark_exists(hash)?);
+
+        let bm = db.get_bookmark(hash)?.unwrap();
+        assert_eq!(bm.card_hash, hash);
+        assert_eq!(bm.note, Some("needs rephrasing".to_string()));
+
+        let list = db.list_bookmarks()?;
+        assert_eq!(list.len(), 1);
+
+        db.update_bookmark_note(hash, None)?;
+        let bm = db.get_bookmark(hash)?.unwrap();
+        assert_eq!(bm.note, None);
+
+        db.delete_bookmark(hash)?;
+        assert!(!db.bookmark_exists(hash)?);
+        Ok(())
+    }
+
+    /// Deleting a card cascades to its bookmark.
+    #[test]
+    fn test_bookmark_cascade_delete() -> Fallible<()> {
+        let db = Database::new(":memory:")?;
+        let hash = CardHash::hash_bytes(b"a");
+        let now = Timestamp::now();
+        db.insert_card(hash, now)?;
+        db.insert_bookmark(hash, None, now)?;
+        assert!(db.bookmark_exists(hash)?);
+        db.delete_card(hash)?;
+        assert!(!db.bookmark_exists(hash)?);
+        Ok(())
+    }
+
+    /// rename_card_hash migrates the bookmark FK via ON UPDATE CASCADE.
+    #[test]
+    fn test_rename_card_hash_cascades_bookmark() -> Fallible<()> {
+        let db = Database::new(":memory:")?;
+        let old_hash = CardHash::hash_bytes(b"old");
+        let new_hash = CardHash::hash_bytes(b"new");
+        let now = Timestamp::now();
+        db.insert_card(old_hash, now)?;
+        db.insert_bookmark(old_hash, Some("note".to_string()), now)?;
+        db.rename_card_hash(old_hash, new_hash)?;
+        assert!(!db.bookmark_exists(old_hash)?);
+        assert!(db.bookmark_exists(new_hash)?);
+        let bm = db.get_bookmark(new_hash)?.unwrap();
+        assert_eq!(bm.note, Some("note".to_string()));
+        Ok(())
+    }
+
+    /// rename_card_hash fails when the new hash already exists.
+    #[test]
+    fn test_rename_card_hash_conflict() -> Fallible<()> {
+        let db = Database::new(":memory:")?;
+        let hash_a = CardHash::hash_bytes(b"a");
+        let hash_b = CardHash::hash_bytes(b"b");
+        let now = Timestamp::now();
+        db.insert_card(hash_a, now)?;
+        db.insert_card(hash_b, now)?;
+        let result = db.rename_card_hash(hash_a, hash_b);
+        assert!(result.is_err());
+        Ok(())
+    }
+
+    /// insert_card_if_new inserts only when missing.
+    #[test]
+    fn test_insert_card_if_new() -> Fallible<()> {
+        let db = Database::new(":memory:")?;
+        let hash = CardHash::hash_bytes(b"a");
+        let now = Timestamp::now();
+        db.insert_card_if_new(hash, now)?;
+        db.insert_card_if_new(hash, now)?; // no error on second call
+        assert_eq!(db.card_hashes()?.len(), 1);
         Ok(())
     }
 }
