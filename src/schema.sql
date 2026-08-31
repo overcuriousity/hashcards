@@ -35,7 +35,8 @@ create table reviews (
     interval_raw real not null,
     interval_days integer not null,
     due_date text not null,
-    duration_ms integer
+    duration_ms integer,
+    voided integer not null default 0
 ) strict;
 
 create table bookmarks (

@@ -19,10 +19,10 @@ use crate::cmd::drill::get::RenderContext;
 use crate::cmd::drill::get::render_completion_page;
 use crate::cmd::drill::get::render_session_page;
 use crate::cmd::drill::post::Action;
-use crate::cmd::drill::post::ActionResult;
 use crate::cmd::drill::post::FormData;
 use crate::cmd::drill::post::handle_action;
 use crate::cmd::drill::server::escape_js_string_literal;
+use crate::cmd::drill::state::MutableState;
 use crate::cmd::drill::template::page_template;
 use crate::cmd::drill::template::page_template_with_script;
 use crate::cmd::serve::browse::build_deck_tree;
@@ -310,16 +310,17 @@ fn create_session(
         cache.insert(card.hash(), performance)?;
     }
 
+    // Create the session row immediately so reviews can be written as they happen.
+    let session_id = collection.db.create_session(session_started_at)?;
+
     let answer_controls = state.config.defaults.answer_controls.into();
 
     Ok(Some(DrillSession::new(
         collection.directory,
         collection.macros,
-        due_cards,
-        cache,
         session_started_at,
         answer_controls,
-        collection.db,
+        MutableState::new(collection.db, session_id, cache, due_cards),
     )))
 }
 
@@ -353,9 +354,20 @@ pub async fn collection_post_handler(
 }
 
 fn collection_post_inner(state: &AppState, slug: &str, action: Action) -> Fallible<Redirect> {
-    // Home action: drop session without needing to hold lock during DB work
+    // Home action: close the session and drop it without needing to hold the
+    // global lock during DB work.
     if matches!(action, Action::Home) {
-        state.sessions.lock().unwrap().remove(slug);
+        let session = state.sessions.lock().unwrap().remove(slug);
+        if let Some(s) = session {
+            if s.mutable.finished_at.is_none() {
+                if let Err(e) = s.mutable.db.close_session(s.mutable.session_id, Timestamp::now()) {
+                    log::error!(
+                        "failed to close session {} for collection {slug}: {e}",
+                        s.mutable.session_id
+                    );
+                }
+            }
+        }
 
         // Snapshot inputs, then compute + update in background (don't block response).
         let sources_snapshot = state.hedgedoc_sources.lock().unwrap().clone();
@@ -376,29 +388,15 @@ fn collection_post_inner(state: &AppState, slug: &str, action: Action) -> Fallib
         None => return Ok(Redirect::to(&format!("/collection/{slug}"))),
     };
 
-    let result = handle_action(
-        &mut session.mutable,
-        session.session_started_at,
-        action,
-    )?;
+    // `Action::Home` returned early above, and it is the only action for which
+    // `handle_action` yields `ActionResult::Home`. Every action reaching here
+    // therefore leaves the session running, so the result needs no dispatch and
+    // session closing lives solely in that early return, where it cannot drift
+    // out of step with a second copy.
+    handle_action(&mut session.mutable, session.session_started_at, action)?;
 
-    match result {
-        ActionResult::Home => {
-            // Snapshot inputs, then compute + update in background (don't block response).
-            let sources_snapshot = state.hedgedoc_sources.lock().unwrap().clone();
-            let static_collections = state.config.collections.clone();
-            let collections_clone = state.collections.clone();
-            tokio::spawn(async move {
-                let combined = build_combined_infos(&static_collections, &sources_snapshot);
-                *collections_clone.write().await = combined;
-            });
-            Ok(Redirect::to("/"))
-        }
-        _ => {
-            state.sessions.lock().unwrap().insert(slug.to_owned(), session);
-            Ok(Redirect::to(&format!("/collection/{slug}")))
-        }
-    }
+    state.sessions.lock().unwrap().insert(slug.to_owned(), session);
+    Ok(Redirect::to(&format!("/collection/{slug}")))
 }
 
 pub async fn collection_file_handler(

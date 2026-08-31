@@ -164,6 +164,9 @@ pub async fn start_server(config: ServerConfig) -> Fallible<()> {
         cache.insert(card.hash(), performance)?;
     }
 
+    // Create the session row immediately so reviews can be written as they happen.
+    let session_id = db.create_session(config.session_started_at)?;
+
     // Create shutdown channel
     let (shutdown_tx, shutdown_rx) = channel();
 
@@ -176,6 +179,7 @@ pub async fn start_server(config: ServerConfig) -> Fallible<()> {
         mutable: Arc::new(Mutex::new(MutableState {
             reveal: false,
             db,
+            session_id,
             cache,
             cards: due_today,
             reviews: Vec::new(),
@@ -214,10 +218,15 @@ pub async fn start_server(config: ServerConfig) -> Fallible<()> {
     // Check if session was complete when server shut down
     let mutable = state.mutable.lock().unwrap();
     if mutable.finished_at.is_some() {
-        // Session was complete, exit with code 0
         Ok(())
     } else {
-        // Session was not complete, exit with error code
+        // Mark the session as closed so ended_at reflects the actual stop time.
+        if let Err(e) = mutable.db.close_session(mutable.session_id, Timestamp::now()) {
+            log::error!(
+                "failed to close interrupted session {}: {e}",
+                mutable.session_id
+            );
+        }
         fail("Session interrupted before completion")
     }
 }

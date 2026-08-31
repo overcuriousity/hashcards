@@ -5,7 +5,6 @@ use std::sync::Mutex;
 
 use tokio::sync::RwLock;
 
-use crate::cmd::drill::cache::Cache;
 use crate::cmd::drill::server::AnswerControls;
 use crate::cmd::drill::state::MutableState;
 use crate::cmd::serve::config::ResolvedCollection;
@@ -59,28 +58,17 @@ impl DrillSession {
     pub fn new(
         directory: PathBuf,
         macros: Vec<(String, String)>,
-        cards: Vec<crate::types::card::Card>,
-        cache: Cache,
         session_started_at: Timestamp,
         answer_controls: AnswerControls,
-        db: crate::db::Database,
+        mutable: MutableState,
     ) -> Self {
-        let total_cards = cards.len();
         Self {
             directory,
             macros,
-            total_cards,
+            total_cards: mutable.cards.len(),
             session_started_at,
             answer_controls,
-            mutable: MutableState {
-                reveal: false,
-                db,
-                cache,
-                cards,
-                reviews: Vec::new(),
-                finished_at: None,
-                card_shown_at: None,
-            },
+            mutable,
         }
     }
 }

@@ -74,6 +74,7 @@ impl Database {
             } else {
                 migrate_add_duration_ms(&tx)?;
                 migrate_add_bookmarks(&tx)?;
+                migrate_add_voided(&tx)?;
             }
             tx.commit()?;
         }
@@ -192,6 +193,11 @@ impl Database {
     /// Update a card's performance information.
     ///
     /// If no card with the given hash exists, returns an error.
+    ///
+    /// Test-only: production grading updates performance inside the same
+    /// transaction as the review, via
+    /// [`Database::insert_review_and_update_performance`].
+    #[cfg(test)]
     pub fn update_card_performance(
         &self,
         card_hash: CardHash,
@@ -235,19 +241,31 @@ impl Database {
         Ok(())
     }
 
-    /// Save a session.
-    pub fn save_session(
-        &mut self,
-        started_at: Timestamp,
-        ended_at: Timestamp,
-        reviews: Vec<ReviewRecord>,
-    ) -> Fallible<()> {
-        let tx = self.conn.transaction()?;
+    /// Create a new session row at session start. Returns the session_id.
+    /// ended_at is initially set to started_at as a placeholder; call
+    /// close_session when the session finishes.
+    pub fn create_session(&self, started_at: Timestamp) -> Fallible<i64> {
         let sql = "insert into sessions (started_at, ended_at) values (?, ?) returning session_id;";
-        let session_id: i64 = tx.query_row(sql, params![started_at, ended_at], |row| row.get(0))?;
-        for review in reviews {
-            let sql = "insert into reviews (session_id, card_hash, reviewed_at, grade, stability, difficulty, interval_raw, interval_days, due_date, duration_ms) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);";
-            tx.execute(
+        let session_id: i64 =
+            self.conn
+                .query_row(sql, params![started_at, started_at], |row| row.get(0))?;
+        Ok(session_id)
+    }
+
+    /// Atomically insert a review and update the card's performance.
+    ///
+    /// Both operations run inside a single transaction so a crash between them
+    /// cannot leave the DB in an inconsistent state. Returns the new review_id.
+    pub fn insert_review_and_update_performance(
+        &mut self,
+        session_id: i64,
+        review: &ReviewRecord,
+        performance: Performance,
+    ) -> Fallible<i64> {
+        let tx = self.conn.transaction()?;
+        let review_id: i64 = {
+            let sql = "insert into reviews (session_id, card_hash, reviewed_at, grade, stability, difficulty, interval_raw, interval_days, due_date, duration_ms) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) returning review_id;";
+            tx.query_row(
                 sql,
                 params![
                     session_id,
@@ -261,9 +279,72 @@ impl Database {
                     review.due_date,
                     review.duration_ms
                 ],
-            )?;
-        }
+                |row| row.get(0),
+            )?
+        };
+        update_card_performance_tx(&tx, review.card_hash, performance)?;
         tx.commit()?;
+        Ok(review_id)
+    }
+
+    /// Atomically void a review and restore prior card performance (undo).
+    ///
+    /// Both operations run inside a single transaction so a crash between them
+    /// cannot leave the DB in an inconsistent state.
+    pub fn void_review_and_restore_performance(
+        &mut self,
+        review_id: i64,
+        card_hash: CardHash,
+        prev_performance: Performance,
+    ) -> Fallible<()> {
+        let tx = self.conn.transaction()?;
+        let rows = tx.execute("update reviews set voided = 1 where review_id = ? and card_hash = ?;", params![review_id, card_hash])?;
+        if rows != 1 {
+            return fail("review not found or does not belong to this card");
+        }
+        update_card_performance_tx(&tx, card_hash, prev_performance)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Insert a single review without touching card performance.
+    ///
+    /// Test-only: production grading goes through
+    /// [`Database::insert_review_and_update_performance`], which keeps the
+    /// review and the card's performance in one transaction.
+    #[cfg(test)]
+    pub fn insert_review_immediately(
+        &self,
+        session_id: i64,
+        review: &ReviewRecord,
+    ) -> Fallible<i64> {
+        let sql = "insert into reviews (session_id, card_hash, reviewed_at, grade, stability, difficulty, interval_raw, interval_days, due_date, duration_ms) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) returning review_id;";
+        let review_id: i64 = self.conn.query_row(
+            sql,
+            params![
+                session_id,
+                review.card_hash,
+                review.reviewed_at,
+                review.grade,
+                review.stability,
+                review.difficulty,
+                review.interval_raw,
+                review.interval_days as i32,
+                review.due_date,
+                review.duration_ms
+            ],
+            |row| row.get(0),
+        )?;
+        Ok(review_id)
+    }
+
+    /// Update ended_at to mark a session as complete.
+    pub fn close_session(&self, session_id: i64, ended_at: Timestamp) -> Fallible<()> {
+        let sql = "update sessions set ended_at = ? where session_id = ?;";
+        let rows = self.conn.execute(sql, params![ended_at, session_id])?;
+        if rows != 1 {
+            return fail(format!("No session with ID {session_id} to close"));
+        }
         Ok(())
     }
 
@@ -392,9 +473,9 @@ impl Database {
         Ok(count as usize)
     }
 
-    /// Count the number of reviews performed in the given date.
+    /// Count the number of non-voided reviews performed on the given date.
     pub fn count_reviews_in_date(&self, date: Date) -> Fallible<usize> {
-        let sql = "select count(*) from reviews where substr(reviewed_at, 1, 10) = ?;";
+        let sql = "select count(*) from reviews where substr(reviewed_at, 1, 10) = ? and voided = 0;";
         let count: i64 = self.conn.query_row(sql, params![date], |row| row.get(0))?;
         Ok(count as usize)
     }
@@ -417,9 +498,9 @@ impl Database {
         Ok(sessions)
     }
 
-    /// Get the list of all reviews for a given session.
+    /// Get the list of all non-voided reviews for a given session.
     pub fn get_reviews_for_session(&self, session_id: i64) -> Fallible<Vec<ReviewRow>> {
-        let sql = "select review_id, card_hash, reviewed_at, grade, stability, difficulty, interval_raw, interval_days, due_date, duration_ms from reviews where session_id = ? order by reviewed_at;";
+        let sql = "select review_id, card_hash, reviewed_at, grade, stability, difficulty, interval_raw, interval_days, due_date, duration_ms from reviews where session_id = ? and voided = 0 order by reviewed_at;";
         let mut stmt = self.conn.prepare(sql)?;
         let review_iter = stmt.query_map(params![session_id], |row| {
             Ok(ReviewRow {
@@ -445,6 +526,44 @@ impl Database {
     }
 }
 
+fn update_card_performance_tx(tx: &Transaction, card_hash: CardHash, performance: Performance) -> Fallible<()> {
+    let (
+        last_reviewed_at,
+        stability,
+        difficulty,
+        interval_raw,
+        interval_days,
+        due_date,
+        review_count,
+    ) = match performance {
+        Performance::New => (None, None, None, None, None, None, 0i32),
+        Performance::Reviewed(rp) => (
+            Some(rp.last_reviewed_at),
+            Some(rp.stability),
+            Some(rp.difficulty),
+            Some(rp.interval_raw),
+            Some(rp.interval_days as i32),
+            Some(rp.due_date),
+            rp.review_count as i32,
+        ),
+    };
+    let sql = "update cards set last_reviewed_at = ?, stability = ?, difficulty = ?, interval_raw = ?, interval_days = ?, due_date = ?, review_count = ? where card_hash = ?;";
+    tx.execute(
+        sql,
+        params![
+            last_reviewed_at,
+            stability,
+            difficulty,
+            interval_raw,
+            interval_days,
+            due_date,
+            review_count,
+            card_hash
+        ],
+    )?;
+    Ok(())
+}
+
 fn migrate_add_duration_ms(tx: &Transaction) -> Fallible<()> {
     let sql = "select count(*) from pragma_table_info('reviews') where name = 'duration_ms';";
     let count: i64 = tx.query_row(sql, [], |row| row.get(0))?;
@@ -468,6 +587,15 @@ fn migrate_add_bookmarks(tx: &Transaction) -> Fallible<()> {
                 created_at text not null
             ) strict;",
         )?;
+    }
+    Ok(())
+}
+
+fn migrate_add_voided(tx: &Transaction) -> Fallible<()> {
+    let sql = "select count(*) from pragma_table_info('reviews') where name = 'voided';";
+    let count: i64 = tx.query_row(sql, [], |row| row.get(0))?;
+    if count == 0 {
+        tx.execute_batch("alter table reviews add column voided integer not null default 0;")?;
     }
     Ok(())
 }
@@ -577,13 +705,15 @@ mod tests {
         Ok(())
     }
 
-    /// Save a session.
+    /// Create a session, insert a review immediately, and close the session.
     #[test]
-    fn test_save_session() -> Fallible<()> {
-        let mut db = Database::new(":memory:")?;
+    fn test_session_persistence() -> Fallible<()> {
+        let db = Database::new(":memory:")?;
         let card_hash = CardHash::hash_bytes(b"a");
         let now = Timestamp::now();
         db.insert_card(card_hash, now)?;
+
+        let session_id = db.create_session(now)?;
         let review = ReviewRecord {
             card_hash,
             reviewed_at: now,
@@ -595,7 +725,8 @@ mod tests {
             due_date: now.date(),
             duration_ms: Some(3500),
         };
-        db.save_session(now, now, vec![review])?;
+        let review_id = db.insert_review_immediately(session_id, &review)?;
+        db.close_session(session_id, now)?;
 
         let sessions = db.get_all_sessions()?;
         assert_eq!(sessions.len(), 1);
@@ -605,6 +736,7 @@ mod tests {
         let reviews = db.get_reviews_for_session(session.session_id)?;
         assert_eq!(reviews.len(), 1);
         let fetched_review = &reviews[0];
+        assert_eq!(fetched_review.review_id, review_id);
         assert_eq!(fetched_review.data.card_hash, card_hash);
         assert_eq!(fetched_review.data.reviewed_at, now);
         assert_eq!(fetched_review.data.grade, Grade::Good);
@@ -614,6 +746,150 @@ mod tests {
         assert_eq!(fetched_review.data.interval_days, 1);
         assert_eq!(fetched_review.data.due_date, now.date());
         assert_eq!(fetched_review.data.duration_ms, Some(3500));
+        Ok(())
+    }
+
+    /// Build a review record for `card_hash` with the given stability.
+    #[cfg(test)]
+    fn sample_review(card_hash: CardHash, now: Timestamp, stability: f64) -> ReviewRecord {
+        ReviewRecord {
+            card_hash,
+            reviewed_at: now,
+            grade: Grade::Good,
+            stability,
+            difficulty: 2.0,
+            interval_raw: 1.0,
+            interval_days: 1,
+            due_date: now.date(),
+            duration_ms: None,
+        }
+    }
+
+    /// Build a reviewed performance with the given stability and review count.
+    #[cfg(test)]
+    fn sample_performance(now: Timestamp, stability: f64, review_count: usize) -> Performance {
+        Performance::Reviewed(ReviewedPerformance {
+            last_reviewed_at: now,
+            stability,
+            difficulty: 2.0,
+            interval_raw: 1.0,
+            interval_days: 1,
+            due_date: now.date(),
+            review_count,
+        })
+    }
+
+    /// Grading writes the review and the card's performance in one transaction.
+    #[test]
+    fn test_insert_review_and_update_performance() -> Fallible<()> {
+        let mut db = Database::new(":memory:")?;
+        let card_hash = CardHash::hash_bytes(b"a");
+        let now = Timestamp::now();
+        db.insert_card(card_hash, now)?;
+        assert!(matches!(db.get_card_performance(card_hash)?, Performance::New));
+
+        let session_id = db.create_session(now)?;
+        let review = sample_review(card_hash, now, 2.0);
+        let performance = sample_performance(now, 2.0, 1);
+        let review_id =
+            db.insert_review_and_update_performance(session_id, &review, performance)?;
+
+        // The review landed...
+        let reviews = db.get_reviews_for_session(session_id)?;
+        assert_eq!(reviews.len(), 1);
+        assert_eq!(reviews[0].review_id, review_id);
+
+        // ...and the card's performance moved with it.
+        match db.get_card_performance(card_hash)? {
+            Performance::Reviewed(rp) => {
+                assert_eq!(rp.stability, 2.0);
+                assert_eq!(rp.review_count, 1);
+            }
+            Performance::New => panic!("expected card performance to be updated"),
+        }
+        Ok(())
+    }
+
+    /// Undo voids the review and restores the card's prior performance, atomically.
+    #[test]
+    fn test_void_review_and_restore_performance() -> Fallible<()> {
+        let mut db = Database::new(":memory:")?;
+        let card_hash = CardHash::hash_bytes(b"a");
+        let now = Timestamp::now();
+        db.insert_card(card_hash, now)?;
+
+        let session_id = db.create_session(now)?;
+        // First grade: stability 2.0, one review.
+        let first = sample_review(card_hash, now, 2.0);
+        db.insert_review_and_update_performance(session_id, &first, sample_performance(now, 2.0, 1))?;
+        // Second grade: stability 5.0, two reviews.
+        let second = sample_review(card_hash, now, 5.0);
+        let second_id = db.insert_review_and_update_performance(
+            session_id,
+            &second,
+            sample_performance(now, 5.0, 2),
+        )?;
+        assert_eq!(db.get_reviews_for_session(session_id)?.len(), 2);
+
+        // Undo the second grade, restoring the performance the card had before it.
+        db.void_review_and_restore_performance(second_id, card_hash, sample_performance(now, 2.0, 1))?;
+
+        // The voided review is excluded from read paths...
+        let reviews = db.get_reviews_for_session(session_id)?;
+        assert_eq!(reviews.len(), 1);
+        assert_ne!(reviews[0].review_id, second_id);
+        assert_eq!(db.count_reviews_in_date(now.date())?, 1);
+
+        // ...and the card's performance rolled back.
+        match db.get_card_performance(card_hash)? {
+            Performance::Reviewed(rp) => {
+                assert_eq!(rp.stability, 2.0);
+                assert_eq!(rp.review_count, 1);
+            }
+            Performance::New => panic!("expected card to still be reviewed"),
+        }
+        Ok(())
+    }
+
+    /// Voiding a review that does not belong to the given card is rejected,
+    /// and leaves the card's performance untouched.
+    #[test]
+    fn test_void_review_wrong_card_is_rejected() -> Fallible<()> {
+        let mut db = Database::new(":memory:")?;
+        let card_hash = CardHash::hash_bytes(b"a");
+        let other_hash = CardHash::hash_bytes(b"b");
+        let now = Timestamp::now();
+        db.insert_card(card_hash, now)?;
+        db.insert_card(other_hash, now)?;
+
+        let session_id = db.create_session(now)?;
+        let review = sample_review(card_hash, now, 2.0);
+        let review_id =
+            db.insert_review_and_update_performance(session_id, &review, sample_performance(now, 2.0, 1))?;
+
+        // Same review ID, wrong card: must fail rather than corrupt state.
+        let result = db.void_review_and_restore_performance(
+            review_id,
+            other_hash,
+            sample_performance(now, 9.0, 7),
+        );
+        assert!(result.is_err());
+
+        // The review is still live and neither card was modified.
+        assert_eq!(db.get_reviews_for_session(session_id)?.len(), 1);
+        match db.get_card_performance(card_hash)? {
+            Performance::Reviewed(rp) => assert_eq!(rp.stability, 2.0),
+            Performance::New => panic!("expected card to remain reviewed"),
+        }
+        assert!(matches!(db.get_card_performance(other_hash)?, Performance::New));
+        Ok(())
+    }
+
+    /// Closing a session that does not exist is an error, not a silent no-op.
+    #[test]
+    fn test_close_nonexistent_session_is_error() -> Fallible<()> {
+        let db = Database::new(":memory:")?;
+        assert!(db.close_session(999, Timestamp::now()).is_err());
         Ok(())
     }
 

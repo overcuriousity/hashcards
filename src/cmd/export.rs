@@ -233,7 +233,7 @@ mod tests {
     #[test]
     fn test_full_export() -> Fallible<()> {
         let dir = create_tmp_copy_of_test_directory()?;
-        let mut coll = Collection::new(Some(dir.clone()))?;
+        let coll = Collection::new(Some(dir.clone()))?;
         let deck = parse_deck(&PathBuf::from(dir.clone()))?;
         let now = Timestamp::now();
         let mut reviews = Vec::new();
@@ -262,7 +262,11 @@ mod tests {
             };
             reviews.push(review);
         }
-        coll.db.save_session(now, now, reviews)?;
+        let session_id = coll.db.create_session(now)?;
+        for review in &reviews {
+            coll.db.insert_review_immediately(session_id, review)?;
+        }
+        coll.db.close_session(session_id, now)?;
         // Export.
         export_collection(Some(dir.clone()), None)?;
         let tmp = create_tmp_directory()?;
