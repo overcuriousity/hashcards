@@ -13,29 +13,37 @@
 // limitations under the License.
 
 document.addEventListener("DOMContentLoaded", function () {
-  // Render inline math
-  document.querySelectorAll(".math-inline").forEach(function (element) {
-    katex.render(element.textContent, element, {
-      displayMode: false,
-      throwOnError: false,
-      macros: MACROS,
-    });
-  });
-  // Render display math
-  document.querySelectorAll(".math-display").forEach(function (element) {
-    katex.render(element.textContent, element, {
-      displayMode: true,
-      throwOnError: false,
-      macros: MACROS,
-    });
-  });
-  // Initialize syntax highlighting
-  if (typeof hljs !== "undefined") {
-    hljs.highlightAll();
-  }
-  const cardContent = document.querySelector(".card-content");
-  if (cardContent) {
-    cardContent.style.opacity = "1";
+  try {
+    if (typeof katex !== "undefined") {
+      // Render inline math
+      document.querySelectorAll(".math-inline").forEach(function (element) {
+        katex.render(element.textContent, element, {
+          displayMode: false,
+          throwOnError: false,
+          macros: MACROS,
+        });
+      });
+      // Render display math
+      document.querySelectorAll(".math-display").forEach(function (element) {
+        katex.render(element.textContent, element, {
+          displayMode: true,
+          throwOnError: false,
+          macros: MACROS,
+        });
+      });
+    }
+    // Initialize syntax highlighting
+    if (typeof hljs !== "undefined") {
+      hljs.highlightAll();
+    }
+  } finally {
+    // The card content must become visible no matter what failed above
+    // (BUG-25): the page bootstraps with `.card-content { opacity: 0 }`
+    // to avoid a flash of unrendered math.
+    const cardContent = document.querySelector(".card-content");
+    if (cardContent) {
+      cardContent.style.opacity = "1";
+    }
   }
 });
 

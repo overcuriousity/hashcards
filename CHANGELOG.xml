@@ -73,7 +73,21 @@
             <change author="claude">
                 Cloze deletion positions are documented as byte offsets (they were previously described as character positions, including in the JSON export), and a non-ASCII cloze round-trip test now pins this behavior. (BUG-26)
             </change>
+            <change author="claude">
+                Cloze cards whose text literally contains the string `CLOZE_DELETION` no longer render that text as a spurious cloze blank. The internal placeholder is now generated per render and checked against the card text.
+            </change>
+            <change author="claude">
+                Cards no longer stay permanently invisible when the KaTeX script fails to load or math rendering throws: card content visibility is now restored even when rendering fails.
+            </change>
         </fixed>
+        <security>
+            <change author="claude">
+                Titles of audio media references are now HTML-escaped before being embedded in the audio element, preventing HTML injection through a crafted markdown title.
+            </change>
+            <change author="claude">
+                HedgeDoc source URLs are now validated at storage time (well-formed HTTPS only) and re-checked at render time, so a link with an unsafe scheme such as `javascript:` can never be stored or rendered as a clickable link.
+            </change>
+        </security>
         <added>
             <change author="claude">
                 Flash messages: actions in the drill and serve web interfaces now show one-shot success/error banners (dismissible) instead of failing or succeeding silently. The message travels as query parameters across the post-redirect.

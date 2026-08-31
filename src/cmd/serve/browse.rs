@@ -6,6 +6,7 @@ use maud::Markup;
 use maud::html;
 
 use crate::cmd::drill::template::page_template;
+use crate::cmd::serve::href::safe_href;
 use crate::collection::Collection;
 use crate::error::Fallible;
 use crate::flash::Flash;
@@ -224,7 +225,7 @@ fn render_deck_node(node: &DeckNode, depth: usize, hedge_urls: &HashMap<String, 
     let due = node.due_today_recursive();
     let has_children = !node.children.is_empty();
     let edit_url = if !has_children {
-        hedge_urls.get(&node.path)
+        hedge_urls.get(&node.path).and_then(|url| safe_href(url))
     } else {
         None
     };
@@ -340,3 +341,33 @@ function updateDrillButton() {
     btn.disabled = totalDue === 0;
 }
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn browse_page_never_links_unsafe_edit_urls() {
+        // Regression test for BUG-24 (render-time guard on edit links).
+        let tree = DeckNode {
+            name: String::new(),
+            path: String::new(),
+            total_cards: 0,
+            due_today: 0,
+            children: vec![DeckNode {
+                name: "deck".to_string(),
+                path: "deck".to_string(),
+                total_cards: 1,
+                due_today: 1,
+                children: vec![],
+            }],
+        };
+        let mut hedge_urls: HashMap<String, String> = HashMap::new();
+        hedge_urls.insert("deck".to_string(), "javascript:alert(1)".to_string());
+        let html = render_browse_page("Coll", "coll", &tree, &hedge_urls, 0).into_string();
+        assert!(
+            !html.contains(r#"href="javascript:"#),
+            "unsafe scheme must not become an edit link: {html}"
+        );
+    }
+}

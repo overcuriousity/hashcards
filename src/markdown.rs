@@ -41,6 +41,15 @@ fn is_audio_file(url: &str) -> bool {
     }
 }
 
+/// Escape a string for interpolation into a double-quoted HTML attribute.
+fn escape_attribute(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
 /// Configuration for Markdown rendering.
 pub struct MarkdownRenderConfig {
     /// A media resolver.
@@ -69,7 +78,8 @@ pub fn markdown_to_html(config: &MarkdownRenderConfig, markdown: &str) -> Fallib
                     Event::Html(CowStr::Boxed(
                         format!(
                             r#"<audio controls src="{}" title="{}"></audio>"#,
-                            url, title
+                            url,
+                            escape_attribute(&title)
                         )
                         .into_boxed_str(),
                     ))
@@ -155,8 +165,10 @@ mod tests {
         let coll_path: PathBuf = create_tmp_directory()?;
         let abs_deck_path: PathBuf = coll_path.join("deck.md");
         let image_path: PathBuf = coll_path.join("image.png");
+        let audio_path: PathBuf = coll_path.join("audio.mp3");
         std::fs::write(&abs_deck_path, "")?;
         std::fs::write(&image_path, "")?;
+        std::fs::write(&audio_path, "")?;
         let config = MarkdownRenderConfig {
             resolver: MediaResolverBuilder::new()
                 .with_collection_path(coll_path)?
@@ -219,6 +231,24 @@ mod tests {
         let config = make_test_config()?;
         let result = markdown_to_html(&config, markdown);
         assert!(result.is_err(), "non-http external URL should be rejected");
+        Ok(())
+    }
+
+    #[test]
+    fn test_audio_title_is_attribute_escaped() -> Fallible<()> {
+        // Regression test for BUG-23: the markdown image title is interpolated
+        // into an HTML attribute; `"` and `<` must be escaped.
+        let markdown = r#"![alt](@/audio.mp3 "a \" <b> title")"#;
+        let config = make_test_config()?;
+        let html = markdown_to_html(&config, markdown)?;
+        assert!(
+            html.contains(r#"title="a &quot; &lt;b&gt; title""#),
+            "title must be attribute-escaped: {html}"
+        );
+        assert!(
+            !html.contains(r#"<b> title"#),
+            "raw markup from the title must not appear in output: {html}"
+        );
         Ok(())
     }
 }

@@ -2,6 +2,7 @@ use maud::Markup;
 use maud::html;
 
 use crate::cmd::drill::template::page_template;
+use crate::cmd::serve::href::safe_href;
 use crate::cmd::serve::state::HedgedocSource;
 use crate::flash::Flash;
 use crate::types::timestamp::Timestamp;
@@ -71,7 +72,11 @@ pub fn render_manage_page(
                                         td { (src.collection.name) }
                                         td { (note.deck_name) }
                                         td.source-url-cell {
-                                            a href=(note.url) target="_blank" rel="noopener noreferrer" { (note.url) }
+                                            @if let Some(href) = safe_href(&note.url) {
+                                                a href=(href) target="_blank" rel="noopener noreferrer" { (note.url) }
+                                            } @else {
+                                                span { (note.url) }
+                                            }
                                         }
                                         td {
                                             @if let Some(ref err) = note.last_error {
@@ -96,4 +101,58 @@ pub fn render_manage_page(
             }
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::*;
+    use crate::cmd::serve::config::ResolvedCollection;
+    use crate::cmd::serve::state::HedgedocNote;
+
+    fn source_with_url(url: &str) -> HedgedocSource {
+        HedgedocSource {
+            source_uri: "https://notes.example.com".to_string(),
+            collection: ResolvedCollection {
+                name: "Notes".to_string(),
+                slug: "hedgedoc-notes".to_string(),
+                coll_dir: PathBuf::from("/tmp/notes"),
+                db_path: PathBuf::from("/tmp/notes.db"),
+            },
+            notes: vec![HedgedocNote {
+                url: url.to_string(),
+                deck_name: "deck".to_string(),
+                file_name: "deck.md".to_string(),
+                last_error: None,
+            }],
+        }
+    }
+
+    #[test]
+    fn manage_page_never_links_unsafe_url_schemes() {
+        // Regression test for BUG-24: even if a bad URL reaches the state
+        // (hand-edited config, pre-fix persisted data), it must not become
+        // a clickable link.
+        let sources = vec![source_with_url("javascript:alert(1)")];
+        let html = render_manage_page(&sources, None, true).into_string();
+        assert!(
+            !html.contains(r#"href="javascript:"#),
+            "unsafe scheme must not be rendered as a link: {html}"
+        );
+        assert!(
+            html.contains("javascript:alert(1)"),
+            "the URL should still be visible as plain text: {html}"
+        );
+    }
+
+    #[test]
+    fn manage_page_links_https_urls() {
+        let sources = vec![source_with_url("https://notes.example.com/abc")];
+        let html = render_manage_page(&sources, None, true).into_string();
+        assert!(
+            html.contains(r#"href="https://notes.example.com/abc""#),
+            "https URLs must still be linked: {html}"
+        );
+    }
 }
