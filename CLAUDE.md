@@ -14,6 +14,14 @@ hashcards is a plain-text spaced repetition system written in Rust. It parses Ma
 - Files are served via `/file/*path` endpoint, resolved relative to collection directory.
 - Path validation (in `cmd/drill/file.rs`) prevents directory traversal attacks.
 
+# Ongoing work
+
+- The big update (SPEC.md) is planned in `docs/superpowers/plans/`. Before
+  working on it, read `2026-08-31-00-master.md` there: it holds the status
+  ledger (claim a plan before starting), execution order, and the session
+  batching guide.
+- Path validation lives in `src/media/load.rs` (there is no `cmd/drill/file.rs`).
+
 # Rules
 
 - Use newtypes for domain concepts.
