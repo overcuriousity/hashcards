@@ -13,6 +13,9 @@
             <change author="claude">
                 An empty cloze deletion (`[]`) now produces a clear parse error with the file and line, instead of crashing the parser (debug builds) or silently corrupting cloze positions (release builds). (BUG-16)
             </change>
+            <change author="claude">
+                Nested cloze brackets (`[[a]]`) and cloze deletions left open at the end of a line or file now produce clear parse errors with the file and line, instead of silently dropping brackets or reporting a misleading "must contain at least one cloze deletion" message. (BUG-19)
+            </change>
         </fixed>
         <added>
             <change author="mstoeck3">

@@ -557,6 +557,12 @@ impl Parser {
                     // We are in escape mode, so this closing bracket is part of a markdown text.
                     index += 1;
                     escape_mode = false;
+                } else if start.is_some() {
+                    return Err(ParserError::new(
+                        "Nested cloze brackets.",
+                        self.file_path.clone(),
+                        start_line,
+                    ));
                 } else {
                     start = Some(index);
                 }
@@ -617,9 +623,26 @@ impl Parser {
                         }
                     }
                 }
+            } else if c == b'\n' {
+                if start.is_some() {
+                    return Err(ParserError::new(
+                        "Unterminated cloze deletion.",
+                        self.file_path.clone(),
+                        start_line,
+                    ));
+                }
+                index += 1;
             } else {
                 index += 1;
             }
+        }
+
+        if start.is_some() {
+            return Err(ParserError::new(
+                "Unterminated cloze deletion.",
+                self.file_path.clone(),
+                start_line,
+            ));
         }
 
         if cards.is_empty() {
@@ -900,6 +923,50 @@ mod tests {
         let cards = parser.parse(input)?;
         assert_cloze(&cards, "a", &[(0, 0)]);
         Ok(())
+    }
+
+    /// BUG-19: a `[` while a deletion is already open must be an error, not a
+    /// silent restart of the deletion.
+    #[test]
+    fn test_nested_cloze_brackets_is_error() {
+        let input = "C: [[a]]";
+        let parser = make_test_parser();
+        let result = parser.parse(input);
+        assert!(result.is_err());
+        let err = result.err().unwrap();
+        assert_eq!(
+            err.to_string(),
+            "Nested cloze brackets. Location: test.md:1"
+        );
+    }
+
+    /// BUG-19: an unmatched `[` at end of text must say so, not complain that
+    /// the card has no deletions.
+    #[test]
+    fn test_unterminated_cloze_at_eof_is_error() {
+        let input = "C: foo [bar";
+        let parser = make_test_parser();
+        let result = parser.parse(input);
+        assert!(result.is_err());
+        let err = result.err().unwrap();
+        assert_eq!(
+            err.to_string(),
+            "Unterminated cloze deletion. Location: test.md:1"
+        );
+    }
+
+    /// BUG-19: a deletion left open at the end of a line is an error.
+    #[test]
+    fn test_unterminated_cloze_at_eol_is_error() {
+        let input = "C: foo [bar\nbaz] quux";
+        let parser = make_test_parser();
+        let result = parser.parse(input);
+        assert!(result.is_err());
+        let err = result.err().unwrap();
+        assert_eq!(
+            err.to_string(),
+            "Unterminated cloze deletion. Location: test.md:1"
+        );
     }
 
     #[test]
