@@ -57,6 +57,15 @@ pub struct ReviewRow {
     pub data: ReviewRecord,
 }
 
+/// Number of non-voided reviews per grade, across all time.
+#[derive(Debug, PartialEq, Eq)]
+pub struct GradeDistribution {
+    pub forgot: usize,
+    pub hard: usize,
+    pub good: usize,
+    pub easy: usize,
+}
+
 pub struct Bookmark {
     pub card_hash: CardHash,
     pub note: Option<String>,
@@ -368,6 +377,82 @@ impl Database {
             return fail(format!("No session with ID {session_id} to close"));
         }
         Ok(())
+    }
+
+    /// Count cards grouped by due date. `None` means never reviewed (due
+    /// immediately). Ordered with `None` first, then ascending date.
+    pub fn count_cards_by_due_date(&self) -> Fallible<Vec<(Option<Date>, usize)>> {
+        let sql = "select due_date, count(*) from cards group by due_date order by due_date;";
+        let mut stmt = self.conn.prepare(sql)?;
+        let rows = stmt.query_map([], |row| {
+            let due_date: Option<Date> = row.get(0)?;
+            let count: i64 = row.get(1)?;
+            Ok((due_date, count as usize))
+        })?;
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row?);
+        }
+        Ok(result)
+    }
+
+    /// Count non-voided reviews per day from `since` (inclusive) onward,
+    /// ascending. Days with no reviews are absent. Range-scans the indexed
+    /// `reviewed_date` column.
+    pub fn count_reviews_per_day_since(&self, since: Date) -> Fallible<Vec<(Date, usize)>> {
+        let sql = "select reviewed_date, count(*) from reviews where voided = 0 and reviewed_date >= ? group by reviewed_date order by reviewed_date;";
+        let mut stmt = self.conn.prepare(sql)?;
+        let rows = stmt.query_map(params![since], |row| {
+            let date: Date = row.get(0)?;
+            let count: i64 = row.get(1)?;
+            Ok((date, count as usize))
+        })?;
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row?);
+        }
+        Ok(result)
+    }
+
+    /// Count non-voided reviews per grade, across all time.
+    pub fn grade_distribution(&self) -> Fallible<GradeDistribution> {
+        let sql = "select grade, count(*) from reviews where voided = 0 group by grade;";
+        let mut stmt = self.conn.prepare(sql)?;
+        let rows = stmt.query_map([], |row| {
+            let grade: Grade = row.get(0)?;
+            let count: i64 = row.get(1)?;
+            Ok((grade, count as usize))
+        })?;
+        let mut dist = GradeDistribution {
+            forgot: 0,
+            hard: 0,
+            good: 0,
+            easy: 0,
+        };
+        for row in rows {
+            let (grade, count) = row?;
+            match grade {
+                Grade::Forgot => dist.forgot = count,
+                Grade::Hard => dist.hard = count,
+                Grade::Good => dist.good = count,
+                Grade::Easy => dist.easy = count,
+            }
+        }
+        Ok(dist)
+    }
+
+    /// The fraction of non-voided reviews since `since` (inclusive) that were
+    /// graded better than Forgot. `None` when the window has no reviews.
+    pub fn retention_since(&self, since: Date) -> Fallible<Option<f64>> {
+        let sql = "select count(*), coalesce(sum(case when grade <> 'forgot' then 1 else 0 end), 0) from reviews where voided = 0 and reviewed_date >= ?;";
+        let (total, remembered): (i64, i64) = self
+            .conn
+            .query_row(sql, params![since], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        if total == 0 {
+            Ok(None)
+        } else {
+            Ok(Some(remembered as f64 / total as f64))
+        }
     }
 
     /// Close sessions left dangling by a crash or restart.
@@ -1562,6 +1647,125 @@ mod tests {
         let bm = db.get_bookmark(hash)?.unwrap();
         assert_eq!(bm.note, Some("needs rephrasing".to_string()));
         assert_eq!(bm.created_at, created);
+        Ok(())
+    }
+
+    /// Build a timestamp on a specific date, for date-window queries.
+    fn ts(date_time: &str) -> Timestamp {
+        Timestamp::new(
+            chrono::NaiveDateTime::parse_from_str(date_time, "%Y-%m-%d %H:%M:%S").unwrap(),
+        )
+    }
+
+    /// Seed: card A reviewed good on 08-29 and forgot on 08-30; card B easy
+    /// on 08-30; one voided review on 08-30 that must count nowhere.
+    fn seed_stats_db() -> Fallible<Database> {
+        let mut db = Database::new(":memory:")?;
+        let a = CardHash::hash_bytes(b"a");
+        let b = CardHash::hash_bytes(b"b");
+        let now = ts("2026-08-29 10:00:00");
+        db.insert_card(a, now)?;
+        db.insert_card(b, now)?;
+        let session_id = db.create_session(now)?;
+
+        let mut review = |db: &mut Database, hash, when: Timestamp, grade| -> Fallible<i64> {
+            let mut r = sample_review(hash, when, 2.0);
+            r.grade = grade;
+            db.insert_review_and_update_performance(
+                session_id,
+                &r,
+                sample_performance(when, 2.0, 1),
+            )
+        };
+        review(&mut db, a, ts("2026-08-29 10:00:00"), Grade::Good)?;
+        review(&mut db, a, ts("2026-08-30 09:00:00"), Grade::Forgot)?;
+        review(&mut db, b, ts("2026-08-30 11:00:00"), Grade::Easy)?;
+        let voided = review(&mut db, b, ts("2026-08-30 12:00:00"), Grade::Good)?;
+        db.void_review_and_restore_performance(
+            voided,
+            b,
+            sample_performance(ts("2026-08-30 11:00:00"), 2.0, 1),
+            None,
+        )?;
+        Ok(db)
+    }
+
+    #[test]
+    fn test_count_reviews_per_day_since() -> Fallible<()> {
+        let db = seed_stats_db()?;
+        let since = Date::try_from("2026-08-01".to_string())?;
+        let per_day = db.count_reviews_per_day_since(since)?;
+        assert_eq!(
+            per_day,
+            vec![
+                (Date::try_from("2026-08-29".to_string())?, 1),
+                (Date::try_from("2026-08-30".to_string())?, 2),
+            ]
+        );
+        // A later window excludes earlier reviews.
+        let since = Date::try_from("2026-08-30".to_string())?;
+        assert_eq!(db.count_reviews_per_day_since(since)?.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn test_grade_distribution() -> Fallible<()> {
+        let db = seed_stats_db()?;
+        let dist = db.grade_distribution()?;
+        assert_eq!(dist.forgot, 1);
+        assert_eq!(dist.hard, 0);
+        assert_eq!(dist.good, 1); // the voided Good review does not count
+        assert_eq!(dist.easy, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn test_retention_since() -> Fallible<()> {
+        let db = seed_stats_db()?;
+        // All three live reviews: 2 of 3 remembered.
+        let since = Date::try_from("2026-08-01".to_string())?;
+        assert_eq!(db.retention_since(since)?, Some(2.0 / 3.0));
+        // Only 08-30: forgot + easy = 1 of 2.
+        let since = Date::try_from("2026-08-30".to_string())?;
+        assert_eq!(db.retention_since(since)?, Some(0.5));
+        // Empty window.
+        let since = Date::try_from("2026-09-01".to_string())?;
+        assert_eq!(db.retention_since(since)?, None);
+        Ok(())
+    }
+
+    #[test]
+    fn test_count_cards_by_due_date() -> Fallible<()> {
+        let db = Database::new(":memory:")?;
+        let now = Timestamp::now();
+        let a = CardHash::hash_bytes(b"a");
+        let b = CardHash::hash_bytes(b"b");
+        let c = CardHash::hash_bytes(b"c");
+        db.insert_card(a, now)?;
+        db.insert_card(b, now)?;
+        db.insert_card(c, now)?; // stays new: due_date null
+        let due = |d: &str| -> Fallible<Performance> {
+            Ok(Performance::Reviewed(ReviewedPerformance {
+                last_reviewed_at: now,
+                stability: 2.0,
+                difficulty: 2.0,
+                interval_raw: 1.0,
+                interval_days: 1,
+                due_date: Date::try_from(d.to_string())?,
+                review_count: 1,
+            }))
+        };
+        db.update_card_performance(a, due("2026-09-05")?)?;
+        db.update_card_performance(b, due("2026-09-01")?)?;
+        let by_due = db.count_cards_by_due_date()?;
+        assert_eq!(
+            by_due,
+            vec![
+                (None, 1),
+                (Some(Date::try_from("2026-09-01".to_string())?), 1),
+                (Some(Date::try_from("2026-09-05".to_string())?), 1),
+            ]
+        );
         Ok(())
     }
 }
