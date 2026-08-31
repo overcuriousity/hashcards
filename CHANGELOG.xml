@@ -77,6 +77,9 @@
             <change author="overcuriousity">
                 The `serve` subcommand no longer requires a TOML config file. Collection directories can be passed as arguments for local use without git syncing. Added `hashcards.example.toml` documenting the config format.
             </change>
+            <change author="claude">
+                `hashcards stats` now defaults to JSON output. Requesting `--format html` is an error (it was never implemented and previously printed a note to stderr while exiting successfully).
+            </change>
         </changed>
     </unreleased>
     <releases>
