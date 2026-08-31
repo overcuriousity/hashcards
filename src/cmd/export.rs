@@ -89,6 +89,7 @@ struct PerformanceExport {
     last_reviewed_at: Timestamp,
     stability: Stability,
     difficulty: Difficulty,
+    /// The raw FSRS interval in days, before rounding and clamping.
     interval_raw: Interval,
     interval_days: i64,
     due_date: Date,
@@ -113,6 +114,7 @@ struct ReviewExport {
     grade: Grade,
     stability: Stability,
     difficulty: Difficulty,
+    /// The raw FSRS interval in days, before rounding and clamping.
     interval_raw: Interval,
     interval_days: i64,
     due_date: Date,

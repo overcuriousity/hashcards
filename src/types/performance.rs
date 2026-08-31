@@ -61,7 +61,7 @@ pub struct ReviewedPerformance {
     pub stability: Stability,
     /// The card's difficulty (an FSRS parameter).
     pub difficulty: Difficulty,
-    /// The FSRS-calculated interval in hours until the next review. This is
+    /// The FSRS-calculated interval in days until the next review. This is
     /// the raw interval, before any rounding and clamping.
     pub interval_raw: Interval,
     /// The FSRS interval as an integer number of days.

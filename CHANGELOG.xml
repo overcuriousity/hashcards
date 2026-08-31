@@ -16,6 +16,9 @@
             <change author="claude">
                 A system clock rollback (a last-review timestamp in the future) no longer corrupts scheduling: negative elapsed time is clamped to zero, preventing NaN stability and intervals. (BUG-28)
             </change>
+            <change author="claude">
+                Corrected documentation for `interval_raw` (card performance and JSON export): the value is in days, not hours. (BUG-30)
+            </change>
         </fixed>
         <added>
             <change author="mstoeck3">
