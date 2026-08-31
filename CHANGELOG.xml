@@ -10,6 +10,9 @@
             <change author="claude">
                 HedgeDoc notes whose permission level prevents anonymous download (e.g. "Locked" or "Protected") now show an "Error" status with a descriptive message instead of silently reporting "OK" while storing an HTML page as markdown (yielding zero cards).
             </change>
+            <change author="claude">
+                An empty cloze deletion (`[]`) now produces a clear parse error with the file and line, instead of crashing the parser (debug builds) or silently corrupting cloze positions (release builds). (BUG-16)
+            </change>
         </fixed>
         <added>
             <change author="mstoeck3">

@@ -571,6 +571,13 @@ impl Parser {
                     index += 1;
                 } else if let Some(s) = start {
                     let end = index;
+                    if end == s {
+                        return Err(ParserError::new(
+                            "Cloze deletion is empty.",
+                            self.file_path.clone(),
+                            start_line,
+                        ));
+                    }
                     let content = CardContent::new_cloze(clean_text.clone(), s, end - 1);
                     let card = Card::new(
                         self.deck_name.clone(),
@@ -867,6 +874,31 @@ mod tests {
         let result = parser.parse(input);
 
         assert!(result.is_err());
+        Ok(())
+    }
+
+    /// BUG-16: an empty cloze deletion must be a parse error, not a usize
+    /// underflow (debug: panic; release: usize::MAX positions).
+    #[test]
+    fn test_empty_cloze_deletion_is_error() {
+        let input = "C: [] foo";
+        let parser = make_test_parser();
+        let result = parser.parse(input);
+        assert!(result.is_err());
+        let err = result.err().unwrap();
+        assert_eq!(
+            err.to_string(),
+            "Cloze deletion is empty. Location: test.md:1"
+        );
+    }
+
+    /// BUG-16 companion: a one-byte deletion still parses.
+    #[test]
+    fn test_single_byte_cloze_deletion_parses() -> Result<(), ParserError> {
+        let input = "C: [a]";
+        let parser = make_test_parser();
+        let cards = parser.parse(input)?;
+        assert_cloze(&cards, "a", &[(0, 0)]);
         Ok(())
     }
 
