@@ -545,7 +545,7 @@ git commit -m "feat: meta table with cloze hash scheme marker; transactional has
 - Consumes: Task 1's `Card::legacy_hash() -> Option<CardHash>` and `Card::hash() -> CardHash`; Task 2's `Database::cloze_hash_scheme()`, `Database::migrate_cloze_hashes(&[(CardHash, CardHash)]) -> Fallible<usize>`, and `CLOZE_HASH_SCHEME_CURRENT`.
 - Produces: `fn upgrade_cloze_hashes(db: &mut Database, cards: &[Card]) -> Fallible<()>` (private to `collection.rs`); every `Collection` constructor (`new`, `with_db_path` — drill, serve, check, orphans, stats, export all go through these) now guarantees the DB is on the current scheme before any other DB access.
 
-- [ ] **Step 1: Write the failing end-to-end regression test**
+- [x] **Step 1: Write the failing end-to-end regression test**
 
 Append to `src/collection.rs` (the file currently has no tests module). The test builds a DB with old-scheme hashes computed **with the old algorithm inline** (independent of `legacy_hash()`), plus a genuinely-deleted card, then loads the collection and asserts reviews/performance/bookmarks followed their cards while the deleted card's rows stayed orphaned.
 
@@ -696,12 +696,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run the tests and see the regression test fail**
+- [x] **Step 2: Run the tests and see the regression test fail**
 
 Run: `cargo test test_load_migrates_legacy_cloze_hashes test_load_of_current_scheme_db_is_a_noop`
 Expected: `test_load_migrates_legacy_cloze_hashes` FAILS at `card {} was not re-linked` — nothing performs the rehash yet, so the DB still holds the legacy hashes. `test_load_of_current_scheme_db_is_a_noop` PASSES (fresh DBs are already scheme 2 after Task 2 — pin-down test).
 
-- [ ] **Step 3: Implement the load-time upgrade hook**
+- [x] **Step 3: Implement the load-time upgrade hook**
 
 3a. In `src/collection.rs`, add imports at the top (with the other `use` statements):
 
@@ -765,12 +765,12 @@ fn upgrade_cloze_hashes(db: &mut Database, cards: &[Card]) -> Fallible<()> {
 }
 ```
 
-- [ ] **Step 4: Run the full test suite and see it pass**
+- [x] **Step 4: Run the full test suite and see it pass**
 
 Run: `cargo test`
 Expected: all tests PASS, including both new collection tests. Every command (`drill`, `serve`, `check`, `orphans`, `stats`, `export`) constructs its DB access through `Collection::new`/`with_db_path`, so they all get the upgrade for free; the serve-mode edit path (`src/cmd/serve/edit.rs`) opens `Database::new` directly, but only against a DB that a `Collection` load has already upgraded in the same process.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/collection.rs
