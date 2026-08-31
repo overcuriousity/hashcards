@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::error::Error;
 use std::fmt::Display;
 use std::fmt::Formatter;
@@ -27,6 +27,7 @@ use crate::error::Fallible;
 use crate::types::aliases::DeckName;
 use crate::types::card::Card;
 use crate::types::card::CardContent;
+use crate::types::card_hash::CardHash;
 
 /// Metadata that can be specified at the top of a deck file.
 #[derive(Debug, Deserialize)]
@@ -205,6 +206,68 @@ impl Display for ParserError {
 
 impl Error for ParserError {}
 
+/// The location of a card in the collection: file path and 1-based line
+/// number of the card's first line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CardLocation {
+    file_path: PathBuf,
+    line: usize,
+}
+
+impl CardLocation {
+    pub fn of(card: &Card) -> Self {
+        Self {
+            file_path: card.file_path().clone(),
+            line: card.range().0 + 1,
+        }
+    }
+}
+
+impl Display for CardLocation {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:{}", self.file_path.display(), self.line)
+    }
+}
+
+/// Two byte-identical cards found while loading a collection. The `kept`
+/// copy stays in the deck; the `ignored` copy is dropped.
+#[derive(Debug, Clone)]
+pub struct DuplicateCard {
+    hash: CardHash,
+    kept: CardLocation,
+    ignored: CardLocation,
+}
+
+impl DuplicateCard {
+    pub fn new(hash: CardHash, kept: CardLocation, ignored: CardLocation) -> Self {
+        Self { hash, kept, ignored }
+    }
+
+    pub fn kept(&self) -> &CardLocation {
+        &self.kept
+    }
+
+    pub fn ignored(&self) -> &CardLocation {
+        &self.ignored
+    }
+}
+
+impl Display for DuplicateCard {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "duplicate card {}: kept {}, ignored {}",
+            self.hash, self.kept, self.ignored
+        )
+    }
+}
+
+/// The result of parsing a single deck file.
+pub struct ParsedFile {
+    pub cards: Vec<Card>,
+    pub duplicates: Vec<DuplicateCard>,
+}
+
 enum State {
     /// Start state.
     Start,
@@ -343,8 +406,20 @@ impl Parser {
         }
     }
 
-    /// Parse all the cards in the given text.
+    /// Parse all the cards in the given text, silently dropping duplicates.
+    ///
+    /// This is the historical API; serve-mode edit relies on its exact
+    /// dedup behavior. Prefer `parse_with_duplicates` where duplicate
+    /// reporting matters.
     pub fn parse(&self, text: &str) -> Result<Vec<Card>, ParserError> {
+        Ok(self.parse_with_duplicates(text)?.cards)
+    }
+
+    /// Parse all the cards in the given text, reporting duplicates.
+    ///
+    /// Byte-identical cards share a hash; the first occurrence is kept and
+    /// each further occurrence is recorded as a `DuplicateCard`.
+    pub fn parse_with_duplicates(&self, text: &str) -> Result<ParsedFile, ParserError> {
         let mut cards = Vec::new();
         let mut state = State::Start;
         let mut reader = LineReader::new();
@@ -356,14 +431,29 @@ impl Parser {
         }
         self.parse_line(state, Line::Eof, last_line + self.line_offset, &mut cards)?;
 
-        let mut seen = HashSet::new();
-        let mut unique_cards = Vec::new();
+        let mut index_of: HashMap<CardHash, usize> = HashMap::new();
+        let mut unique_cards: Vec<Card> = Vec::new();
+        let mut duplicates: Vec<DuplicateCard> = Vec::new();
         for card in cards {
-            if seen.insert(card.hash()) {
-                unique_cards.push(card);
+            match index_of.get(&card.hash()) {
+                Some(&kept_index) => {
+                    // `kept_index` always points into `unique_cards`.
+                    duplicates.push(DuplicateCard::new(
+                        card.hash(),
+                        CardLocation::of(&unique_cards[kept_index]),
+                        CardLocation::of(&card),
+                    ));
+                }
+                None => {
+                    index_of.insert(card.hash(), unique_cards.len());
+                    unique_cards.push(card);
+                }
             }
         }
-        Ok(unique_cards)
+        Ok(ParsedFile {
+            cards: unique_cards,
+            duplicates,
+        })
     }
 
     fn parse_line(
@@ -757,6 +847,7 @@ impl Parser {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
     use std::env::temp_dir;
     use std::fs::create_dir_all;
 
@@ -1142,6 +1233,42 @@ mod tests {
 
     fn make_test_parser() -> Parser {
         Parser::new("test_deck".to_string(), PathBuf::from("test.md"), 0)
+    }
+
+    #[test]
+    fn test_duplicate_cards_within_file_reported() -> Result<(), ParserError> {
+        let input = "Q: a\nA: b\n\n---\n\nQ: a\nA: b";
+        let parser = make_test_parser();
+        let parsed = parser.parse_with_duplicates(input)?;
+        assert_eq!(parsed.cards.len(), 1);
+        assert_eq!(parsed.duplicates.len(), 1);
+        let dup = &parsed.duplicates[0];
+        assert_eq!(dup.kept().to_string(), "test.md:1");
+        assert_eq!(dup.ignored().to_string(), "test.md:6");
+        Ok(())
+    }
+
+    #[test]
+    fn test_duplicate_card_display_names_both_locations() -> Result<(), ParserError> {
+        let input = "Q: a\nA: b\n\n---\n\nQ: a\nA: b";
+        let parser = make_test_parser();
+        let parsed = parser.parse_with_duplicates(input)?;
+        let message = parsed.duplicates[0].to_string();
+        assert!(message.contains("test.md:1"), "message was: {message}");
+        assert!(message.contains("test.md:6"), "message was: {message}");
+        assert!(message.contains("duplicate card"), "message was: {message}");
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_still_dedups_silently() -> Result<(), ParserError> {
+        // The plain `parse` API (used by serve-mode edit) must keep returning
+        // the deduplicated card list with no behavior change.
+        let input = "Q: a\nA: b\n\n---\n\nQ: a\nA: b";
+        let parser = make_test_parser();
+        let cards = parser.parse(input)?;
+        assert_eq!(cards.len(), 1);
+        Ok(())
     }
 
     fn assert_cloze(cards: &[Card], clean_text: &str, deletions: &[(usize, usize)]) {
