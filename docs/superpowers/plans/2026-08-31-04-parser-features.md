@@ -537,7 +537,7 @@ git commit -m "fix: warn (with both locations) instead of silently dropping dupl
 - Consumes: `Collection::duplicates` (Task 2), `DuplicateCard: Display` (Task 1).
 - Produces: `check_collection` keeps its signature `pub fn check_collection(directory: Option<String>) -> Fallible<()>`; new helper `fn duplicate_report(duplicates: &[DuplicateCard]) -> Vec<String>` (module-private, unit-testable).
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Add to the `tests` module in `src/cmd/check.rs`:
 
@@ -574,12 +574,12 @@ Add to the `tests` module in `src/cmd/check.rs`:
     }
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `cargo test test_check_reports_duplicates test_duplicate_report_empty`
 Expected: compile error — `duplicate_report` does not exist.
 
-- [ ] **Step 3: Implement the duplicate report in `check`**
+- [x] **Step 3: Implement the duplicate report in `check`**
 
 Replace the production part of `src/cmd/check.rs` with:
 
@@ -608,12 +608,12 @@ fn duplicate_report(duplicates: &[DuplicateCard]) -> Vec<String> {
 
 (The existing `test_non_existent_directory` and `test_directory` tests stay unchanged.)
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [x] **Step 4: Run the tests to verify they pass**
 
 Run: `cargo test --lib check`
 Expected: all `check` tests pass, including the two pre-existing ones. Then `cargo test` — full suite green.
 
-- [ ] **Step 5: Update CHANGELOG.xml for FEAT-07**
+- [x] **Step 5: Update CHANGELOG.xml for FEAT-07**
 
 In `CHANGELOG.xml`, inside `<unreleased><added>`, add as the first `<change>`:
 
@@ -630,7 +630,7 @@ If the collection contains byte-identical duplicate cards, `check` prints a
 warning for each one, naming both file:line locations.
 ```
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/cmd/check.rs CHANGELOG.xml README.md
