@@ -65,7 +65,7 @@ pub struct Bookmark {
 
 /// The schema version a freshly created database gets, and the highest
 /// migration number `migrate` knows how to apply.
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 
 impl Database {
     pub fn new(database_path: &str) -> Fallible<Self> {
@@ -622,6 +622,7 @@ fn migrate(tx: &Transaction) -> Fallible<()> {
             1 => migrate_add_duration_ms(tx)?,
             2 => migrate_add_bookmarks(tx)?,
             3 => migrate_add_voided(tx)?,
+            4 => migrate_add_review_indexes(tx)?,
             other => {
                 return fail(format!(
                     "Internal error: no migration defined for schema version {other}."
@@ -656,6 +657,14 @@ fn set_schema_version(tx: &Transaction, version: i64) -> Fallible<()> {
     tx.execute(
         "insert into schema_version (version) values (?);",
         params![version],
+    )?;
+    Ok(())
+}
+
+fn migrate_add_review_indexes(tx: &Transaction) -> Fallible<()> {
+    tx.execute_batch(
+        "create index if not exists idx_reviews_card_hash on reviews (card_hash);
+         create index if not exists idx_reviews_session_id on reviews (session_id);",
     )?;
     Ok(())
 }
@@ -1153,6 +1162,32 @@ mod tests {
         assert!(result.is_err());
         let message = result.err().unwrap().to_string();
         assert!(message.contains("999"), "unhelpful error: {message}");
+        Ok(())
+    }
+
+    /// The hot reviews lookups (by session and by card) are index searches,
+    /// not full table scans.
+    #[test]
+    fn test_reviews_queries_use_indexes() -> Fallible<()> {
+        let db = Database::new(":memory:")?;
+        let plan: String = db.conn.query_row(
+            "explain query plan select count(*) from reviews where session_id = 1 and voided = 0;",
+            [],
+            |row| row.get(3),
+        )?;
+        assert!(
+            plan.contains("idx_reviews_session_id"),
+            "session_id query does not use the index; plan: {plan}"
+        );
+        let plan: String = db.conn.query_row(
+            "explain query plan select count(*) from reviews where card_hash = 'abc';",
+            [],
+            |row| row.get(3),
+        )?;
+        assert!(
+            plan.contains("idx_reviews_card_hash"),
+            "card_hash query does not use the index; plan: {plan}"
+        );
         Ok(())
     }
 

@@ -48,6 +48,9 @@ create table bookmarks (
     created_at text not null
 ) strict;
 
+create index idx_reviews_card_hash on reviews (card_hash);
+create index idx_reviews_session_id on reviews (session_id);
+
 create table schema_version (
     version integer not null
 ) strict;
