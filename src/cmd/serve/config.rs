@@ -1,16 +1,16 @@
 use std::env::current_dir;
 use std::fs::read_to_string;
-use std::path::Path;
 use std::path::Component;
+use std::path::Path;
 use std::path::PathBuf;
 
 use serde::Deserialize;
 use serde::Serialize;
 
 use crate::cmd::drill::server::AnswerControls;
-use crate::types::performance::Jitter;
 use crate::error::Fallible;
 use crate::error::fail;
+use crate::types::performance::Jitter;
 
 // --- TOML deserialization structs ---
 

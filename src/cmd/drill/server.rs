@@ -162,7 +162,9 @@ pub async fn start_server(config: ServerConfig) -> Fallible<()> {
     let seed = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|e| {
-            ErrorReport::new(format!("The system clock is set before the Unix epoch: {e}"))
+            ErrorReport::new(format!(
+                "The system clock is set before the Unix epoch: {e}"
+            ))
         })?
         .as_nanos() as u64;
     let mut rng = TinyRng::from_seed(seed);

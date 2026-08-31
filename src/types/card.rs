@@ -310,7 +310,10 @@ mod tests {
         let front = content.html_front(&config)?.into_string();
         assert!(front.contains("Größe:"), "front was: {front}");
         assert!(front.contains("<span class='cloze'>"), "front was: {front}");
-        assert!(!front.contains("10 µm"), "deletion leaked into front: {front}");
+        assert!(
+            !front.contains("10 µm"),
+            "deletion leaked into front: {front}"
+        );
 
         let back = content.html_back(&config)?.into_string();
         assert!(

@@ -134,9 +134,8 @@ pub fn parse_deck(directory: &PathBuf) -> Fallible<ParsedDeck> {
         let entry = entry?;
         let path = entry.path();
         if path.is_file() && path.extension().is_some_and(|ext| ext == "md") {
-            let text = read_to_string(path).map_err(|e| {
-                ErrorReport::new(format!("Failed to read {}: {e}", path.display()))
-            })?;
+            let text = read_to_string(path)
+                .map_err(|e| ErrorReport::new(format!("Failed to read {}: {e}", path.display())))?;
 
             // Extract frontmatter and get custom deck name if specified
             let (metadata, content, line_offset) = extract_frontmatter(&text).map_err(|e| {
@@ -265,7 +264,11 @@ pub struct DuplicateCard {
 
 impl DuplicateCard {
     pub fn new(hash: CardHash, kept: CardLocation, ignored: CardLocation) -> Self {
-        Self { hash, kept, ignored }
+        Self {
+            hash,
+            kept,
+            ignored,
+        }
     }
 
     pub fn kept(&self) -> &CardLocation {
@@ -282,7 +285,9 @@ impl Display for DuplicateCard {
         write!(
             f,
             "duplicate card {}: kept {}, ignored {}",
-            self.hash, self.kept(), self.ignored()
+            self.hash,
+            self.kept(),
+            self.ignored()
         )
     }
 }
@@ -1734,11 +1739,8 @@ A: Genetic material."#,
         create_dir_all(&directory).expect("Failed to create test directory");
         let file = directory.join("deck.md");
         // "A: orphan" is on file line 5 (1-based).
-        std::fs::write(
-            &file,
-            "---\nname = \"X\"\n---\n\nA: orphan answer\n",
-        )
-        .expect("Failed to write test file");
+        std::fs::write(&file, "---\nname = \"X\"\n---\n\nA: orphan answer\n")
+            .expect("Failed to write test file");
 
         let result = parse_deck(&directory);
         std::fs::remove_dir_all(&directory).ok();
@@ -1759,11 +1761,8 @@ A: Genetic material."#,
         create_dir_all(&directory).expect("Failed to create test directory");
         let file = directory.join("deck.md");
         // Q: is on 0-based file line 4, A: on line 5.
-        std::fs::write(
-            &file,
-            "---\nname = \"X\"\n---\n\nQ: question\nA: answer\n",
-        )
-        .expect("Failed to write test file");
+        std::fs::write(&file, "---\nname = \"X\"\n---\n\nQ: question\nA: answer\n")
+            .expect("Failed to write test file");
 
         let deck = parse_deck(&directory);
         std::fs::remove_dir_all(&directory).ok();
@@ -1894,8 +1893,7 @@ A: Genetic material."#,
     /// text, so an answer containing a fence round-trips as one card.
     #[test]
     fn test_card_syntax_inside_backtick_fence_is_text() -> Result<(), ParserError> {
-        let input =
-            "Q: What does the file look like?\nA: Like this:\n```\nQ: not a card\n---\nC: not [a] cloze\n```\nDone.";
+        let input = "Q: What does the file look like?\nA: Like this:\n```\nQ: not a card\n---\nC: not [a] cloze\n```\nDone.";
         let parser = make_test_parser();
         let cards = parser.parse(input)?;
 
@@ -1996,8 +1994,13 @@ A: Genetic material."#,
                            Q: Term for: A semigroup with an identity element.\n\
                            A: Monoid";
         let parser = make_test_parser();
-        let from_shorthand: HashSet<_> = parser.parse(shorthand)?.iter().map(|c| c.hash()).collect();
-        let from_handwritten: HashSet<_> = parser.parse(handwritten)?.iter().map(|c| c.hash()).collect();
+        let from_shorthand: HashSet<_> =
+            parser.parse(shorthand)?.iter().map(|c| c.hash()).collect();
+        let from_handwritten: HashSet<_> = parser
+            .parse(handwritten)?
+            .iter()
+            .map(|c| c.hash())
+            .collect();
         assert_eq!(from_shorthand.len(), 2);
         assert_eq!(from_shorthand, from_handwritten);
         Ok(())
@@ -2029,7 +2032,10 @@ A: Genetic material."#,
         let result = parser.parse(input);
         assert!(result.is_err());
         let message = result.err().map(|e| e.to_string()).unwrap_or_default();
-        assert!(message.contains("definition tag without a term"), "message was: {message}");
+        assert!(
+            message.contains("definition tag without a term"),
+            "message was: {message}"
+        );
     }
 
     #[test]
@@ -2039,7 +2045,10 @@ A: Genetic material."#,
         let result = parser.parse(input);
         assert!(result.is_err());
         let message = result.err().map(|e| e.to_string()).unwrap_or_default();
-        assert!(message.contains("without a definition"), "message was: {message}");
+        assert!(
+            message.contains("without a definition"),
+            "message was: {message}"
+        );
     }
 
     #[test]
@@ -2090,7 +2099,8 @@ A: Genetic material."#,
 
     #[test]
     fn test_term_pair_followed_by_question() -> Result<(), ParserError> {
-        let input = "T: Monoid\nD: A semigroup with an identity element.\nQ: What is Rust?\nA: A language.";
+        let input =
+            "T: Monoid\nD: A semigroup with an identity element.\nQ: What is Rust?\nA: A language.";
         let parser = make_test_parser();
         let cards = parser.parse(input)?;
         assert_eq!(cards.len(), 3);

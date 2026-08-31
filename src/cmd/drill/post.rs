@@ -329,13 +329,13 @@ mod tests {
     use crate::cmd::drill::state::MutableState;
     use crate::db::Database;
     use crate::flash::FlashKind;
+    use crate::rng::TinyRng;
     use crate::types::card::CardContent;
+    use crate::types::performance::Jitter;
     use crate::types::performance::Performance;
     use crate::types::timestamp::Timestamp;
     use chrono::NaiveDateTime;
     use std::path::PathBuf;
-    use crate::rng::TinyRng;
-    use crate::types::performance::Jitter;
 
     fn make_mutable() -> MutableState {
         let db = Database::new(":memory:").unwrap();
@@ -382,6 +382,8 @@ mod tests {
             reviews: Vec::new(),
             finished_at: None,
             card_shown_at: None,
+            jitter: Jitter::none(),
+            rng: TinyRng::from_seed(1),
         }
     }
 
@@ -490,6 +492,8 @@ mod tests {
             reviews: Vec::new(),
             finished_at: None,
             card_shown_at: Some(Timestamp::now()),
+            jitter: Jitter::none(),
+            rng: TinyRng::from_seed(1),
         };
         let result = handle_action(&mut mutable, Timestamp::now(), Action::Good, None);
         assert!(result.is_err(), "the injected DB failure must propagate");
@@ -630,6 +634,8 @@ mod tests {
             reviews: Vec::new(),
             finished_at: None,
             card_shown_at: None,
+            jitter: Jitter::none(),
+            rng: TinyRng::from_seed(1),
         };
         // Grade the only card: the session finishes and the DB row is closed.
         handle_action(&mut mutable, started_at, Action::Reveal, None).unwrap();

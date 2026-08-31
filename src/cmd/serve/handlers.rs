@@ -39,11 +39,11 @@ use crate::cmd::serve::config::HedgedocEntry;
 use crate::cmd::serve::config::ResolvedCollection;
 use crate::cmd::serve::git::clone_or_pull;
 use crate::cmd::serve::hedgedoc::all_hedgedoc_entries;
-use crate::cmd::serve::hedgedoc::normalize_hedgedoc_url;
 use crate::cmd::serve::hedgedoc::build_combined_infos;
 use crate::cmd::serve::hedgedoc::build_note;
 use crate::cmd::serve::hedgedoc::build_source;
 use crate::cmd::serve::hedgedoc::create_minimal_config;
+use crate::cmd::serve::hedgedoc::normalize_hedgedoc_url;
 use crate::cmd::serve::hedgedoc::persist_hedgedoc_entries;
 use crate::cmd::serve::hedgedoc::source_uri_from_url;
 use crate::cmd::serve::hedgedoc::sync_source;
@@ -72,8 +72,8 @@ pub async fn collection_get_handler(
     let flash = Flash::from_query(&query);
     // Determine whether this slug is known before calling the inner function,
     // so we can return 404 for unknown collections vs. 500 for real errors.
-    let known = find_collection(&state, &slug).is_some()
-        || state.sessions.lock().contains_key(&slug);
+    let known =
+        find_collection(&state, &slug).is_some() || state.sessions.lock().contains_key(&slug);
     match collection_get_inner(&state, &slug, flash) {
         Ok(html) => (StatusCode::OK, Html(html)),
         Err(e) => {
@@ -319,7 +319,9 @@ fn create_session(
     let seed = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|e| {
-            ErrorReport::new(format!("The system clock is set before the Unix epoch: {e}"))
+            ErrorReport::new(format!(
+                "The system clock is set before the Unix epoch: {e}"
+            ))
         })?
         .as_nanos() as u64;
     let mut rng = TinyRng::from_seed(seed);
@@ -632,11 +634,12 @@ pub async fn hedgedoc_add_handler(
     // query/fragment/trailing slash so equivalent URLs dedupe, and reject
     // anything that is not a well-formed HTTPS URL so no raw string is
     // ever persisted or rendered into an href.
+    if form.url.trim().is_empty() {
+        return Flash::error("Enter a HedgeDoc URL.").redirect("/hedgedoc");
+    }
     let url = match normalize_hedgedoc_url(&form.url) {
         Ok(url) => url,
-        Err(e) => {
-            return Flash::error(format!("Invalid HedgeDoc URL: {e}")).redirect("/hedgedoc");
-        }
+        Err(e) => return Flash::error(e.to_string()).redirect("/hedgedoc"),
     };
 
     let data_dir = match &state.config.data_dir {

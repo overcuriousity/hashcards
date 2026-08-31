@@ -480,6 +480,8 @@ mod tests {
     use crate::cmd::drill::state::Review;
     use crate::db::Database;
     use crate::error::ErrorReport;
+    use crate::rng::TinyRng;
+    use crate::types::performance::Jitter;
     use crate::types::performance::Performance;
 
     #[test]
@@ -495,6 +497,8 @@ mod tests {
             reviews: Vec::new(),
             finished_at: Some(Timestamp::now()),
             card_shown_at: None,
+            jitter: Jitter::none(),
+            rng: TinyRng::from_seed(1),
         };
         let ctx = RenderContext {
             directory: Path::new("."),
@@ -524,7 +528,14 @@ mod tests {
     fn make_empty_mutable() -> MutableState {
         let db = Database::new(":memory:").unwrap();
         let session_id = db.create_session(Timestamp::now()).unwrap();
-        MutableState::new(db, session_id, Cache::new(), Vec::new())
+        MutableState::new(
+            db,
+            session_id,
+            Cache::new(),
+            Vec::new(),
+            Jitter::none(),
+            TinyRng::from_seed(1),
+        )
     }
 
     fn make_ctx(directory: &Path) -> RenderContext<'_> {

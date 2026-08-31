@@ -404,6 +404,7 @@ mod tests {
             new_card_limit: None,
             deck_filter: None,
             shuffle: false,
+            jitter: Jitter::none(),
             answer_controls: AnswerControls::Full,
             bury_siblings: false,
         };

@@ -408,7 +408,10 @@ mod tests {
 
         splice_card_block(&path, original, (3, 4), "Q: foo edited\nA: bar edited").unwrap();
         let result = std::fs::read_to_string(&path).unwrap();
-        assert_eq!(result, "---\nname = \"X\"\n---\nQ: foo edited\nA: bar edited\n");
+        assert_eq!(
+            result,
+            "---\nname = \"X\"\n---\nQ: foo edited\nA: bar edited\n"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }

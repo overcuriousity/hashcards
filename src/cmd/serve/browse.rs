@@ -364,7 +364,7 @@ mod tests {
         };
         let mut hedge_urls: HashMap<String, String> = HashMap::new();
         hedge_urls.insert("deck".to_string(), "javascript:alert(1)".to_string());
-        let html = render_browse_page("Coll", "coll", &tree, &hedge_urls, 0).into_string();
+        let html = render_browse_page("Coll", "coll", &tree, &hedge_urls, 0, None).into_string();
         assert!(
             !html.contains(r#"href="javascript:"#),
             "unsafe scheme must not become an edit link: {html}"

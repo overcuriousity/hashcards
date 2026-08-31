@@ -135,7 +135,7 @@ mod tests {
         // (hand-edited config, pre-fix persisted data), it must not become
         // a clickable link.
         let sources = vec![source_with_url("javascript:alert(1)")];
-        let html = render_manage_page(&sources, None, true).into_string();
+        let html = render_manage_page(&sources, None, true, None).into_string();
         assert!(
             !html.contains(r#"href="javascript:"#),
             "unsafe scheme must not be rendered as a link: {html}"
@@ -149,7 +149,7 @@ mod tests {
     #[test]
     fn manage_page_links_https_urls() {
         let sources = vec![source_with_url("https://notes.example.com/abc")];
-        let html = render_manage_page(&sources, None, true).into_string();
+        let html = render_manage_page(&sources, None, true, None).into_string();
         assert!(
             html.contains(r#"href="https://notes.example.com/abc""#),
             "https URLs must still be linked: {html}"
