@@ -116,9 +116,20 @@ pub fn strip_frontmatter_with_offset(text: &str) -> Fallible<(&str, usize)> {
     Ok((content, offset))
 }
 
+/// The result of parsing every deck file in a collection directory.
+pub struct ParsedDeck {
+    pub cards: Vec<Card>,
+    pub duplicates: Vec<DuplicateCard>,
+}
+
 /// Parses all Markdown files in the given directory.
-pub fn parse_deck(directory: &PathBuf) -> Fallible<Vec<Card>> {
+///
+/// Byte-identical cards (same hash) are deduplicated: the first copy
+/// encountered is kept, and every dropped copy is reported in
+/// `ParsedDeck::duplicates` with both locations.
+pub fn parse_deck(directory: &PathBuf) -> Fallible<ParsedDeck> {
     let mut all_cards = Vec::new();
+    let mut duplicates = Vec::new();
     for entry in WalkDir::new(directory) {
         let entry = entry?;
         let path = entry.path();
@@ -151,19 +162,33 @@ pub fn parse_deck(directory: &PathBuf) -> Fallible<Vec<Card>> {
             });
 
             let parser = Parser::new(deck_name, path.to_path_buf(), line_offset);
-            let cards = parser.parse(content)?;
-            all_cards.extend(cards);
+            let parsed = parser.parse_with_duplicates(content)?;
+            all_cards.extend(parsed.cards);
+            duplicates.extend(parsed.duplicates);
         }
     }
 
     // Cards are sorted by their hash to make subsequent code more
-    // deterministic.
+    // deterministic. The sort is stable, so among byte-identical cards the
+    // first one encountered on disk stays first and is the copy we keep.
     all_cards.sort_by_key(|c| c.hash());
 
-    // Remove duplicates.
-    all_cards.dedup_by_key(|c| c.hash());
+    // Remove cross-file duplicates, recording both locations.
+    let mut cards: Vec<Card> = Vec::new();
+    for card in all_cards {
+        match cards.last() {
+            Some(kept) if kept.hash() == card.hash() => {
+                duplicates.push(DuplicateCard::new(
+                    card.hash(),
+                    CardLocation::of(kept),
+                    CardLocation::of(&card),
+                ));
+            }
+            _ => cards.push(card),
+        }
+    }
 
-    Ok(all_cards)
+    Ok(ParsedDeck { cards, duplicates })
 }
 
 pub struct Parser {
@@ -1191,7 +1216,7 @@ mod tests {
         let deck = parse_deck(&directory);
 
         assert!(deck.is_ok());
-        let cards = deck?;
+        let cards = deck?.cards;
         assert_eq!(cards.len(), 2);
         Ok(())
     }
@@ -1227,7 +1252,7 @@ mod tests {
         std::fs::write(&file2, "Q: foo\nA: bar").expect("Failed to write test file");
         let deck = parse_deck(&directory)?;
 
-        assert_eq!(deck.len(), 1);
+        assert_eq!(deck.cards.len(), 1);
         Ok(())
     }
 
@@ -1489,8 +1514,8 @@ A: Genetic material."#,
         let deck = parse_deck(&directory)?;
 
         // Both cards should have the custom deck name "Cell Biology"
-        assert_eq!(deck.len(), 2);
-        for card in &deck {
+        assert_eq!(deck.cards.len(), 2);
+        for card in &deck.cards {
             assert_eq!(card.deck_name(), "Cell Biology");
         }
 
@@ -1542,7 +1567,7 @@ A: Genetic material."#,
         let deck = parse_deck(&directory);
         std::fs::remove_dir_all(&directory).ok();
 
-        let cards = deck?;
+        let cards = deck?.cards;
         assert_eq!(cards.len(), 1);
         assert_eq!(cards[0].range(), (4, 5));
         Ok(())

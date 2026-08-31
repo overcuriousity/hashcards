@@ -242,7 +242,7 @@ mod tests {
         let deck = parse_deck(&PathBuf::from(dir.clone()))?;
         let now = Timestamp::now();
         let mut reviews = Vec::new();
-        for card in deck {
+        for card in deck.cards {
             coll.db.insert_card(card.hash(), now)?;
             let performance = Performance::Reviewed(ReviewedPerformance {
                 last_reviewed_at: now,

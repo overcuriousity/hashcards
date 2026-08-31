@@ -2,6 +2,9 @@
     <unreleased>
         <fixed>
             <change author="claude">
+                Byte-identical duplicate cards no longer disappear silently: collection loading keeps one copy and prints a warning naming both file locations, and drilling proceeds normally. Duplicates can no longer abort drill startup.
+            </change>
+            <change author="claude">
                 The collection browse page now reports database errors instead of silently displaying a bookmark count of zero.
             </change>
             <change author="claude">
