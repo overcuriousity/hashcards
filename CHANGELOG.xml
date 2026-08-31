@@ -87,6 +87,15 @@
             <change author="claude">
                 HedgeDoc source URLs are now validated at storage time (well-formed HTTPS only) and re-checked at render time, so a link with an unsafe scheme such as `javascript:` can never be stored or rendered as a clickable link.
             </change>
+            <change author="claude">
+                Symlinked directories inside a collection can no longer be used to serve files from outside the collection root: media paths are now canonicalized and must resolve inside the (canonicalized) collection directory, in both the file-serving endpoint and collection-relative (`@/`) media resolution (BUG-46).
+            </change>
+            <change author="claude">
+                The server now binds to 127.0.0.1 by default instead of 0.0.0.0. Listening on all interfaces requires an explicit opt-in (`host = "0.0.0.0"` in the config, or `--host 0.0.0.0`); the documentation now states that hashcards has no authentication (BUG-47).
+            </change>
+            <change author="claude">
+                Collection `path` entries in the configuration file are now validated at load time: absolute paths and paths containing `..` are rejected with a clear error, so a collection can no longer point outside the data directory. A relative collection directory passed to the media loader now produces an error instead of a panic (BUG-48).
+            </change>
         </security>
         <added>
             <change author="claude">

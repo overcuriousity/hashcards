@@ -15,6 +15,9 @@
 use std::path::Component;
 use std::path::PathBuf;
 
+use crate::error::Fallible;
+use crate::error::fail;
+
 /// The media loader takes collection-relative file paths and returns the
 /// absolute path to the file, if it exists.
 ///
@@ -38,19 +41,44 @@ pub enum MediaLoaderError {
     SymbolicLink,
     /// Path contains parent (`..`) components.
     ParentComponent,
+    /// Path resolves to a location outside the collection root directory.
+    OutsideRoot,
+}
+
+impl std::fmt::Display for MediaLoaderError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let msg = match self {
+            MediaLoaderError::Absolute => "absolute paths are not allowed as media paths.",
+            MediaLoaderError::NotFound => "file not found.",
+            MediaLoaderError::NotFile => "path is not a file.",
+            MediaLoaderError::SymbolicLink => "symbolic links are not allowed as media paths.",
+            MediaLoaderError::ParentComponent => "path has a parent (`..`) component.",
+            MediaLoaderError::OutsideRoot => {
+                "path resolves to a location outside the collection directory."
+            }
+        };
+        write!(f, "{msg}")
+    }
 }
 
 impl MediaLoader {
-    /// Construct a new [`MediaLoader`].
-    pub fn new(path: PathBuf) -> Self {
-        assert!(path.is_absolute());
-        Self { root: path }
+    /// Construct a new [`MediaLoader`]. The root must be an absolute path.
+    pub fn new(path: PathBuf) -> Fallible<Self> {
+        if !path.is_absolute() {
+            return fail(format!(
+                "Media root directory is not an absolute path: `{}`.",
+                path.display()
+            ));
+        }
+        Ok(Self { root: path })
     }
 
     /// Given a path string from the client, check that a file exists at that
     /// location within the collection root directory.
     ///
-    /// Symbolic links and absolute paths are rejected.
+    /// Symbolic links and absolute paths are rejected, and the canonicalized
+    /// path must remain inside the canonicalized collection root, so a
+    /// symlinked directory cannot be used to escape it.
     pub fn validate(&self, path: &str) -> Result<PathBuf, MediaLoaderError> {
         let path: PathBuf = PathBuf::from(path);
         if path.components().any(|c| c == Component::ParentDir) {
@@ -66,10 +94,20 @@ impl MediaLoader {
         if path.is_symlink() {
             return Err(MediaLoaderError::SymbolicLink);
         }
-        if !path.is_file() {
+        let canonical_root: PathBuf = self
+            .root
+            .canonicalize()
+            .map_err(|_| MediaLoaderError::NotFound)?;
+        let canonical: PathBuf = path
+            .canonicalize()
+            .map_err(|_| MediaLoaderError::NotFound)?;
+        if !canonical.starts_with(&canonical_root) {
+            return Err(MediaLoaderError::OutsideRoot);
+        }
+        if !canonical.is_file() {
             return Err(MediaLoaderError::NotFile);
         }
-        Ok(path)
+        Ok(canonical)
     }
 }
 
@@ -84,7 +122,7 @@ mod tests {
     #[test]
     fn test_abs_rejected() -> Fallible<()> {
         let root = create_tmp_directory()?;
-        let loader = MediaLoader::new(root);
+        let loader = MediaLoader::new(root)?;
         assert_eq!(
             loader.validate("/etc/passwd"),
             Err(MediaLoaderError::Absolute)
@@ -96,7 +134,7 @@ mod tests {
     #[test]
     fn test_parent() -> Fallible<()> {
         let root = create_tmp_directory()?;
-        let loader = MediaLoader::new(root);
+        let loader = MediaLoader::new(root)?;
         assert_eq!(
             loader.validate("../../../../../../../../../../etc/passwd"),
             Err(MediaLoaderError::ParentComponent)
@@ -108,7 +146,7 @@ mod tests {
     #[test]
     fn test_non_existent() -> Fallible<()> {
         let root = create_tmp_directory()?;
-        let loader = MediaLoader::new(root);
+        let loader = MediaLoader::new(root)?;
         assert_eq!(
             loader.validate("does_not_exist.txt"),
             Err(MediaLoaderError::NotFound)
@@ -124,7 +162,7 @@ mod tests {
         use std::os::unix::fs::symlink;
 
         let root = create_tmp_directory()?;
-        let loader = MediaLoader::new(root.clone());
+        let loader = MediaLoader::new(root.clone())?;
 
         // Create a real file
         let real_file = root.join("real.txt");
@@ -148,7 +186,7 @@ mod tests {
         use std::fs::create_dir;
 
         let root = create_tmp_directory()?;
-        let loader = MediaLoader::new(root.clone());
+        let loader = MediaLoader::new(root.clone())?;
 
         // Create a subdirectory
         let subdir = root.join("subdir");
@@ -156,6 +194,36 @@ mod tests {
 
         // Try to validate the directory path
         assert_eq!(loader.validate("subdir"), Err(MediaLoaderError::NotFile));
+        Ok(())
+    }
+
+    /// Regression test for BUG-48: a relative root must produce an error,
+    /// not a panic.
+    #[test]
+    fn test_relative_root_rejected() {
+        let result = MediaLoader::new(PathBuf::from("relative/dir"));
+        assert!(result.is_err());
+    }
+
+    /// Regression test for BUG-46: a symlinked directory inside the root must
+    /// not allow serving files from outside the root.
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn test_symlinked_directory_escape_rejected() -> Fallible<()> {
+        use std::os::unix::fs::symlink;
+
+        let root = create_tmp_directory()?;
+        let outside = create_tmp_directory()?;
+        std::fs::write(outside.join("secret.txt"), "secret")?;
+
+        // Create a symlinked directory inside the root pointing outside it.
+        symlink(&outside, root.join("linkdir"))?;
+
+        let loader = MediaLoader::new(root)?;
+        assert_eq!(
+            loader.validate("linkdir/secret.txt"),
+            Err(MediaLoaderError::OutsideRoot)
+        );
         Ok(())
     }
 }

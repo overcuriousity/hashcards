@@ -1,6 +1,7 @@
 use std::env::current_dir;
 use std::fs::read_to_string;
 use std::path::Path;
+use std::path::Component;
 use std::path::PathBuf;
 
 use serde::Deserialize;
@@ -39,8 +40,11 @@ pub struct ServerSection {
     pub data_dir: String,
 }
 
+/// Default bind address. Deliberately localhost-only: hashcards has no
+/// authentication, so binding to all interfaces must be an explicit opt-in
+/// (`host = "0.0.0.0"` in the config file).
 fn default_host() -> String {
-    "0.0.0.0".to_string()
+    "127.0.0.1".to_string()
 }
 
 fn default_port() -> u16 {
@@ -215,15 +219,31 @@ impl ResolvedServeConfig {
             .collections
             .iter()
             .map(|entry| {
+                let entry_path = PathBuf::from(&entry.path);
+                if entry_path.is_absolute() {
+                    return fail(format!(
+                        "configuration error: collection path must be relative \
+                         (it is resolved inside `{}`), but `{}` is absolute",
+                        repo_dir.display(),
+                        entry.path
+                    ));
+                }
+                if entry_path.components().any(|c| c == Component::ParentDir) {
+                    return fail(format!(
+                        "configuration error: collection path must not contain \
+                         `..` components: `{}`",
+                        entry.path
+                    ));
+                }
                 let slug = entry.slug();
-                ResolvedCollection {
+                Ok(ResolvedCollection {
                     name: entry.name.clone(),
                     coll_dir: repo_dir.join(&entry.path),
                     db_path: db_dir.join(format!("{slug}.db")),
                     slug,
-                }
+                })
             })
-            .collect();
+            .collect::<Fallible<Vec<ResolvedCollection>>>()?;
 
         let git = match config.git {
             None => None,
@@ -299,5 +319,67 @@ impl ResolvedServeConfig {
             hedgedoc_entries: Vec::new(),
             _temp_dir: None,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::Fallible;
+
+    /// Regression test for BUG-47: with no `host` key in the config, the
+    /// server must bind to localhost, not to all interfaces.
+    #[test]
+    fn test_default_host_is_localhost() -> Fallible<()> {
+        let toml = "[server]\ndata_dir = \"/var/lib/hashcards\"\n";
+        let config: ServeConfig = toml::from_str(toml)?;
+        assert_eq!(config.server.host, "127.0.0.1");
+        Ok(())
+    }
+
+    /// Regression test for BUG-48: an absolute collection path (e.g.
+    /// `path = "/etc"`) must be rejected at config load time.
+    #[test]
+    fn test_absolute_collection_path_rejected() -> Fallible<()> {
+        let toml = "[server]\ndata_dir = \"/var/lib/hashcards\"\n\n\
+                    [[collection]]\nname = \"Evil\"\npath = \"/etc\"\n";
+        let config: ServeConfig = toml::from_str(toml)?;
+        let error = match ResolvedServeConfig::from_toml(config) {
+            Ok(_) => panic!("expected an error for an absolute collection path"),
+            Err(e) => e,
+        };
+        assert!(error.to_string().contains("must be relative"));
+        Ok(())
+    }
+
+    /// Regression test for BUG-48: a collection path with `..` components
+    /// must be rejected at config load time.
+    #[test]
+    fn test_parent_collection_path_rejected() -> Fallible<()> {
+        let toml = "[server]\ndata_dir = \"/var/lib/hashcards\"\n\n\
+                    [[collection]]\nname = \"Evil\"\npath = \"../../etc\"\n";
+        let config: ServeConfig = toml::from_str(toml)?;
+        let error = match ResolvedServeConfig::from_toml(config) {
+            Ok(_) => panic!("expected an error for a `..` collection path"),
+            Err(e) => e,
+        };
+        assert!(error.to_string().contains(".."));
+        Ok(())
+    }
+
+    /// A well-formed relative collection path still resolves under
+    /// {data_dir}/repo.
+    #[test]
+    fn test_relative_collection_path_accepted() -> Fallible<()> {
+        let toml = "[server]\ndata_dir = \"/var/lib/hashcards\"\n\n\
+                    [[collection]]\nname = \"Japanese\"\npath = \"japanese\"\n";
+        let config: ServeConfig = toml::from_str(toml)?;
+        let resolved = ResolvedServeConfig::from_toml(config)?;
+        assert_eq!(resolved.collections.len(), 1);
+        assert_eq!(
+            resolved.collections[0].coll_dir,
+            PathBuf::from("/var/lib/hashcards/repo/japanese")
+        );
+        Ok(())
     }
 }

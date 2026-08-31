@@ -115,8 +115,10 @@ See hashcards.example.toml for the configuration format.")]
         config: Option<String>,
         /// Collection directories to serve (used when no config file is provided).
         directories: Vec<String>,
-        /// Bind address (used when no --config is given; default: 0.0.0.0).
-        #[arg(long, default_value = "0.0.0.0")]
+        /// Bind address (used when no --config is given; default: 127.0.0.1).
+        /// Set to 0.0.0.0 to listen on all interfaces. WARNING: hashcards has
+        /// no authentication.
+        #[arg(long, default_value = "127.0.0.1")]
         host: String,
         /// Port number (used when no --config is given; default: 8000).
         #[arg(long, default_value_t = 8000)]
