@@ -2,6 +2,9 @@
     <unreleased>
         <fixed>
             <change author="mstoeck3">
+                Undoing after a session has finished now reopens the session's database row, so reviews made after the undo are attached to an open session instead of one that still claims to be closed.
+            </change>
+            <change author="mstoeck3">
                 Grading and undoing now commit to the database before changing the in-memory session. Previously a failed database write during a grade silently discarded the card (unrecorded and not undoable), and a failed write during undo could duplicate the card in the queue.
             </change>
             <change author="claude">

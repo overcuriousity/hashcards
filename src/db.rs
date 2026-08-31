@@ -289,13 +289,20 @@ impl Database {
 
     /// Atomically void a review and restore prior card performance (undo).
     ///
-    /// Both operations run inside a single transaction so a crash between them
-    /// cannot leave the DB in an inconsistent state.
+    /// When `reopen_session` is `Some(session_id)`, the session row is
+    /// reopened in the same transaction (its `ended_at` is reset to
+    /// `started_at`, the placeholder used for open sessions), so undoing
+    /// past a finished session cannot leave a closed row accumulating
+    /// new reviews.
+    ///
+    /// All operations run inside a single transaction so a crash between
+    /// them cannot leave the DB in an inconsistent state.
     pub fn void_review_and_restore_performance(
         &mut self,
         review_id: i64,
         card_hash: CardHash,
         prev_performance: Performance,
+        reopen_session: Option<i64>,
     ) -> Fallible<()> {
         let tx = self.conn.transaction()?;
         let rows = tx.execute(
@@ -306,6 +313,15 @@ impl Database {
             return fail("review not found or does not belong to this card");
         }
         update_card_performance_tx(&tx, card_hash, prev_performance)?;
+        if let Some(session_id) = reopen_session {
+            let rows = tx.execute(
+                "update sessions set ended_at = started_at where session_id = ?;",
+                params![session_id],
+            )?;
+            if rows != 1 {
+                return fail(format!("No session with ID {session_id} to reopen"));
+            }
+        }
         tx.commit()?;
         Ok(())
     }
@@ -848,6 +864,7 @@ mod tests {
             second_id,
             card_hash,
             sample_performance(now, 2.0, 1),
+            None,
         )?;
 
         // The voided review is excluded from read paths...
@@ -891,6 +908,7 @@ mod tests {
             review_id,
             other_hash,
             sample_performance(now, 9.0, 7),
+            None,
         );
         assert!(result.is_err());
 

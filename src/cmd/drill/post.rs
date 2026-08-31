@@ -128,6 +128,9 @@ pub fn handle_action(
                 return Ok(ActionResult::Continue);
             };
             let hash: CardHash = last_review.card.hash();
+            // If the session had finished, its DB row was closed; reopen it
+            // in the same transaction as the void (BUG-04).
+            let reopen_session: Option<i64> = mutable.finished_at.map(|_| mutable.session_id);
             // Void the review and restore prior performance atomically, and
             // commit BEFORE mutating any in-memory state. If this fails, the
             // queue, cache, and undo stack are untouched.
@@ -135,6 +138,7 @@ pub fn handle_action(
                 last_review.review_id,
                 hash,
                 last_review.prev_performance,
+                reopen_session,
             )?;
             // The transaction committed; it is now safe to mutate memory.
             mutable.reviews.pop();
@@ -265,6 +269,8 @@ mod tests {
     use crate::flash::FlashKind;
     use crate::types::card::CardContent;
     use crate::types::performance::Performance;
+    use crate::types::timestamp::Timestamp;
+    use chrono::NaiveDateTime;
     use std::path::PathBuf;
 
     fn make_mutable() -> MutableState {
@@ -443,5 +449,43 @@ mod tests {
         );
         assert_eq!(mutable.reviews.len(), 1, "undo stack must be unchanged");
         assert!(mutable.finished_at.is_none());
+    }
+
+    #[test]
+    fn test_undo_after_finish_reopens_session_row() {
+        let card = make_card("Q1");
+        let db = Database::new(":memory:").unwrap();
+        let started_at = Timestamp::new(
+            NaiveDateTime::parse_from_str("2020-01-01T00:00:00.000", "%Y-%m-%dT%H:%M:%S%.3f")
+                .unwrap(),
+        );
+        db.insert_card(card.hash(), started_at).unwrap();
+        let session_id = db.create_session(started_at).unwrap();
+        let mut cache = Cache::new();
+        cache.insert(card.hash(), Performance::New).unwrap();
+        let mut mutable = MutableState {
+            reveal: false,
+            db,
+            session_id,
+            cache,
+            cards: vec![card],
+            reviews: Vec::new(),
+            finished_at: None,
+            card_shown_at: None,
+        };
+        // Grade the only card: the session finishes and the DB row is closed.
+        handle_action(&mut mutable, started_at, Action::Reveal).unwrap();
+        let result = handle_action(&mut mutable, started_at, Action::Good).unwrap();
+        assert!(matches!(result, ActionResult::SessionFinished));
+        assert!(mutable.finished_at.is_some());
+        // Undo must reopen the DB session row, not just the in-memory flag.
+        handle_action(&mut mutable, started_at, Action::Undo).unwrap();
+        assert!(mutable.finished_at.is_none());
+        let sessions = mutable.db.get_all_sessions().unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(
+            sessions[0].ended_at, sessions[0].started_at,
+            "undo of a finished session must reopen the session row"
+        );
     }
 }
