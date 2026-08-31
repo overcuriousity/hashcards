@@ -36,6 +36,9 @@
             </change>
         </fixed>
         <added>
+            <change author="claude">
+                `hashcards check` now lists byte-identical duplicate cards, naming both file:line locations for each duplicate.
+            </change>
             <change author="mstoeck3">
                 Each grade is now written to the database as it happens, so a session interrupted by a dropped connection or a closed tab keeps the progress made up to that point. Previously an interrupted session was lost entirely.
             </change>

@@ -160,6 +160,9 @@ Check the integrity of a collection.
 $ hashcards check [DIRECTORY]
 ```
 
+If the collection contains byte-identical duplicate cards, `check` prints a
+warning for each one, naming both file:line locations.
+
 ### `orphans`
 
 Manage orphan cards (cards that exist in the database, but not in the
