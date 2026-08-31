@@ -21,7 +21,7 @@ use crate::error::Fallible;
 use crate::error::fail;
 use crate::parser::Parser;
 use crate::parser::parse_deck;
-use crate::parser::strip_frontmatter;
+use crate::parser::strip_frontmatter_with_offset;
 use crate::types::card::Card;
 use crate::types::card_hash::CardHash;
 use crate::types::timestamp::Timestamp;
@@ -181,9 +181,9 @@ fn edit_post_inner(
 
     // Re-parse the modified file; revert on any parse error.
     let new_file_content = std::fs::read_to_string(&file_path)?;
-    let after_fm = strip_frontmatter(&new_file_content)?;
+    let (after_fm, line_offset) = strip_frontmatter_with_offset(&new_file_content)?;
     let new_cards_result =
-        Parser::new(card.deck_name().clone(), file_path.clone()).parse(after_fm);
+        Parser::new(card.deck_name().clone(), file_path.clone(), line_offset).parse(after_fm);
 
     let new_cards = match new_cards_result {
         Ok(c) => c,
@@ -194,7 +194,7 @@ fn edit_post_inner(
         }
     };
 
-    // Find new cards at the same start_line (ranges are relative to after_fm, same as old).
+    // Find new cards at the same start_line (ranges are absolute file lines, same as old).
     let new_hashes: Vec<CardHash> = new_cards
         .iter()
         .filter(|c| c.file_path() == &file_path && c.range().0 == range.0)
@@ -250,9 +250,9 @@ fn block_end(lines: &[&str], range: (usize, usize)) -> usize {
 }
 
 /// Extract the raw markdown source block for a card (the lines the user edits).
+/// `range` uses absolute 0-based file line numbers.
 pub fn extract_card_block(file_content: &str, range: (usize, usize)) -> Fallible<String> {
-    let after_fm = strip_frontmatter(file_content)?;
-    let lines: Vec<&str> = after_fm.lines().collect();
+    let lines: Vec<&str> = file_content.lines().collect();
     let start = range.0;
     let end = block_end(&lines, range);
     if start > lines.len() {
@@ -262,6 +262,7 @@ pub fn extract_card_block(file_content: &str, range: (usize, usize)) -> Fallible
 }
 
 /// Atomically replace a card's block in the source file with `new_text`.
+/// `range` uses absolute 0-based file line numbers.
 fn splice_card_block(
     file_path: &Path,
     file_content: &str,
@@ -269,18 +270,13 @@ fn splice_card_block(
     new_text: &str,
 ) -> Fallible<()> {
     let ends_with_newline = file_content.ends_with('\n');
-    let after_fm = strip_frontmatter(file_content)?;
-    let fm_bytes = after_fm.as_ptr() as usize - file_content.as_ptr() as usize;
-    let frontmatter = &file_content[..fm_bytes];
-
-    let mut lines: Vec<&str> = after_fm.lines().collect();
+    let mut lines: Vec<&str> = file_content.lines().collect();
     let start = range.0;
     let end = block_end(&lines, range);
     let new_lines: Vec<&str> = new_text.lines().collect();
     lines.splice(start..end, new_lines.iter().copied());
 
-    let mut result = frontmatter.to_string();
-    result.push_str(&lines.join("\n"));
+    let mut result = lines.join("\n");
     if ends_with_newline {
         result.push('\n');
     }
@@ -400,6 +396,22 @@ mod tests {
         splice_card_block(&path, original, (0, 1), "Q: foo edited\nA: bar edited").unwrap();
         let result = std::fs::read_to_string(&path).unwrap();
         assert_eq!(result, "Q: foo edited\nA: bar edited\n");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_splice_with_frontmatter_absolute_range() {
+        let dir = std::env::temp_dir().join("hashcards_edit_test_fm");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("test.md");
+        // Q: is on absolute 0-based line 3, A: on line 4.
+        let original = "---\nname = \"X\"\n---\nQ: foo\nA: bar\n";
+        std::fs::write(&path, original).unwrap();
+
+        splice_card_block(&path, original, (3, 4), "Q: foo edited\nA: bar edited").unwrap();
+        let result = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(result, "---\nname = \"X\"\n---\nQ: foo edited\nA: bar edited\n");
 
         std::fs::remove_dir_all(&dir).ok();
     }

@@ -22,6 +22,9 @@
             <change author="claude">
                 `Q:`, `A:`, `C:`, and `---` lines inside fenced code blocks (``` or ~~~) are now treated as literal text instead of card syntax, so cards containing code samples parse correctly. (BUG-18)
             </change>
+            <change author="claude">
+                Line numbers in parse errors, media errors, and the JSON export are no longer offset by the length of a file's TOML frontmatter; they now refer to real file lines. (BUG-20)
+            </change>
         </fixed>
         <added>
             <change author="mstoeck3">

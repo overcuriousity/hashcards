@@ -35,17 +35,19 @@ struct DeckMetadata {
 }
 
 /// Extract TOML frontmatter from markdown text.
-/// Returns (frontmatter_metadata, content_without_frontmatter)
+/// Returns (frontmatter_metadata, content_without_frontmatter, content_start_line)
+/// where `content_start_line` is the 0-based file line at which the content
+/// begins (0 when there is no frontmatter).
 ///
 /// This function returns a slice of the original text to avoid
 /// collecting lines, joining them, and then re-splitting in parse().
-fn extract_frontmatter(text: &str) -> Fallible<(DeckMetadata, &str)> {
+fn extract_frontmatter(text: &str) -> Fallible<(DeckMetadata, &str, usize)> {
     let mut lines = text.lines().enumerate().peekable();
 
     // Check if the file starts with frontmatter delimiter
     match lines.peek() {
         Some((_, line)) if line.trim() == "---" => {}
-        _ => return Ok((DeckMetadata { name: None }, text)),
+        _ => return Ok((DeckMetadata { name: None }, text, 0)),
     };
     lines.next(); // consume the opening delimiter
 
@@ -91,13 +93,26 @@ fn extract_frontmatter(text: &str) -> Fallible<(DeckMetadata, &str)> {
         _ => "",
     };
 
-    Ok((metadata, content))
+    Ok((metadata, content, content_start_line))
 }
 
 /// Strip TOML frontmatter and return only the card content portion of a file.
+///
+/// Kept as a convenience wrapper around `strip_frontmatter_with_offset` for
+/// callers that don't need the line offset.
+#[allow(dead_code)]
 pub fn strip_frontmatter(text: &str) -> Fallible<&str> {
-    let (_, content) = extract_frontmatter(text)?;
+    let (content, _) = strip_frontmatter_with_offset(text)?;
     Ok(content)
+}
+
+/// Like `strip_frontmatter`, but also return the 0-based file line at which
+/// the content starts (0 when there is no frontmatter). Pass this as the
+/// `line_offset` of `Parser::new` so parse errors and card ranges report
+/// real file lines.
+pub fn strip_frontmatter_with_offset(text: &str) -> Fallible<(&str, usize)> {
+    let (_, content, offset) = extract_frontmatter(text)?;
+    Ok((content, offset))
 }
 
 /// Parses all Markdown files in the given directory.
@@ -110,7 +125,7 @@ pub fn parse_deck(directory: &PathBuf) -> Fallible<Vec<Card>> {
             let text = read_to_string(path)?;
 
             // Extract frontmatter and get custom deck name if specified
-            let (metadata, content) = extract_frontmatter(&text)?;
+            let (metadata, content, line_offset) = extract_frontmatter(&text)?;
 
             let deck_name: DeckName = metadata.name.unwrap_or_else(|| {
                 path.strip_prefix(directory)
@@ -130,7 +145,7 @@ pub fn parse_deck(directory: &PathBuf) -> Fallible<Vec<Card>> {
                     })
             });
 
-            let parser = Parser::new(deck_name, path.to_path_buf());
+            let parser = Parser::new(deck_name, path.to_path_buf(), line_offset);
             let cards = parser.parse(content)?;
             all_cards.extend(cards);
         }
@@ -149,6 +164,10 @@ pub fn parse_deck(directory: &PathBuf) -> Fallible<Vec<Card>> {
 pub struct Parser {
     deck_name: DeckName,
     file_path: PathBuf,
+    /// The 0-based file line at which the parsed text begins. Non-zero when
+    /// TOML frontmatter was stripped before parsing, so that all error
+    /// locations and card ranges refer to real file lines.
+    line_offset: usize,
 }
 
 #[derive(Debug)]
@@ -312,10 +331,11 @@ fn is_markdown_link_open(text: &str, open_pos: usize) -> bool {
 }
 
 impl Parser {
-    pub fn new(deck_name: DeckName, file_path: PathBuf) -> Self {
+    pub fn new(deck_name: DeckName, file_path: PathBuf, line_offset: usize) -> Self {
         Parser {
             deck_name,
             file_path,
+            line_offset,
         }
     }
 
@@ -328,9 +348,9 @@ impl Parser {
         let last_line = if lines.is_empty() { 0 } else { lines.len() - 1 };
         for (line_num, line) in lines.iter().enumerate() {
             let line = reader.read(line);
-            state = self.parse_line(state, line, line_num, &mut cards)?;
+            state = self.parse_line(state, line, line_num + self.line_offset, &mut cards)?;
         }
-        self.parse_line(state, Line::Eof, last_line, &mut cards)?;
+        self.parse_line(state, Line::Eof, last_line + self.line_offset, &mut cards)?;
 
         let mut seen = HashSet::new();
         let mut unique_cards = Vec::new();
@@ -1117,7 +1137,7 @@ mod tests {
     }
 
     fn make_test_parser() -> Parser {
-        Parser::new("test_deck".to_string(), PathBuf::from("test.md"))
+        Parser::new("test_deck".to_string(), PathBuf::from("test.md"), 0)
     }
 
     fn assert_cloze(cards: &[Card], clean_text: &str, deletions: &[(usize, usize)]) {
@@ -1201,12 +1221,13 @@ A: A systems programming language."#;
 
         let result = extract_frontmatter(input);
         assert!(result.is_ok());
-        let (metadata, content) = result.unwrap();
+        let (metadata, content, offset) = result.unwrap();
         assert_eq!(metadata.name, Some("Custom Deck Name".to_string()));
         assert_eq!(
             content.trim(),
             "Q: What is Rust?\nA: A systems programming language."
         );
+        assert_eq!(offset, 3);
     }
 
     #[test]
@@ -1220,12 +1241,13 @@ A: A systems programming language."#;
 
         let result = extract_frontmatter(input);
         assert!(result.is_ok());
-        let (metadata, content) = result.unwrap();
+        let (metadata, content, offset) = result.unwrap();
         assert_eq!(metadata.name, None);
         assert_eq!(
             content.trim(),
             "Q: What is Rust?\nA: A systems programming language."
         );
+        assert_eq!(offset, 3);
     }
 
     #[test]
@@ -1238,12 +1260,13 @@ A: A systems programming language."#;
 
         let result = extract_frontmatter(input);
         assert!(result.is_ok());
-        let (metadata, content) = result.unwrap();
+        let (metadata, content, offset) = result.unwrap();
         assert_eq!(metadata.name, None);
         assert_eq!(
             content.trim(),
             "Q: What is Rust?\nA: A systems programming language."
         );
+        assert_eq!(offset, 2);
     }
 
     #[test]
@@ -1251,9 +1274,10 @@ A: A systems programming language."#;
         let input = "Q: What is Rust?\nA: A systems programming language.";
         let result = extract_frontmatter(input);
         assert!(result.is_ok());
-        let (metadata, content) = result.unwrap();
+        let (metadata, content, offset) = result.unwrap();
         assert_eq!(metadata.name, None);
         assert_eq!(content, input);
+        assert_eq!(offset, 0);
     }
 
     #[test]
@@ -1291,7 +1315,7 @@ name = "Custom Deck Name"
 Q: What is Rust?
 A: A systems programming language."#;
 
-        let (metadata, content) = extract_frontmatter(input).unwrap();
+        let (metadata, content, _offset) = extract_frontmatter(input).unwrap();
         assert_eq!(metadata.name, Some("Custom Deck Name".to_string()));
 
         let parser = make_test_parser();
@@ -1342,6 +1366,54 @@ A: Genetic material."#,
         // Clean up
         std::fs::remove_dir_all(&directory).ok();
 
+        Ok(())
+    }
+
+    /// BUG-20: a parse error after `---` frontmatter reports the real file
+    /// line, not the line within the stripped content.
+    #[test]
+    fn test_parse_error_after_frontmatter_reports_real_line() -> Fallible<()> {
+        let directory = temp_dir().join("frontmatter_error_line_test");
+        create_dir_all(&directory).expect("Failed to create test directory");
+        let file = directory.join("deck.md");
+        // "A: orphan" is on file line 5 (1-based).
+        std::fs::write(
+            &file,
+            "---\nname = \"X\"\n---\n\nA: orphan answer\n",
+        )
+        .expect("Failed to write test file");
+
+        let result = parse_deck(&directory);
+        std::fs::remove_dir_all(&directory).ok();
+
+        assert!(result.is_err());
+        let err = result.err().unwrap();
+        assert!(
+            err.to_string().contains("deck.md:5"),
+            "expected real file line 5 in: {err}"
+        );
+        Ok(())
+    }
+
+    /// BUG-20: card ranges are absolute file lines when frontmatter is present.
+    #[test]
+    fn test_card_range_accounts_for_frontmatter() -> Fallible<()> {
+        let directory = temp_dir().join("frontmatter_range_test");
+        create_dir_all(&directory).expect("Failed to create test directory");
+        let file = directory.join("deck.md");
+        // Q: is on 0-based file line 4, A: on line 5.
+        std::fs::write(
+            &file,
+            "---\nname = \"X\"\n---\n\nQ: question\nA: answer\n",
+        )
+        .expect("Failed to write test file");
+
+        let deck = parse_deck(&directory);
+        std::fs::remove_dir_all(&directory).ok();
+
+        let cards = deck?;
+        assert_eq!(cards.len(), 1);
+        assert_eq!(cards[0].range(), (4, 5));
         Ok(())
     }
 
