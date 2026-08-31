@@ -19,12 +19,15 @@ use parking_lot::Mutex;
 
 use tokio::sync::oneshot::Sender;
 
+use std::collections::HashSet;
+
 use crate::cmd::drill::cache::Cache;
 use crate::cmd::drill::server::AnswerControls;
 use crate::db::Database;
 use crate::fsrs::Grade;
 use crate::rng::TinyRng;
 use crate::types::card::Card;
+use crate::types::card_hash::CardHash;
 use crate::types::performance::Jitter;
 use crate::types::performance::Performance;
 use crate::types::timestamp::Timestamp;
@@ -80,6 +83,24 @@ impl MutableState {
             rng,
         }
     }
+
+    /// Session progress as `(first_graded, repeats)`.
+    ///
+    /// `first_graded` counts distinct cards graded at least once — the
+    /// progress bar advances on the first grade of each card. `repeats`
+    /// counts the additional grades of already-counted cards, i.e. the
+    /// completed re-queues from Forgot/Hard. Both are derived from the
+    /// undo-aware `reviews` list, so Undo rolls progress back and no extra
+    /// session state is stored.
+    pub fn progress(&self) -> (usize, usize) {
+        let mut seen: HashSet<CardHash> = HashSet::new();
+        for review in &self.reviews {
+            seen.insert(review.card.hash());
+        }
+        let first_graded = seen.len();
+        let repeats = self.reviews.len() - first_graded;
+        (first_graded, repeats)
+    }
 }
 
 #[derive(Clone)]
@@ -95,5 +116,67 @@ pub struct Review {
 impl Review {
     pub fn should_repeat(&self) -> bool {
         self.grade == Grade::Forgot || self.grade == Grade::Hard
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::*;
+    use crate::cmd::drill::cache::Cache;
+    use crate::db::Database;
+    use crate::types::card::CardContent;
+    use crate::types::performance::Jitter;
+
+    fn make_card(question: &str) -> Card {
+        Card::new(
+            "test-deck".to_string(),
+            PathBuf::from("/tmp/deck.md"),
+            (1, 2),
+            CardContent::new_basic(question, "answer"),
+        )
+    }
+
+    fn make_review(card: &Card, grade: Grade) -> Review {
+        Review {
+            card: card.clone(),
+            review_id: 1,
+            grade,
+            duration_ms: None,
+            prev_performance: Performance::New,
+        }
+    }
+
+    /// FEAT-08: the bar advances on the first grade of each card; further
+    /// grades of the same card count as repeats. Derived from `reviews`,
+    /// so Undo (which pops `reviews`) rolls progress back automatically.
+    #[test]
+    fn test_progress_counts_first_grades_and_repeats() {
+        let db = Database::new(":memory:").unwrap();
+        let session_id = db.create_session(Timestamp::now()).unwrap();
+        let a = make_card("question a");
+        let b = make_card("question b");
+        let mut mutable = MutableState::new(
+            db,
+            session_id,
+            Cache::new(),
+            vec![a.clone(), b.clone()],
+            Jitter::none(),
+            TinyRng::from_seed(1),
+        );
+        assert_eq!(mutable.progress(), (0, 0));
+        // First grade of card a; Forgot re-queues it but it still counts once.
+        mutable.reviews.push(make_review(&a, Grade::Forgot));
+        assert_eq!(mutable.progress(), (1, 0));
+        // First grade of card b.
+        mutable.reviews.push(make_review(&b, Grade::Good));
+        assert_eq!(mutable.progress(), (2, 0));
+        // Card a comes around again: a repeat, not new progress.
+        mutable.reviews.push(make_review(&a, Grade::Good));
+        assert_eq!(mutable.progress(), (2, 1));
+        // Undo pops the repeat review; progress recovers on its own.
+        mutable.reviews.pop();
+        assert_eq!(mutable.progress(), (2, 0));
     }
 }
