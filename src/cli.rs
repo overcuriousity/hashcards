@@ -32,6 +32,7 @@ use crate::cmd::serve::server::start_serve;
 use crate::cmd::stats::StatsFormat;
 use crate::cmd::stats::print_stats;
 use crate::error::Fallible;
+use crate::types::performance::Jitter;
 use crate::types::timestamp::Timestamp;
 use crate::utils::wait_for_server;
 
@@ -66,6 +67,10 @@ enum Command {
         /// Whether or not to bury siblings. Default is true.
         #[arg(long)]
         bury_siblings: Option<bool>,
+        /// Fractional random jitter applied to review intervals, to diffuse
+        /// review peaks (0.0 to 0.5). Default is 0.05 (plus or minus 5%).
+        #[arg(long, default_value_t = Jitter::DEFAULT_FRACTION)]
+        jitter: f64,
     },
     /// Check the integrity of a collection.
     Check {
@@ -153,6 +158,7 @@ pub async fn entrypoint() -> Fallible<()> {
             open_browser,
             answer_controls,
             bury_siblings,
+            jitter,
         } => {
             if open_browser.unwrap_or(true) {
                 // Start a separate task to open the browser once the server is up.
@@ -180,6 +186,7 @@ pub async fn entrypoint() -> Fallible<()> {
                 shuffle: true,
                 answer_controls,
                 bury_siblings: bury_siblings.unwrap_or(true),
+                jitter: Jitter::new(jitter)?,
             };
             start_server(config).await
         }

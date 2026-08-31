@@ -79,6 +79,15 @@
             <change author="claude">
                 Cards no longer stay permanently invisible when the KaTeX script fails to load or math rendering throws: card content visibility is now restored even when rendering fails.
             </change>
+            <change author="claude">
+                The error message for an invalid grade string now includes the offending value instead of the literal text `{value}`. (BUG-29)
+            </change>
+            <change author="claude">
+                A system clock rollback (a last-review timestamp in the future) no longer corrupts scheduling: negative elapsed time is clamped to zero, preventing NaN stability and intervals. (BUG-28)
+            </change>
+            <change author="claude">
+                Corrected documentation for `interval_raw` (card performance and JSON export): the value is in days, not hours. (BUG-30)
+            </change>
         </fixed>
         <security>
             <change author="claude">
@@ -148,6 +157,9 @@
             </change>
             <change author="claude">
                 Term-definition shorthand: a `T:`/`D:` line pair expands at parse time into two reciprocal front-back cards ("Define: X" and "Term for: Y"). The generated cards hash identically to hand-written equivalents, so review history is preserved when converting. Note: lines beginning with `T:` or `D:` are now card tags, like `Q:` and `A:`.
+            </change>
+            <change author="claude">
+                Review intervals now get a small random jitter (default plus or minus 5%) to diffuse review peaks over time. Configurable via `--jitter` on `hashcards drill` and the `[defaults] jitter` key in the serve config; set to 0.0 to disable. (FEAT-05)
             </change>
         </added>
         <changed>

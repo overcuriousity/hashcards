@@ -70,6 +70,7 @@ use crate::rng::shuffle;
 use crate::types::card::Card;
 use crate::types::card_hash::CardHash;
 use crate::types::date::Date;
+use crate::types::performance::Jitter;
 use crate::types::timestamp::Timestamp;
 use crate::utils::CACHE_CONTROL_IMMUTABLE;
 
@@ -99,6 +100,8 @@ pub struct ServerConfig {
     pub new_card_limit: Option<usize>,
     pub deck_filter: Option<String>,
     pub shuffle: bool,
+    /// Fractional random jitter applied to computed intervals.
+    pub jitter: Jitter,
     pub answer_controls: AnswerControls,
     pub bury_siblings: bool,
 }
@@ -155,15 +158,15 @@ pub async fn start_server(config: ServerConfig) -> Fallible<()> {
         return Ok(());
     }
 
-    // Finally, shuffle the cards.
+    // Seed a session RNG, used for shuffling and interval jitter.
+    let seed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| {
+            ErrorReport::new(format!("The system clock is set before the Unix epoch: {e}"))
+        })?
+        .as_nanos() as u64;
+    let mut rng = TinyRng::from_seed(seed);
     let due_today: Vec<Card> = if config.shuffle {
-        let seed = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|e| {
-                ErrorReport::new(format!("The system clock is set before the Unix epoch: {e}"))
-            })?
-            .as_nanos() as u64;
-        let mut rng = TinyRng::from_seed(seed);
         shuffle(due_today, &mut rng)
     } else {
         due_today
@@ -197,6 +200,8 @@ pub async fn start_server(config: ServerConfig) -> Fallible<()> {
             reviews: Vec::new(),
             finished_at: None,
             card_shown_at: None,
+            jitter: config.jitter,
+            rng,
         })),
         shutdown_tx: Arc::new(Mutex::new(Some(shutdown_tx))),
         answer_controls: config.answer_controls,

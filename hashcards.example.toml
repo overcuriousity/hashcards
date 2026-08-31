@@ -20,6 +20,7 @@ repo_url = "https://github.com/user/flashcards.git"
 [defaults]
 # answer_controls = "full"            # "full" or "binary" (default: full)
 # bury_siblings = true                # Hide sibling cards in same session (default: true)
+# jitter = 0.05                       # Random +/- fraction applied to review intervals (0.0 to 0.5, default: 0.05)
 
 # Define one or more collections. Paths are relative to {data_dir}/repo.
 

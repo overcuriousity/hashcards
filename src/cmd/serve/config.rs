@@ -8,6 +8,7 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use crate::cmd::drill::server::AnswerControls;
+use crate::types::performance::Jitter;
 use crate::error::Fallible;
 use crate::error::fail;
 
@@ -74,6 +75,12 @@ pub struct DefaultsSection {
     pub answer_controls: AnswerControlsConfig,
     #[serde(default = "default_true")]
     pub bury_siblings: bool,
+    #[serde(default = "default_jitter")]
+    pub jitter: f64,
+}
+
+fn default_jitter() -> f64 {
+    Jitter::DEFAULT_FRACTION
 }
 
 impl Default for DefaultsSection {
@@ -81,6 +88,7 @@ impl Default for DefaultsSection {
         Self {
             answer_controls: default_answer_controls(),
             bury_siblings: true,
+            jitter: default_jitter(),
         }
     }
 }
@@ -136,6 +144,7 @@ pub fn slugify(s: &str) -> String {
 pub fn load_config(path: &Path) -> Fallible<ServeConfig> {
     let content = read_to_string(path)?;
     let config: ServeConfig = toml::from_str(&content)?;
+    Jitter::new(config.defaults.jitter)?;
     Ok(config)
 }
 

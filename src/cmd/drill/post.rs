@@ -256,8 +256,14 @@ pub fn handle_action(
                 }
             };
             let prev_performance: Performance = mutable.cache.get(hash)?;
-            let performance: ReviewedPerformance =
-                update_performance(prev_performance, grade, reviewed_at);
+            let jitter = mutable.jitter;
+            let performance: ReviewedPerformance = update_performance(
+                prev_performance,
+                grade,
+                reviewed_at,
+                jitter,
+                &mut mutable.rng,
+            );
             let record = ReviewRecord {
                 card_hash: hash,
                 reviewed_at,
@@ -328,6 +334,8 @@ mod tests {
     use crate::types::timestamp::Timestamp;
     use chrono::NaiveDateTime;
     use std::path::PathBuf;
+    use crate::rng::TinyRng;
+    use crate::types::performance::Jitter;
 
     fn make_mutable() -> MutableState {
         let db = Database::new(":memory:").unwrap();
@@ -341,6 +349,8 @@ mod tests {
             reviews: Vec::new(),
             finished_at: None,
             card_shown_at: None,
+            jitter: Jitter::none(),
+            rng: TinyRng::from_seed(0),
         }
     }
 
