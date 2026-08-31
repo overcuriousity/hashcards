@@ -13,6 +13,9 @@
             <change author="claude">
                 Cloze cards whose text literally contains the string `CLOZE_DELETION` no longer render that text as a spurious cloze blank. The internal placeholder is now generated per render and checked against the card text.
             </change>
+            <change author="claude">
+                Cards no longer stay permanently invisible when the KaTeX script fails to load or math rendering throws: card content visibility is now restored even when rendering fails.
+            </change>
         </fixed>
         <security>
             <change author="claude">
