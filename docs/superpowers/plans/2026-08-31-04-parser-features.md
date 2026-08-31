@@ -1000,7 +1000,7 @@ git commit -m "feat: T:/D: term-definition shorthand expands into two reciprocal
 - Consumes: everything from Task 4 (`Line::StartTerm`, `State::ReadingTerm`, `push_term_cards`, and the error messages exactly as written there).
 - Produces: nothing new — this task pins error behavior with tests and ships the user-facing docs.
 
-- [ ] **Step 1: Write the failing (or newly pinning) tests**
+- [x] **Step 1: Write the failing (or newly pinning) tests**
 
 Add to the `tests` module in `src/parser.rs`. These test the error arms written in Task 4; if any fail, the Task 4 arms are wrong — fix the arms, not the tests.
 
@@ -1090,12 +1090,12 @@ fn test_definition_inside_definition_errors() {
 
 (Tests may use `unwrap_or_default`/`unwrap` freely; the no-`unwrap()` rule binds production code only.)
 
-- [ ] **Step 2: Run the tests**
+- [x] **Step 2: Run the tests**
 
 Run: `cargo test test_definition test_term_`
 Expected: all pass if Task 4's arms are correct; any failure means a Task 4 arm diverges from this pinned behavior — fix the arm in `parse_line` and re-run until green.
 
-- [ ] **Step 3: Document the syntax in README.md**
+- [x] **Step 3: Document the syntax in README.md**
 
 Insert between the end of the "Cloze Cards" section (after the multi-line cloze example, currently ending around line 264) and `### Separators` (line 266). (The block below is fenced with four backticks because the inserted README text itself contains three-backtick fences.)
 
@@ -1132,7 +1132,7 @@ just like `Q:` and `A:`; to use such text literally inside a card, don't
 start a line with it.
 ````
 
-- [ ] **Step 4: Update CHANGELOG.xml for FEAT-06**
+- [x] **Step 4: Update CHANGELOG.xml for FEAT-06**
 
 In `CHANGELOG.xml`, inside `<unreleased><added>`, add:
 
@@ -1142,12 +1142,12 @@ In `CHANGELOG.xml`, inside `<unreleased><added>`, add:
             </change>
 ```
 
-- [ ] **Step 5: Run the full suite**
+- [x] **Step 5: Run the full suite**
 
 Run: `cargo test`
 Expected: all tests pass.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/parser.rs README.md CHANGELOG.xml
