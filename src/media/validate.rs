@@ -226,7 +226,10 @@ mod tests {
         let cards = parser.parse(markdown)?;
 
         let result = validate_media_files(&cards, &test_dir);
-        assert!(result.is_ok(), "external URLs should not fail validation: {result:?}");
+        assert!(
+            result.is_ok(),
+            "external URLs should not fail validation: {result:?}"
+        );
 
         Ok(())
     }

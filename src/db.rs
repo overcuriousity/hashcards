@@ -246,9 +246,9 @@ impl Database {
     /// close_session when the session finishes.
     pub fn create_session(&self, started_at: Timestamp) -> Fallible<i64> {
         let sql = "insert into sessions (started_at, ended_at) values (?, ?) returning session_id;";
-        let session_id: i64 =
-            self.conn
-                .query_row(sql, params![started_at, started_at], |row| row.get(0))?;
+        let session_id: i64 = self
+            .conn
+            .query_row(sql, params![started_at, started_at], |row| row.get(0))?;
         Ok(session_id)
     }
 
@@ -298,7 +298,10 @@ impl Database {
         prev_performance: Performance,
     ) -> Fallible<()> {
         let tx = self.conn.transaction()?;
-        let rows = tx.execute("update reviews set voided = 1 where review_id = ? and card_hash = ?;", params![review_id, card_hash])?;
+        let rows = tx.execute(
+            "update reviews set voided = 1 where review_id = ? and card_hash = ?;",
+            params![review_id, card_hash],
+        )?;
         if rows != 1 {
             return fail("review not found or does not belong to this card");
         }
@@ -406,7 +409,8 @@ impl Database {
         note: Option<String>,
         now: Timestamp,
     ) -> Fallible<()> {
-        let sql = "insert or replace into bookmarks (card_hash, note, created_at) values (?, ?, ?);";
+        let sql =
+            "insert or replace into bookmarks (card_hash, note, created_at) values (?, ?, ?);";
         self.conn.execute(sql, params![card_hash, note, now])?;
         Ok(())
     }
@@ -456,11 +460,7 @@ impl Database {
     }
 
     /// Update the note on an existing bookmark.
-    pub fn update_bookmark_note(
-        &self,
-        card_hash: CardHash,
-        note: Option<String>,
-    ) -> Fallible<()> {
+    pub fn update_bookmark_note(&self, card_hash: CardHash, note: Option<String>) -> Fallible<()> {
         let sql = "update bookmarks set note = ? where card_hash = ?;";
         self.conn.execute(sql, params![note, card_hash])?;
         Ok(())
@@ -475,7 +475,8 @@ impl Database {
 
     /// Count the number of non-voided reviews performed on the given date.
     pub fn count_reviews_in_date(&self, date: Date) -> Fallible<usize> {
-        let sql = "select count(*) from reviews where substr(reviewed_at, 1, 10) = ? and voided = 0;";
+        let sql =
+            "select count(*) from reviews where substr(reviewed_at, 1, 10) = ? and voided = 0;";
         let count: i64 = self.conn.query_row(sql, params![date], |row| row.get(0))?;
         Ok(count as usize)
     }
@@ -526,7 +527,11 @@ impl Database {
     }
 }
 
-fn update_card_performance_tx(tx: &Transaction, card_hash: CardHash, performance: Performance) -> Fallible<()> {
+fn update_card_performance_tx(
+    tx: &Transaction,
+    card_hash: CardHash,
+    performance: Performance,
+) -> Fallible<()> {
     let (
         last_reviewed_at,
         stability,
@@ -786,7 +791,10 @@ mod tests {
         let card_hash = CardHash::hash_bytes(b"a");
         let now = Timestamp::now();
         db.insert_card(card_hash, now)?;
-        assert!(matches!(db.get_card_performance(card_hash)?, Performance::New));
+        assert!(matches!(
+            db.get_card_performance(card_hash)?,
+            Performance::New
+        ));
 
         let session_id = db.create_session(now)?;
         let review = sample_review(card_hash, now, 2.0);
@@ -821,7 +829,11 @@ mod tests {
         let session_id = db.create_session(now)?;
         // First grade: stability 2.0, one review.
         let first = sample_review(card_hash, now, 2.0);
-        db.insert_review_and_update_performance(session_id, &first, sample_performance(now, 2.0, 1))?;
+        db.insert_review_and_update_performance(
+            session_id,
+            &first,
+            sample_performance(now, 2.0, 1),
+        )?;
         // Second grade: stability 5.0, two reviews.
         let second = sample_review(card_hash, now, 5.0);
         let second_id = db.insert_review_and_update_performance(
@@ -832,7 +844,11 @@ mod tests {
         assert_eq!(db.get_reviews_for_session(session_id)?.len(), 2);
 
         // Undo the second grade, restoring the performance the card had before it.
-        db.void_review_and_restore_performance(second_id, card_hash, sample_performance(now, 2.0, 1))?;
+        db.void_review_and_restore_performance(
+            second_id,
+            card_hash,
+            sample_performance(now, 2.0, 1),
+        )?;
 
         // The voided review is excluded from read paths...
         let reviews = db.get_reviews_for_session(session_id)?;
@@ -864,8 +880,11 @@ mod tests {
 
         let session_id = db.create_session(now)?;
         let review = sample_review(card_hash, now, 2.0);
-        let review_id =
-            db.insert_review_and_update_performance(session_id, &review, sample_performance(now, 2.0, 1))?;
+        let review_id = db.insert_review_and_update_performance(
+            session_id,
+            &review,
+            sample_performance(now, 2.0, 1),
+        )?;
 
         // Same review ID, wrong card: must fail rather than corrupt state.
         let result = db.void_review_and_restore_performance(
@@ -881,7 +900,10 @@ mod tests {
             Performance::Reviewed(rp) => assert_eq!(rp.stability, 2.0),
             Performance::New => panic!("expected card to remain reviewed"),
         }
-        assert!(matches!(db.get_card_performance(other_hash)?, Performance::New));
+        assert!(matches!(
+            db.get_card_performance(other_hash)?,
+            Performance::New
+        ));
         Ok(())
     }
 

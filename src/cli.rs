@@ -208,8 +208,9 @@ fn resolve_serve_config(
 ) -> Fallible<ResolvedServeConfig> {
     // Explicit --config: load that file
     if let Some(path) = config_path {
-        let canonical = std::fs::canonicalize(&path)
-            .map_err(|_| crate::error::ErrorReport::new(format!("Config file not found: {path}")))?;
+        let canonical = std::fs::canonicalize(&path).map_err(|_| {
+            crate::error::ErrorReport::new(format!("Config file not found: {path}"))
+        })?;
         let config = load_config(Path::new(&path))?;
         return Ok(ResolvedServeConfig::from_toml(config)?.with_config_path(canonical));
     }
@@ -250,4 +251,4 @@ fn resolve_serve_config(
         hedgedoc_entries: Vec::new(),
         _temp_dir: Some(std::sync::Arc::new(temp_tracker)),
     })
-    }
+}
