@@ -22,6 +22,7 @@ use crate::cmd::drill::state::Review;
 use crate::cmd::drill::state::ServerState;
 use crate::db::ReviewRecord;
 use crate::error::Fallible;
+use crate::error::fail;
 use crate::flash::Flash;
 use crate::fsrs::Grade;
 use crate::types::card::Card;
@@ -47,13 +48,13 @@ pub enum Action {
 }
 
 impl Action {
-    pub fn grade(&self) -> Grade {
+    pub fn grade(&self) -> Option<Grade> {
         match self {
-            Action::Forgot => Grade::Forgot,
-            Action::Hard => Grade::Hard,
-            Action::Good => Grade::Good,
-            Action::Easy => Grade::Easy,
-            _ => panic!("Action does not correspond to a grade"),
+            Action::Forgot => Some(Grade::Forgot),
+            Action::Hard => Some(Grade::Hard),
+            Action::Good => Some(Grade::Good),
+            Action::Easy => Some(Grade::Easy),
+            _ => None,
         }
     }
 }
@@ -248,7 +249,12 @@ pub fn handle_action(
                     .max(0)
             });
             let hash: CardHash = head.hash();
-            let grade: Grade = action.grade();
+            let grade: Grade = match action.grade() {
+                Some(grade) => grade,
+                None => {
+                    return fail("Internal error: this action does not correspond to a grade.");
+                }
+            };
             let prev_performance: Performance = mutable.cache.get(hash)?;
             let performance: ReviewedPerformance =
                 update_performance(prev_performance, grade, reviewed_at);
@@ -371,10 +377,17 @@ mod tests {
 
     #[test]
     fn test_action_grade() {
-        assert_eq!(Action::Forgot.grade(), Grade::Forgot);
-        assert_eq!(Action::Hard.grade(), Grade::Hard);
-        assert_eq!(Action::Good.grade(), Grade::Good);
-        assert_eq!(Action::Easy.grade(), Grade::Easy);
+        assert_eq!(Action::Forgot.grade(), Some(Grade::Forgot));
+        assert_eq!(Action::Hard.grade(), Some(Grade::Hard));
+        assert_eq!(Action::Good.grade(), Some(Grade::Good));
+        assert_eq!(Action::Easy.grade(), Some(Grade::Easy));
+    }
+
+    #[test]
+    fn test_non_grade_action_returns_none() {
+        assert!(Action::Reveal.grade().is_none());
+        assert!(Action::Undo.grade().is_none());
+        assert!(Action::End.grade().is_none());
     }
 
     #[test]
