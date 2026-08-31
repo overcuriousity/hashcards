@@ -14,6 +14,7 @@ use crate::cmd::serve::git::compute_collection_counts;
 use crate::cmd::serve::state::CollectionInfo;
 use crate::cmd::serve::state::HedgedocNote;
 use crate::cmd::serve::state::HedgedocSource;
+use crate::error::ErrorReport;
 use crate::error::Fallible;
 use crate::error::fail;
 use crate::types::timestamp::Timestamp;
@@ -61,6 +62,25 @@ fn validate_hedgedoc_url(url: &str) -> Fallible<()> {
         return fail(format!("HedgeDoc URLs must use HTTPS (got: {})", url));
     }
     Ok(())
+}
+
+/// Normalize and validate a user-supplied HedgeDoc note URL at storage time.
+///
+/// Strips query, fragment, and trailing slash so equivalent URLs map to the
+/// same entry; rejects anything that is not a well-formed HTTPS URL, so an
+/// unvalidated string can never be persisted or rendered into a link
+/// (BUG-24).
+pub fn normalize_hedgedoc_url(raw: &str) -> Fallible<String> {
+    let trimmed = raw.trim();
+    let mut parsed = reqwest::Url::parse(trimmed)
+        .map_err(|e| ErrorReport::new(format!("Invalid HedgeDoc URL `{trimmed}`: {e}")))?;
+    validate_hedgedoc_url(trimmed)?;
+    parsed.set_query(None);
+    parsed.set_fragment(None);
+    if let Ok(mut segments) = parsed.path_segments_mut() {
+        segments.pop_if_empty();
+    }
+    Ok(parsed.to_string())
 }
 
 /// Build the `/download` URL for a HedgeDoc note, safely appending the path
@@ -668,5 +688,37 @@ mod tests {
         let table = value.as_table().unwrap();
         assert!(!table.contains_key("hedgedoc"));
         assert!(table.contains_key("server"));
+    }
+
+    #[test]
+    fn normalize_hedgedoc_url_rejects_javascript_scheme() {
+        // Regression test for BUG-24: unsafe schemes must be rejected at
+        // storage time, never persisted.
+        assert!(normalize_hedgedoc_url("javascript:alert(1)").is_err());
+    }
+
+    #[test]
+    fn normalize_hedgedoc_url_rejects_unparseable_input() {
+        // Previously an unparseable string was stored raw (handlers.rs
+        // fell back to `trimmed.to_string()` on parse failure).
+        assert!(normalize_hedgedoc_url("not a url at all").is_err());
+        assert!(normalize_hedgedoc_url("").is_err());
+    }
+
+    #[test]
+    fn normalize_hedgedoc_url_rejects_plain_http() {
+        // Matches the existing fetch-time policy (validate_hedgedoc_url).
+        assert!(normalize_hedgedoc_url("http://notes.example.com/abc").is_err());
+    }
+
+    #[test]
+    fn normalize_hedgedoc_url_normalizes_https_urls() -> Fallible<()> {
+        // Query, fragment, and trailing slash are stripped so equivalent
+        // URLs dedupe to the same entry (preserves current handler behavior).
+        assert_eq!(
+            normalize_hedgedoc_url("  https://notes.example.com/abc/?x=1#frag ")?,
+            "https://notes.example.com/abc"
+        );
+        Ok(())
     }
 }

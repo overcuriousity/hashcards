@@ -30,6 +30,7 @@ use crate::cmd::serve::browse::render_browse_page;
 use crate::cmd::serve::config::HedgedocEntry;
 use crate::cmd::serve::config::ResolvedCollection;
 use crate::cmd::serve::git::clone_or_pull;
+use crate::cmd::serve::hedgedoc::normalize_hedgedoc_url;
 use crate::cmd::serve::hedgedoc::build_combined_infos;
 use crate::cmd::serve::hedgedoc::build_note;
 use crate::cmd::serve::hedgedoc::build_source;
@@ -523,25 +524,15 @@ pub async fn hedgedoc_add_handler(
     State(state): State<AppState>,
     Form(form): Form<AddHedgedocForm>,
 ) -> Redirect {
-    // Normalize URL: strip trailing slashes and parse to remove query/fragment
-    // so that equivalent URLs (e.g. with/without trailing slash) are treated as
-    // the same note and don't map to different on-disk filenames.
-    let url = {
-        let trimmed = form.url.trim();
-        if trimmed.is_empty() {
+    // Normalize and validate the URL at storage time (BUG-24): strip
+    // query/fragment/trailing slash so equivalent URLs dedupe, and reject
+    // anything that is not a well-formed HTTPS URL so no raw string is
+    // ever persisted or rendered into an href.
+    let url = match normalize_hedgedoc_url(&form.url) {
+        Ok(url) => url,
+        Err(e) => {
+            log::error!("Rejected HedgeDoc URL: {e}");
             return Redirect::to("/hedgedoc");
-        }
-        match reqwest::Url::parse(trimmed) {
-            Ok(mut parsed) => {
-                parsed.set_query(None);
-                parsed.set_fragment(None);
-                // Drop trailing empty path segment (trailing slash)
-                if let Ok(mut segs) = parsed.path_segments_mut() {
-                    segs.pop_if_empty();
-                }
-                parsed.to_string()
-            }
-            Err(_) => trimmed.to_string(),
         }
     };
 
