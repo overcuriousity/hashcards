@@ -46,7 +46,7 @@ Line numbers below refer to `src/parser.rs`, `src/error.rs`, `src/types/card.rs`
 
 Background: in `parse_cloze_cards`, `index` counts bytes of clean text. At a closing `]` with an open deletion, `end = index` and the card is built with `end - 1` (`src/parser.rs:573-574`). For `C: []`, `start == Some(0)` and `end == 0`, so `end - 1` underflows (panic in debug, `usize::MAX` positions in release).
 
-- [ ] **Step 1: Write the failing regression tests**
+- [x] **Step 1: Write the failing regression tests**
 
 Add to the `tests` module in `src/parser.rs` (next to `test_cloze_without_deletions`):
 
@@ -77,12 +77,12 @@ Add to the `tests` module in `src/parser.rs` (next to `test_cloze_without_deleti
     }
 ```
 
-- [ ] **Step 2: Run tests to verify the first one fails**
+- [x] **Step 2: Run tests to verify the first one fails**
 
 Run: `cargo test test_empty_cloze_deletion_is_error test_single_byte_cloze_deletion_parses`
 Expected: `test_empty_cloze_deletion_is_error` FAILS — in debug builds with `attempt to subtract with overflow` (a panic, not the expected error). `test_single_byte_cloze_deletion_parses` PASSES (it guards against regressions in Step 3).
 
-- [ ] **Step 3: Implement the guard**
+- [x] **Step 3: Implement the guard**
 
 In `src/parser.rs`, in the position loop of `parse_cloze_cards`, replace the `else if let Some(s) = start` branch (currently lines 572–583):
 
@@ -108,12 +108,12 @@ In `src/parser.rs`, in the position loop of `parse_cloze_cards`, replace the `el
                 }
 ```
 
-- [ ] **Step 4: Run the full test suite**
+- [x] **Step 4: Run the full test suite**
 
 Run: `cargo test`
 Expected: all tests PASS, including both new ones.
 
-- [ ] **Step 5: Update CHANGELOG.xml**
+- [x] **Step 5: Update CHANGELOG.xml**
 
 In `CHANGELOG.xml`, inside `<unreleased><fixed>`, after the last existing `<change>` in that section, add:
 
@@ -123,7 +123,7 @@ In `CHANGELOG.xml`, inside `<unreleased><fixed>`, after the last existing `<chan
             </change>
 ```
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/parser.rs CHANGELOG.xml
@@ -144,7 +144,7 @@ git commit -m "fix: empty cloze deletion is a parse error, not a usize underflow
 
 Background: today `[[a]]` silently overwrites `start` (`src/parser.rs:561`), dropping a bracket; `C: foo [bar` with no `]` falls through to the misleading `"Cloze card must contain at least one cloze deletion."` (`src/parser.rs:618-623`). Note: this task makes deletions that span a newline (`[foo\nbar]`) an error; the parser previously allowed them silently, and no existing test uses one.
 
-- [ ] **Step 1: Write the failing regression tests**
+- [x] **Step 1: Write the failing regression tests**
 
 Add to the `tests` module in `src/parser.rs`:
 
@@ -194,12 +194,12 @@ Add to the `tests` module in `src/parser.rs`:
     }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cargo test test_nested_cloze_brackets_is_error test_unterminated_cloze_at_eof_is_error test_unterminated_cloze_at_eol_is_error`
 Expected: all three FAIL. The nested test parses successfully (no error); the two unterminated tests fail on the message: they currently get `"Cloze card must contain at least one cloze deletion. Location: test.md:1"`.
 
-- [ ] **Step 3: Implement the errors**
+- [x] **Step 3: Implement the errors**
 
 In `src/parser.rs`, in the position loop of `parse_cloze_cards`:
 
@@ -255,12 +255,12 @@ In `src/parser.rs`, in the position loop of `parse_cloze_cards`:
         }
 ```
 
-- [ ] **Step 4: Run the full test suite**
+- [x] **Step 4: Run the full test suite**
 
 Run: `cargo test`
 Expected: all PASS, including `test_multi_line_cloze` and `test_cloze_with_initial_blank_line` (their deletions never cross a newline).
 
-- [ ] **Step 5: Update CHANGELOG.xml**
+- [x] **Step 5: Update CHANGELOG.xml**
 
 In `CHANGELOG.xml`, inside `<unreleased><fixed>`, add after the Task 1 entry:
 
@@ -270,7 +270,7 @@ In `CHANGELOG.xml`, inside `<unreleased><fixed>`, add after the Task 1 entry:
             </change>
 ```
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/parser.rs CHANGELOG.xml
@@ -292,7 +292,7 @@ git commit -m "fix: error on nested and unterminated cloze brackets (BUG-19)"
 
 Background: the scanner special-cases only `![` (image) and `\[`/`\]` (escape), so `C: See [the docs](https://x)` turns the link text into a deletion and leaves `(https://x)` behind. The fix: when a `[` opens a bracket group that closes with `](`, treat the whole bracket pair as markdown, in both loops.
 
-- [ ] **Step 1: Write the failing regression test**
+- [x] **Step 1: Write the failing regression test**
 
 Add to the `tests` module in `src/parser.rs`:
 
@@ -311,12 +311,12 @@ Add to the `tests` module in `src/parser.rs`:
     }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cargo test test_markdown_link_is_not_a_deletion`
 Expected: FAIL. With Task 2 in place, `parse` currently returns Ok with two deletions and mangled clean text (`the docs(https://x)` became a deletion), so `assert_cloze`'s length assertion fails.
 
-- [ ] **Step 3: Implement link skipping**
+- [x] **Step 3: Implement link skipping**
 
 (a) Add a private helper above `impl Parser` in `src/parser.rs`:
 
@@ -428,12 +428,12 @@ fn is_markdown_link_open(text: &str, open_pos: usize) -> bool {
 
 Note: `text` here is the `&str` produced by `let text = text.trim();` at the top of `parse_cloze_cards`, so `is_markdown_link_open(&text, bytepos)` uses the same byte positions as the loop. (`&text` where `text: &str` coerces to `&str`; writing `text` alone also works.)
 
-- [ ] **Step 4: Run the full test suite**
+- [x] **Step 4: Run the full test suite**
 
 Run: `cargo test`
 Expected: all PASS, in particular `test_cloze_with_image`, `test_cloze_with_escaped_square_bracket`, `test_cloze_with_multiple_escaped_square_brackets`, and the Task 1/2 tests.
 
-- [ ] **Step 5: Document the escape rules in README.md**
+- [x] **Step 5: Document the escape rules in README.md**
 
 In `README.md`, in the "Cloze Cards" section, insert after the multi-line cloze example's closing code fence (currently line 264, just before `### Separators`):
 
@@ -452,7 +452,7 @@ exact rules:
   are parse errors.
 ```
 
-- [ ] **Step 6: Update CHANGELOG.xml**
+- [x] **Step 6: Update CHANGELOG.xml**
 
 In `CHANGELOG.xml`, inside `<unreleased><fixed>`, add after the Task 2 entry:
 
@@ -462,7 +462,7 @@ In `CHANGELOG.xml`, inside `<unreleased><fixed>`, add after the Task 2 entry:
             </change>
 ```
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add src/parser.rs README.md CHANGELOG.xml
