@@ -286,7 +286,7 @@ git commit -m "feat: report within-file duplicate cards from the parser (BUG-12 
   - `pub fn parse_deck(directory: &PathBuf) -> Fallible<ParsedDeck>` (signature change).
   - `Collection` gains `pub duplicates: Vec<DuplicateCard>` (Task 3 reads it).
 
-- [ ] **Step 1: Write the failing regression test**
+- [x] **Step 1: Write the failing regression test**
 
 BUG-12's spec text says duplicates abort drill startup via `Cache::insert` (`cache.rs:45-53`) propagated at `server.rs:164`. On current master that abort is actually unreachable, because `parse_deck` already dedups silently (`parser.rs:141-144`) — see "Spec discrepancies" below. The regression test therefore pins the full required behavior: two byte-identical cards load without error (guarding the no-abort property against any future removal of the dedup), drilling material contains exactly one copy, and — the part that fails today — the duplicate is *reported* with both locations instead of vanishing.
 
@@ -339,12 +339,12 @@ mod tests {
 
 Note: walkdir order is not guaranteed, so the test asserts on the *pair* of locations, not on which copy was kept.
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run: `cargo test test_duplicate_cards_across_files`
 Expected: compile error — `Collection` has no field `duplicates`.
 
-- [ ] **Step 3: Implement `ParsedDeck` and thread duplicates through**
+- [x] **Step 3: Implement `ParsedDeck` and thread duplicates through**
 
 In `src/parser.rs`, add next to `ParsedFile`:
 
@@ -502,12 +502,12 @@ In `src/cmd/export.rs` test `test_full_export`, change the `parse_deck` call (`:
 
 (only the `parse_deck` line's binding usage changes: iterate `deck.cards` instead of `deck`).
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [x] **Step 4: Run the tests to verify they pass**
 
 Run: `cargo test test_duplicate_cards_across_files test_collection_without_duplicates`
 Expected: 2 passed. Then `cargo test` — full suite green (compiler will point out any missed `parse_deck` caller; fix by using `.cards`).
 
-- [ ] **Step 5: Update CHANGELOG.xml for BUG-12**
+- [x] **Step 5: Update CHANGELOG.xml for BUG-12**
 
 In `CHANGELOG.xml`, inside `<unreleased><fixed>`, add as the first `<change>` (format matches the existing entries; validate the shape against `CHANGELOG.xsd`: `<change>` has text content and an optional `author` attribute):
 
@@ -517,7 +517,7 @@ In `CHANGELOG.xml`, inside `<unreleased><fixed>`, add as the first `<change>` (f
             </change>
 ```
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/parser.rs src/collection.rs src/cmd/drill/server.rs src/cmd/export.rs CHANGELOG.xml
