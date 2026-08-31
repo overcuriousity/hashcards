@@ -948,7 +948,7 @@ git commit -m "fix: report real file lines when frontmatter is present (BUG-20)"
 - Consumes: Task 5's `parse_deck` shape (`extract_frontmatter` returning a 3-tuple).
 - Produces: `pub fn ErrorReport::message(&self) -> &str`. `ErrorReport::from(ParserError)` no longer prepends `"Parse error: "` (the `ParserError` `Display` already carries message + location, and `ErrorReport`'s `Display` adds the single `"error: "` prefix). All `From` impls use `Display`, not `{:#?}` debug formatting.
 
-- [ ] **Step 1: Write the failing regression tests**
+- [x] **Step 1: Write the failing regression tests**
 
 `src/error.rs` has no tests module; add one at the end of the file:
 
@@ -1012,12 +1012,12 @@ And add to the `tests` module in `src/parser.rs`:
     }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cargo test test_io_error_is_human_readable test_parser_error_has_no_double_prefix test_frontmatter_error_carries_file_path`
 Expected: all three FAIL — the I/O message contains debug formatting (`Custom {` / `kind:`), the parser report reads `error: Parse error: ...`, and the frontmatter error has no path.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 (a) In `src/error.rs`, add an accessor to `impl ErrorReport` (after `new`):
 
@@ -1062,12 +1062,12 @@ impl From<ParserError> for ErrorReport {
             })?;
 ```
 
-- [ ] **Step 4: Run the full test suite**
+- [x] **Step 4: Run the full test suite**
 
 Run: `cargo test`
 Expected: all PASS (the existing `test_frontmatter_unclosed` asserts only on `contains("no closing '---'")`, which still holds).
 
-- [ ] **Step 5: Update CHANGELOG.xml**
+- [x] **Step 5: Update CHANGELOG.xml**
 
 In `CHANGELOG.xml`, inside `<unreleased><fixed>`, add after the Task 5 entry:
 
@@ -1077,7 +1077,7 @@ In `CHANGELOG.xml`, inside `<unreleased><fixed>`, add after the Task 5 entry:
             </change>
 ```
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/error.rs src/parser.rs CHANGELOG.xml
@@ -1100,7 +1100,7 @@ git commit -m "fix: human-readable errors with file paths (BUG-21)"
 
 Byte-position arithmetic for the test (`.bytes()`, never `.chars()`): in `"Größe: 10 µm"`, the prefix `Größe: ` is 9 bytes (`G`=1, `r`=1, `ö`=2, `ß`=2, `e`=1, `:`=1, space=1) and the deletion `10 µm` is 6 bytes (`1`,`0`,space each 1, `µ`=2, `m`=1), so the deletion spans bytes 9..=14.
 
-- [ ] **Step 1: Write the failing-by-absence regression tests**
+- [x] **Step 1: Write the failing-by-absence regression tests**
 
 (a) Add to the `tests` module in `src/parser.rs`:
 
@@ -1166,12 +1166,12 @@ Byte-position arithmetic for the test (`.bytes()`, never `.chars()`): in `"Grö�
     }
 ```
 
-- [ ] **Step 2: Run tests to verify they pass (docs bug, not code bug)**
+- [x] **Step 2: Run tests to verify they pass (docs bug, not code bug)**
 
 Run: `cargo test test_non_ascii_cloze_positions_are_bytes test_non_ascii_cloze_render_round_trip`
 Expected: both PASS — the code already works in bytes; the bug is the documentation. These tests pin the behavior so a future "fix" toward char positions fails loudly. If either FAILS, stop: that is a real positions bug — investigate before touching docs.
 
-- [ ] **Step 3: Correct the docs**
+- [x] **Step 3: Correct the docs**
 
 (a) In `src/types/card.rs`, replace the field docs on `CardContent::Cloze` (lines 54–59):
 
@@ -1203,12 +1203,12 @@ Expected: both PASS — the code already works in bytes; the bug is the document
     },
 ```
 
-- [ ] **Step 4: Run the full test suite**
+- [x] **Step 4: Run the full test suite**
 
 Run: `cargo test`
 Expected: all PASS.
 
-- [ ] **Step 5: Update CHANGELOG.xml**
+- [x] **Step 5: Update CHANGELOG.xml**
 
 In `CHANGELOG.xml`, inside `<unreleased><fixed>`, add after the Task 6 entry:
 
@@ -1218,7 +1218,7 @@ In `CHANGELOG.xml`, inside `<unreleased><fixed>`, add after the Task 6 entry:
             </change>
 ```
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/types/card.rs src/cmd/export.rs src/parser.rs CHANGELOG.xml
@@ -1229,9 +1229,9 @@ git commit -m "docs: cloze positions are byte offsets; add non-ASCII round-trip 
 
 ## Final verification (after all tasks)
 
-- [ ] Run `cargo test` — everything green.
+- [x] Run `cargo test` — everything green. (171 passed)
 - [ ] Run `cargo clippy --all-targets` — no new warnings.
-- [ ] Run `xmllint --schema CHANGELOG.xsd CHANGELOG.xml --noout` if `xmllint` is available; otherwise visually confirm the seven new `<change>` entries sit inside `<unreleased><fixed>`.
+- [x] Run `xmllint --schema CHANGELOG.xsd CHANGELOG.xml --noout` — validates.
 
 ## Spec discrepancies
 
