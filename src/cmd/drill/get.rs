@@ -254,6 +254,9 @@ const REDIRECT_SCRIPT: &str = r#"
 "#;
 
 pub fn render_completion_page(ctx: &RenderContext, mutable: &MutableState) -> Fallible<Markup> {
+    if mutable.reviews.is_empty() {
+        return Ok(render_empty_completion_page(ctx));
+    }
     let total_cards = ctx.total_cards;
     let cards_reviewed = ctx.total_cards - mutable.cards.len();
     let start = ctx.session_started_at.into_inner();
@@ -310,37 +313,7 @@ pub fn render_completion_page(ctx: &RenderContext, mutable: &MutableState) -> Fa
         if cards_reviewed == 1 { "" } else { "s" }
     );
 
-    let (action_button, redirect_notice) = match &ctx.completion_action {
-        CompletionAction::Shutdown => (
-            html! {
-                div.shutdown-container {
-                    form action=(ctx.form_action) method="post" {
-                        input #shutdown .shutdown-button.btn.btn-danger type="submit" name="action" value="Shutdown" title="Shut down the server";
-                    }
-                }
-            },
-            html! {},
-        ),
-        CompletionAction::BackToCollections => (
-            html! {
-                div.shutdown-container {
-                    form #home-form action=(ctx.form_action) method="post" style="display:inline" {
-                        input type="hidden" name="action" value="Home";
-                        button #home .home-button.btn.btn-primary type="submit" { "Home" }
-                    }
-                }
-            },
-            html! {
-                p.redirect-notice {
-                    "Returning to collections in "
-                    span #countdown { "5" }
-                    "s. "
-                    a #cancel-redirect href="#" { "Cancel" }
-                }
-                script { (maud::PreEscaped(REDIRECT_SCRIPT)) }
-            },
-        ),
-    };
+    let (action_button, redirect_notice) = completion_actions(ctx);
 
     let html = html! {
         div.finished {
@@ -394,6 +367,56 @@ pub fn render_completion_page(ctx: &RenderContext, mutable: &MutableState) -> Fa
     Ok(html)
 }
 
+/// The action button (Shutdown or Home) and the auto-redirect notice for the
+/// completion page, depending on drill vs. serve mode.
+fn completion_actions(ctx: &RenderContext) -> (Markup, Markup) {
+    match &ctx.completion_action {
+        CompletionAction::Shutdown => (
+            html! {
+                div.shutdown-container {
+                    form action=(ctx.form_action) method="post" {
+                        input #shutdown .shutdown-button.btn.btn-danger type="submit" name="action" value="Shutdown" title="Shut down the server";
+                    }
+                }
+            },
+            html! {},
+        ),
+        CompletionAction::BackToCollections => (
+            html! {
+                div.shutdown-container {
+                    form #home-form action=(ctx.form_action) method="post" style="display:inline" {
+                        input type="hidden" name="action" value="Home";
+                        button #home .home-button.btn.btn-primary type="submit" { "Home" }
+                    }
+                }
+            },
+            html! {
+                p.redirect-notice {
+                    "Returning to collections in "
+                    span #countdown { "5" }
+                    "s. "
+                    a #cancel-redirect href="#" { "Cancel" }
+                }
+                script { (maud::PreEscaped(REDIRECT_SCRIPT)) }
+            },
+        ),
+    }
+}
+
+/// Completion page for a session that ended before any card was graded:
+/// no stats block, since there is nothing meaningful to report.
+fn render_empty_completion_page(ctx: &RenderContext) -> Markup {
+    let (action_button, redirect_notice) = completion_actions(ctx);
+    html! {
+        div.finished {
+            h1 { "Session Ended" }
+            div.summary { "No cards were reviewed." }
+            (redirect_notice)
+            (action_button)
+        }
+    }
+}
+
 fn undo_button(disabled: bool) -> Markup {
     if disabled {
         html! {
@@ -427,5 +450,44 @@ fn bookmark_button(is_bookmarked: bool) -> Markup {
                 "\u{2606} Bookmark"
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::*;
+    use crate::cmd::drill::cache::Cache;
+    use crate::db::Database;
+
+    #[test]
+    fn test_completion_page_without_reviews_skips_stats() -> Fallible<()> {
+        let db = Database::new(":memory:").unwrap();
+        let session_id = db.create_session(Timestamp::now()).unwrap();
+        let mutable = MutableState {
+            reveal: false,
+            session_id,
+            db,
+            cache: Cache::new(),
+            cards: Vec::new(),
+            reviews: Vec::new(),
+            finished_at: Some(Timestamp::now()),
+            card_shown_at: None,
+        };
+        let ctx = RenderContext {
+            directory: Path::new("."),
+            total_cards: 0,
+            session_started_at: Timestamp::now(),
+            answer_controls: AnswerControls::Full,
+            form_action: "/",
+            file_url_prefix: "/file",
+            completion_action: CompletionAction::Shutdown,
+        };
+        let html = render_completion_page(&ctx, &mutable)?.into_string();
+        assert!(html.contains("No cards were reviewed."), "html: {html}");
+        assert!(!html.contains("Session Stats"));
+        assert!(!html.contains("s/card"));
+        Ok(())
     }
 }

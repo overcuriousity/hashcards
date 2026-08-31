@@ -376,7 +376,7 @@ mod tests {
             .await?;
         assert!(response.status().is_success());
         let html = response.text().await?;
-        assert!(html.contains("Session Completed"));
+        assert!(html.contains("Session Ended"));
 
         Ok(())
     }

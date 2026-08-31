@@ -13,6 +13,9 @@
             <change author="claude">
                 HedgeDoc notes whose permission level prevents anonymous download (e.g. "Locked" or "Protected") now show an "Error" status with a descriptive message instead of silently reporting "OK" while storing an HTML page as markdown (yielding zero cards).
             </change>
+            <change author="claude">
+                Ending a session before revealing or grading any card no longer shows nonsense statistics (0 cards reviewed over the whole server uptime); the completion page now simply reports that no cards were reviewed.
+            </change>
         </fixed>
         <added>
             <change author="claude">
