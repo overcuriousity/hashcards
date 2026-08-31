@@ -26,6 +26,11 @@ use crate::cmd::serve::config::ResolvedGit;
 use crate::cmd::serve::config::ResolvedServeConfig;
 use crate::cmd::serve::git::clone_or_pull;
 use crate::cmd::serve::git::spawn_sync_task;
+use crate::cmd::serve::bookmarks::bookmark_delete_handler;
+use crate::cmd::serve::bookmarks::bookmark_list_handler;
+use crate::cmd::serve::bookmarks::bookmark_note_handler;
+use crate::cmd::serve::edit::edit_get_handler;
+use crate::cmd::serve::edit::edit_post_handler;
 use crate::cmd::serve::handlers::collection_file_handler;
 use crate::cmd::serve::handlers::collection_get_handler;
 use crate::cmd::serve::handlers::collection_post_handler;
@@ -207,6 +212,26 @@ pub async fn start_serve(config: ResolvedServeConfig) -> Fallible<()> {
         .route("/collection/{slug}", get(collection_get_handler))
         .route("/collection/{slug}", post(collection_post_handler))
         .route("/collection/{slug}/start", post(collection_start_handler))
+        .route(
+            "/collection/{slug}/bookmarks",
+            get(bookmark_list_handler),
+        )
+        .route(
+            "/collection/{slug}/bookmarks/{hash}/delete",
+            post(bookmark_delete_handler),
+        )
+        .route(
+            "/collection/{slug}/bookmarks/{hash}/note",
+            post(bookmark_note_handler),
+        )
+        .route(
+            "/collection/{slug}/edit/{hash}",
+            get(edit_get_handler),
+        )
+        .route(
+            "/collection/{slug}/edit/{hash}",
+            post(edit_post_handler),
+        )
         .route(
             "/collection/{slug}/file/{*path}",
             get(collection_file_handler),

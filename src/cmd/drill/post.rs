@@ -41,6 +41,8 @@ pub enum Action {
     Easy,
     Shutdown,
     Home,
+    Bookmark,
+    Unbookmark,
 }
 
 impl Action {
@@ -149,6 +151,24 @@ pub fn handle_action(
         }
         Action::Home => {
             Ok(ActionResult::Home)
+        }
+        Action::Bookmark => {
+            // Write immediately to DB so bookmarks survive aborted sessions.
+            // This is the one intentional mid-session DB write.
+            if !mutable.cards.is_empty() {
+                let hash = mutable.cards[0].hash();
+                let now = Timestamp::now();
+                mutable.db.insert_card_if_new(hash, now)?;
+                mutable.db.insert_bookmark(hash, None, now)?;
+            }
+            Ok(ActionResult::Continue)
+        }
+        Action::Unbookmark => {
+            if !mutable.cards.is_empty() {
+                let hash = mutable.cards[0].hash();
+                mutable.db.delete_bookmark(hash)?;
+            }
+            Ok(ActionResult::Continue)
         }
         Action::Forgot | Action::Hard | Action::Good | Action::Easy => {
             if mutable.reveal {

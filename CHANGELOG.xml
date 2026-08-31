@@ -9,6 +9,15 @@
             </change>
         </fixed>
         <added>
+            <change author="mstoeck3">
+                Bookmark button (shortcut: `b`) during drilling persists cards for later follow-up. Bookmarks survive aborted sessions and can carry an optional note.
+            </change>
+            <change author="mstoeck3">
+                Bookmark list at `/collection/{slug}/bookmarks` shows all bookmarked cards with deck name, file path, preview, and note. Orphaned bookmarks (card removed from source) are shown separately.
+            </change>
+            <change author="mstoeck3">
+                In-browser card editor at `/collection/{slug}/edit/{hash}`: edits write back to the source Markdown file atomically; FSRS review history is preserved via an in-place hash migration.
+            </change>
             <change author="eudoxia0">
                 MP4 audio files are now supported.
             </change>

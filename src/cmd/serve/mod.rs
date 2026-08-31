@@ -1,5 +1,7 @@
+mod bookmarks;
 mod browse;
 pub mod config;
+mod edit;
 mod git;
 mod handlers;
 mod hedgedoc;

@@ -37,3 +37,12 @@ create table reviews (
     due_date text not null,
     duration_ms integer
 ) strict;
+
+create table bookmarks (
+    card_hash text primary key
+        references cards (card_hash)
+        on update cascade
+        on delete cascade,
+    note text,
+    created_at text not null
+) strict;

@@ -146,6 +146,7 @@ pub fn render_browse_page(
     slug: &str,
     tree: &DeckNode,
     hedge_urls: &HashMap<String, String>,
+    bookmark_count: usize,
 ) -> Markup {
     let total_due = tree.due_today_recursive();
     page_template(html! {
@@ -181,6 +182,13 @@ pub fn render_browse_page(
                                 value=(format!("Drill ({total_due} due)"))
                                 class="drill-button btn btn-primary"
                                 disabled[total_due == 0];
+                        }
+                    }
+                }
+                @if bookmark_count > 0 {
+                    div.bookmark-bar {
+                        a.btn.btn-secondary href=(format!("/collection/{slug}/bookmarks")) {
+                            "\u{2605} Bookmarks (" (bookmark_count) ")"
                         }
                     }
                 }

@@ -111,7 +111,13 @@ fn collection_get_inner(state: &AppState, slug: &str) -> Fallible<String> {
             }
             map
         };
-        let html = render_browse_page(&rc.name, slug, &tree, &hedge_urls);
+        let bookmark_count = rc
+            .db_path
+            .to_str()
+            .and_then(|p| crate::db::Database::new(p).ok())
+            .and_then(|db| db.count_bookmarks().ok())
+            .unwrap_or(0);
+        let html = render_browse_page(&rc.name, slug, &tree, &hedge_urls, bookmark_count);
         return Ok(html.into_string());
     };
 
@@ -138,7 +144,7 @@ fn collection_get_inner(state: &AppState, slug: &str) -> Fallible<String> {
     Ok(html.into_string())
 }
 
-fn find_collection(state: &AppState, slug: &str) -> Option<ResolvedCollection> {
+pub(super) fn find_collection(state: &AppState, slug: &str) -> Option<ResolvedCollection> {
     if let Some(rc) = state.config.collections.iter().find(|c| c.slug == slug) {
         return Some(rc.clone());
     }

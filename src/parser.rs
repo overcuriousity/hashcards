@@ -94,6 +94,12 @@ fn extract_frontmatter(text: &str) -> Fallible<(DeckMetadata, &str)> {
     Ok((metadata, content))
 }
 
+/// Strip TOML frontmatter and return only the card content portion of a file.
+pub fn strip_frontmatter(text: &str) -> Fallible<&str> {
+    let (_, content) = extract_frontmatter(text)?;
+    Ok(content)
+}
+
 /// Parses all Markdown files in the given directory.
 pub fn parse_deck(directory: &PathBuf) -> Fallible<Vec<Card>> {
     let mut all_cards = Vec::new();
