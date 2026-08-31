@@ -483,7 +483,7 @@ git commit -m "fix: skip markdown links inside cloze cards (BUG-17)"
 
 Background: `Line::read` (`src/parser.rs:218-230`) is a stateless prefix match, so `Q:`, `A:`, `C:`, and `---` inside ``` or ~~~ fences create cards or separators.
 
-- [ ] **Step 1: Write the failing regression tests**
+- [x] **Step 1: Write the failing regression tests**
 
 Add to the `tests` module in `src/parser.rs`:
 
@@ -528,12 +528,12 @@ Add to the `tests` module in `src/parser.rs`:
     }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cargo test test_card_syntax_inside_backtick_fence_is_text test_card_syntax_inside_tilde_fence_is_text`
 Expected: both FAIL — the `Q:` line inside the fence is read as a new question while an answer is open, producing extra cards (the first assertion on `cards.len()` fails, or `parse` errors on the in-fence `---`).
 
-- [ ] **Step 3: Implement the fence-tracking line reader**
+- [x] **Step 3: Implement the fence-tracking line reader**
 
 In `src/parser.rs`, replace the whole `impl Line { fn read ... }` block (currently lines 217–231) with:
 
@@ -614,12 +614,12 @@ Then in `Parser::parse` (currently lines 262–271), replace the loop body:
         self.parse_line(state, Line::Eof, last_line, &mut cards)?;
 ```
 
-- [ ] **Step 4: Run the full test suite**
+- [x] **Step 4: Run the full test suite**
 
 Run: `cargo test`
 Expected: all PASS.
 
-- [ ] **Step 5: Update CHANGELOG.xml**
+- [x] **Step 5: Update CHANGELOG.xml**
 
 In `CHANGELOG.xml`, inside `<unreleased><fixed>`, add after the Task 3 entry:
 
@@ -629,7 +629,7 @@ In `CHANGELOG.xml`, inside `<unreleased><fixed>`, add after the Task 3 entry:
             </change>
 ```
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/parser.rs CHANGELOG.xml
