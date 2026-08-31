@@ -26,6 +26,7 @@ use crate::cmd::drill::server::AnswerControls;
 use crate::cmd::drill::state::MutableState;
 use crate::cmd::drill::state::ServerState;
 use crate::cmd::drill::template::page_template;
+use crate::error::ErrorReport;
 use crate::error::Fallible;
 use crate::flash::Flash;
 use crate::markdown::MarkdownRenderConfig;
@@ -53,21 +54,27 @@ pub struct RenderContext<'a> {
     pub completion_action: CompletionAction,
 }
 
+/// A styled error page with a 500 status and a link back to the session.
+pub(crate) fn error_response(e: &ErrorReport) -> (StatusCode, Html<String>) {
+    let html = page_template(html! {
+        div.error {
+            h1 { "Error" }
+            p { (e) }
+            p { a href="/" { "\u{2190} Back to session" } }
+        }
+    });
+    (StatusCode::INTERNAL_SERVER_ERROR, Html(html.into_string()))
+}
+
 pub async fn get_handler(
     State(state): State<ServerState>,
     Query(query): Query<HashMap<String, String>>,
 ) -> (StatusCode, Html<String>) {
     let flash = Flash::from_query(&query);
-    let html = match inner(state, flash).await {
-        Ok(html) => html,
-        Err(e) => page_template(html! {
-            div.error {
-                h1 { "Error" }
-                p { (e) }
-            }
-        }),
-    };
-    (StatusCode::OK, Html(html.into_string()))
+    match inner(state, flash).await {
+        Ok(html) => (StatusCode::OK, Html(html.into_string())),
+        Err(e) => error_response(&e),
+    }
 }
 
 async fn inner(state: ServerState, flash: Option<Flash>) -> Fallible<Markup> {
@@ -460,6 +467,7 @@ mod tests {
     use super::*;
     use crate::cmd::drill::cache::Cache;
     use crate::db::Database;
+    use crate::error::ErrorReport;
 
     #[test]
     fn test_completion_page_without_reviews_skips_stats() -> Fallible<()> {
@@ -489,5 +497,14 @@ mod tests {
         assert!(!html.contains("Session Stats"));
         assert!(!html.contains("s/card"));
         Ok(())
+    }
+
+    #[test]
+    fn test_error_response_is_styled_500_with_home_link() {
+        let (status, Html(body)) = error_response(&ErrorReport::new("kaboom"));
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(body.contains("class=\"error\""));
+        assert!(body.contains("kaboom"));
+        assert!(body.contains("href=\"/\""), "body: {body}");
     }
 }
