@@ -14,6 +14,7 @@ use serde::Deserialize;
 
 use crate::cmd::drill::template::page_template;
 use crate::cmd::serve::handlers::find_collection;
+use crate::cmd::serve::handlers::run_blocking;
 use crate::cmd::serve::state::AppState;
 use crate::collection::Collection;
 use crate::db::Bookmark;
@@ -32,7 +33,9 @@ pub async fn bookmark_list_handler(
     Query(query): Query<HashMap<String, String>>,
 ) -> (StatusCode, Html<String>) {
     let flash = Flash::from_query(&query);
-    match bookmark_list_inner(&state, &slug, flash) {
+    let state2 = state.clone();
+    let slug2 = slug.clone();
+    match run_blocking(move || bookmark_list_inner(&state2, &slug2, flash)).await {
         Ok(html) => (StatusCode::OK, Html(html)),
         Err(e) => error_page(&slug, e),
     }
@@ -195,7 +198,9 @@ pub async fn bookmark_delete_handler(
     AxumPath((slug, hash_hex)): AxumPath<(String, String)>,
 ) -> Redirect {
     let to = format!("/collection/{slug}/bookmarks");
-    match bookmark_delete_inner(&state, &slug, &hash_hex) {
+    let state2 = state.clone();
+    let slug2 = slug.clone();
+    match run_blocking(move || bookmark_delete_inner(&state2, &slug2, &hash_hex)).await {
         Ok(()) => Flash::success("Bookmark removed.").redirect(&to),
         Err(e) => Flash::error(format!("Failed to remove bookmark: {e}")).redirect(&to),
     }
@@ -223,7 +228,9 @@ pub async fn bookmark_note_handler(
     Form(form): Form<NoteForm>,
 ) -> Redirect {
     let to = format!("/collection/{slug}/bookmarks");
-    match bookmark_note_inner(&state, &slug, &hash_hex, form.note) {
+    let state2 = state.clone();
+    let slug2 = slug.clone();
+    match run_blocking(move || bookmark_note_inner(&state2, &slug2, &hash_hex, form.note)).await {
         Ok(()) => Flash::success("Note saved.").redirect(&to),
         Err(e) => Flash::error(format!("Failed to save note: {e}")).redirect(&to),
     }

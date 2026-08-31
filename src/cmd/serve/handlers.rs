@@ -66,6 +66,21 @@ use crate::types::date::Date;
 use crate::types::performance::Jitter;
 use crate::types::timestamp::Timestamp;
 
+/// Run blocking filesystem/SQLite work on tokio's blocking thread pool.
+///
+/// Serve handlers parse collections from disk and touch SQLite; doing that
+/// on the async executor stalls every other request (BUG-44). Pattern as in
+/// `git.rs` (`spawn_blocking` in `spawn_sync_task`).
+pub(super) async fn run_blocking<T, F>(f: F) -> Fallible<T>
+where
+    F: FnOnce() -> Fallible<T> + Send + 'static,
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(|e| ErrorReport::new(format!("Internal error: a background task failed: {e}")))?
+}
+
 pub async fn collection_get_handler(
     State(state): State<AppState>,
     Path(slug): Path<String>,
@@ -76,7 +91,9 @@ pub async fn collection_get_handler(
     // so we can return 404 for unknown collections vs. 500 for real errors.
     let known =
         find_collection(&state, &slug).is_some() || state.sessions.lock().contains_key(&slug);
-    match collection_get_inner(&state, &slug, flash) {
+    let state2 = state.clone();
+    let slug2 = slug.clone();
+    match run_blocking(move || collection_get_inner(&state2, &slug2, flash)).await {
         Ok(html) => (StatusCode::OK, Html(html)),
         Err(e) => {
             let status = if known {
@@ -236,7 +253,11 @@ pub async fn collection_start_handler(
     Path(slug): Path<String>,
     Form(form): Form<StartDrillForm>,
 ) -> Redirect {
-    match collection_start_inner(&state, &slug, form.decks, form.limit) {
+    let state2 = state.clone();
+    let slug2 = slug.clone();
+    match run_blocking(move || collection_start_inner(&state2, &slug2, form.decks, form.limit))
+        .await
+    {
         Ok(()) => Redirect::to(&format!("/collection/{slug}")),
         Err(e) => {
             log::error!("error starting drill for collection {slug}: {e}");
@@ -382,7 +403,9 @@ pub async fn collection_post_handler(
     Path(slug): Path<String>,
     Form(form): Form<FormData>,
 ) -> Redirect {
-    match collection_post_inner(&state, &slug, form) {
+    let state2 = state.clone();
+    let slug2 = slug.clone();
+    match run_blocking(move || collection_post_inner(&state2, &slug2, form)).await {
         Ok(redirect) => redirect,
         Err(e) => {
             log::error!("error handling action for collection {slug}: {e}");
@@ -431,8 +454,14 @@ fn collection_post_inner(state: &AppState, slug: &str, form: FormData) -> Fallib
         let static_collections = state.config.collections.clone();
         let collections_clone = state.collections.clone();
         tokio::spawn(async move {
-            let combined = build_combined_infos(&static_collections, &sources_snapshot);
-            *collections_clone.write().await = combined;
+            match tokio::task::spawn_blocking(move || {
+                build_combined_infos(&static_collections, &sources_snapshot)
+            })
+            .await
+            {
+                Ok(combined) => *collections_clone.write().await = combined,
+                Err(e) => log::error!("Collection count refresh failed: {e}"),
+            }
         });
 
         return Ok(Redirect::to("/"));
@@ -593,8 +622,15 @@ pub async fn sync_handler(State(state): State<AppState>) -> Redirect {
     match clone_or_pull(&git.repo_url, &git.branch, &git.repo_dir).await {
         Ok(()) => {
             let sources_snapshot = state.hedgedoc_sources.lock().clone();
-            let combined = build_combined_infos(&state.config.collections, &sources_snapshot);
-            *state.collections.write().await = combined;
+            let static_collections = state.config.collections.clone();
+            match tokio::task::spawn_blocking(move || {
+                build_combined_infos(&static_collections, &sources_snapshot)
+            })
+            .await
+            {
+                Ok(combined) => *state.collections.write().await = combined,
+                Err(e) => log::error!("Manual sync failed to compute collection counts: {e}"),
+            }
             *state.last_synced.lock() = Some(Timestamp::now());
             log::debug!("Manual sync completed successfully");
             Flash::success("Sync complete.").redirect("/")
@@ -775,8 +811,16 @@ pub async fn hedgedoc_add_handler(
     };
 
     // Refresh combined collection infos from the committed snapshot.
-    let combined = build_combined_infos(&state.config.collections, &snapshot);
-    *state.collections.write().await = combined;
+    let static_collections = state.config.collections.clone();
+    let snapshot_for_counts = snapshot.clone();
+    match tokio::task::spawn_blocking(move || {
+        build_combined_infos(&static_collections, &snapshot_for_counts)
+    })
+    .await
+    {
+        Ok(combined) => *state.collections.write().await = combined,
+        Err(e) => log::error!("Failed to compute collection counts: {e}"),
+    }
 
     // Update last synced time if the newly added note fetched without error.
     if snapshot
@@ -821,8 +865,16 @@ pub async fn hedgedoc_delete_handler(
         }
     };
 
-    let combined = build_combined_infos(&state.config.collections, &snapshot);
-    *state.collections.write().await = combined;
+    let static_collections = state.config.collections.clone();
+    let snapshot_for_counts = snapshot.clone();
+    match tokio::task::spawn_blocking(move || {
+        build_combined_infos(&static_collections, &snapshot_for_counts)
+    })
+    .await
+    {
+        Ok(combined) => *state.collections.write().await = combined,
+        Err(e) => log::error!("Failed to compute collection counts: {e}"),
+    }
 
     Flash::success(message).redirect("/hedgedoc")
 }
@@ -878,8 +930,15 @@ pub async fn hedgedoc_sync_now_handler(State(state): State<AppState>) -> Redirec
     }
 
     let sources_snapshot = state.hedgedoc_sources.lock().clone();
-    let combined = build_combined_infos(&state.config.collections, &sources_snapshot);
-    *state.collections.write().await = combined;
+    let static_collections = state.config.collections.clone();
+    match tokio::task::spawn_blocking(move || {
+        build_combined_infos(&static_collections, &sources_snapshot)
+    })
+    .await
+    {
+        Ok(combined) => *state.collections.write().await = combined,
+        Err(e) => log::error!("Failed to compute collection counts: {e}"),
+    }
     if any_success {
         *state.hedgedoc_last_synced.lock() = Some(Timestamp::now());
     }
@@ -889,5 +948,40 @@ pub async fn hedgedoc_sync_now_handler(State(state): State<AppState>) -> Redirec
     } else {
         Flash::error("HedgeDoc sync failed for all notes; see the statuses below.")
             .redirect("/hedgedoc")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+    use std::time::Instant;
+
+    use super::run_blocking;
+    use crate::error::Fallible;
+
+    /// Regression test (BUG-44): serve handlers used to run collection
+    /// parsing and SQLite work inline on the async executor, so one slow
+    /// request stalled every other request. `run_blocking` must move that
+    /// work off the executor: on a single-threaded runtime, a concurrent
+    /// timer still fires while the blocking closure sleeps.
+    #[tokio::test(flavor = "current_thread")]
+    async fn run_blocking_does_not_stall_the_executor() -> Fallible<()> {
+        let started = Instant::now();
+        let slow = tokio::spawn(run_blocking(|| {
+            std::thread::sleep(Duration::from_millis(800));
+            Ok(())
+        }));
+
+        // This timer shares the single executor thread with the task above.
+        // It can only fire promptly if the sleep is not on that thread.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "the executor was blocked for {:?}",
+            started.elapsed()
+        );
+
+        slow.await
+            .map_err(|e| crate::error::ErrorReport::new(format!("join failed: {e}")))?
     }
 }

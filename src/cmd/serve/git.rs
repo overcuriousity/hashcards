@@ -134,7 +134,18 @@ pub fn spawn_sync_task(
                 log::error!("Periodic git sync failed: {e}");
                 continue;
             }
-            let static_infos = refresh_collection_info(&collections);
+            let collections_for_counts = collections.clone();
+            let static_infos = match tokio::task::spawn_blocking(move || {
+                refresh_collection_info(&collections_for_counts)
+            })
+            .await
+            {
+                Ok(infos) => infos,
+                Err(e) => {
+                    log::error!("Failed to join collection counts task: {e}");
+                    continue;
+                }
+            };
             // Snapshot only the paths needed, then release the lock before
             // doing filesystem/DB work to avoid blocking other handlers.
             let source_paths: Vec<(String, String, std::path::PathBuf, std::path::PathBuf)> = {

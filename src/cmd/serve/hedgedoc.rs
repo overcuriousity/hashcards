@@ -694,7 +694,18 @@ pub fn spawn_hedgedoc_sync_task(
 
             // Snapshot sources before releasing the lock, then do FS/DB work outside it.
             let hedgedoc_snapshot = hedgedoc_sources.lock().clone();
-            let all_infos = build_combined_infos(&static_collections, &hedgedoc_snapshot);
+            let static_collections_for_counts = static_collections.clone();
+            let all_infos = match tokio::task::spawn_blocking(move || {
+                build_combined_infos(&static_collections_for_counts, &hedgedoc_snapshot)
+            })
+            .await
+            {
+                Ok(infos) => infos,
+                Err(e) => {
+                    log::error!("Failed to compute collection counts: {e}");
+                    continue;
+                }
+            };
             *collection_infos.write().await = all_infos;
             if any_success {
                 *hedgedoc_last_synced.lock() = Some(Timestamp::now());

@@ -14,6 +14,7 @@ use serde::Deserialize;
 
 use crate::cmd::drill::template::page_template;
 use crate::cmd::serve::handlers::find_collection;
+use crate::cmd::serve::handlers::run_blocking;
 use crate::cmd::serve::state::AppState;
 use crate::db::Database;
 use crate::error::ErrorReport;
@@ -32,7 +33,10 @@ pub async fn edit_get_handler(
     State(state): State<AppState>,
     AxumPath((slug, hash_hex)): AxumPath<(String, String)>,
 ) -> (StatusCode, Html<String>) {
-    match edit_get_inner(&state, &slug, &hash_hex) {
+    let state2 = state.clone();
+    let slug2 = slug.clone();
+    let hash2 = hash_hex.clone();
+    match run_blocking(move || edit_get_inner(&state2, &slug2, &hash2)).await {
         Ok(html) => (StatusCode::OK, Html(html)),
         Err(e) => error_page(&slug, &hash_hex, &e.to_string()),
     }
@@ -130,7 +134,10 @@ pub async fn edit_post_handler(
     AxumPath((slug, hash_hex)): AxumPath<(String, String)>,
     Form(form): Form<EditForm>,
 ) -> Result<Redirect, (StatusCode, Html<String>)> {
-    match edit_post_inner(&state, &slug, &hash_hex, form) {
+    let state2 = state.clone();
+    let slug2 = slug.clone();
+    let hash2 = hash_hex.clone();
+    match run_blocking(move || edit_post_inner(&state2, &slug2, &hash2, form)).await {
         Ok(()) => Ok(Redirect::to(&format!("/collection/{slug}/bookmarks"))),
         Err(e) => Err(error_page(&slug, &hash_hex, &e.to_string())),
     }

@@ -2,6 +2,9 @@
     <unreleased>
         <fixed>
             <change author="mstoeck3">
+                Serve mode now runs collection parsing and database work on a blocking thread pool instead of the async runtime, so one slow request no longer stalls every other request. (BUG-44)
+            </change>
+            <change author="mstoeck3">
                 Serve mode now detects URL slug collisions between collections (e.g. paths `a/b` and `a-b`, or a configured collection shadowing a HedgeDoc source) at config load and when adding a HedgeDoc source, failing with a message naming both colliding collections. Previously one collection was silently routed to the other's database. (BUG-43)
             </change>
             <change author="claude">
