@@ -430,6 +430,25 @@ fn collection_post_inner(state: &AppState, slug: &str, form: FormData) -> Fallib
         None => return Ok(Redirect::to(&format!("/collection/{slug}"))),
     };
     let mut guard = session.lock().unwrap();
+
+    // Re-check that this is still the session the map holds for `slug`: a
+    // concurrent Home request may have removed it (and closed its DB row)
+    // while we were waiting for the session lock, or a concurrent start may
+    // have replaced it with a new drill. Take the map lock in its own scoped
+    // block so it is never held while the session lock is held for longer
+    // than this check (Home never holds the two locks together either, so
+    // this ordering can't deadlock against it).
+    let still_current = {
+        let map = state.sessions.lock().unwrap();
+        matches!(map.get(slug), Some(current) if Arc::ptr_eq(&session, current))
+    };
+    if !still_current {
+        return Ok(
+            Flash::error("The session has ended, so that action was ignored.")
+                .redirect(&format!("/collection/{slug}")),
+        );
+    }
+
     let session = &mut *guard;
 
     // `Action::Home` returned early above, and it is the only action for which
