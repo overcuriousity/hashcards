@@ -194,8 +194,11 @@ pub async fn bookmark_delete_handler(
     State(state): State<AppState>,
     AxumPath((slug, hash_hex)): AxumPath<(String, String)>,
 ) -> Redirect {
-    let _ = bookmark_delete_inner(&state, &slug, &hash_hex);
-    Redirect::to(&format!("/collection/{slug}/bookmarks"))
+    let to = format!("/collection/{slug}/bookmarks");
+    match bookmark_delete_inner(&state, &slug, &hash_hex) {
+        Ok(()) => Flash::success("Bookmark removed.").redirect(&to),
+        Err(e) => Flash::error(format!("Failed to remove bookmark: {e}")).redirect(&to),
+    }
 }
 
 fn bookmark_delete_inner(state: &AppState, slug: &str, hash_hex: &str) -> Fallible<()> {
@@ -219,8 +222,11 @@ pub async fn bookmark_note_handler(
     AxumPath((slug, hash_hex)): AxumPath<(String, String)>,
     Form(form): Form<NoteForm>,
 ) -> Redirect {
-    let _ = bookmark_note_inner(&state, &slug, &hash_hex, form.note);
-    Redirect::to(&format!("/collection/{slug}/bookmarks"))
+    let to = format!("/collection/{slug}/bookmarks");
+    match bookmark_note_inner(&state, &slug, &hash_hex, form.note) {
+        Ok(()) => Flash::success("Note saved.").redirect(&to),
+        Err(e) => Flash::error(format!("Failed to save note: {e}")).redirect(&to),
+    }
 }
 
 fn bookmark_note_inner(state: &AppState, slug: &str, hash_hex: &str, note: String) -> Fallible<()> {

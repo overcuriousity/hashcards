@@ -147,4 +147,44 @@ mod tests {
         assert!(!body.contains("value=\"Reveal\""));
         Ok(())
     }
+
+    #[tokio::test]
+    async fn test_bookmark_delete_error_is_surfaced_as_flash() -> Fallible<()> {
+        let dir = tempdir()?;
+        let coll_dir = dir.path().to_path_buf();
+        write(coll_dir.join("Alpha.md"), "Q: What is 1+1?\nA: 2\n")?;
+        let slug = "test-collection";
+        let port = spawn_test_server(coll_dir, slug).await?;
+
+        // "nothex" is not a valid card hash: the delete must fail, and the
+        // failure must be visible on the post-redirect bookmarks page.
+        let response = reqwest::Client::new()
+            .post(format!(
+                "http://{TEST_HOST}:{port}/collection/{slug}/bookmarks/nothex/delete"
+            ))
+            .send()
+            .await?;
+        let body = response.text().await?;
+        assert!(body.contains("flash-error"), "body: {body}");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_hedgedoc_add_empty_url_is_surfaced_as_flash() -> Fallible<()> {
+        let dir = tempdir()?;
+        let coll_dir = dir.path().to_path_buf();
+        write(coll_dir.join("Alpha.md"), "Q: What is 1+1?\nA: 2\n")?;
+        let port = spawn_test_server(coll_dir, "test-collection").await?;
+
+        let response = reqwest::Client::new()
+            .post(format!("http://{TEST_HOST}:{port}/hedgedoc/add"))
+            .body("url=")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .send()
+            .await?;
+        let body = response.text().await?;
+        assert!(body.contains("Enter a HedgeDoc URL"), "body: {body}");
+        assert!(body.contains("flash-error"));
+        Ok(())
+    }
 }

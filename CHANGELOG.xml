@@ -19,6 +19,9 @@
             <change author="claude">
                 Starting a drill with no decks selected no longer silently drills the entire collection; it now shows "Select at least one deck."
             </change>
+            <change author="claude">
+                Errors in web actions are no longer silently swallowed: failed grades and undos, bookmark removal and note saving, manual git sync, and all HedgeDoc add/delete/sync failures now show an error banner instead of redirecting as if they had succeeded.
+            </change>
         </fixed>
         <added>
             <change author="claude">

@@ -23,6 +23,7 @@ use crate::cmd::drill::get::RenderContext;
 use crate::cmd::drill::get::render_completion_page;
 use crate::cmd::drill::get::render_session_page;
 use crate::cmd::drill::post::Action;
+use crate::cmd::drill::post::ActionResult;
 use crate::cmd::drill::post::FormData;
 use crate::cmd::drill::post::handle_action;
 use crate::cmd::drill::server::escape_js_string_literal;
@@ -366,7 +367,7 @@ pub async fn collection_post_handler(
         Ok(redirect) => redirect,
         Err(e) => {
             log::error!("error handling action for collection {slug}: {e}");
-            Redirect::to(&format!("/collection/{slug}"))
+            Flash::error(e.to_string()).redirect(&format!("/collection/{slug}"))
         }
     }
 }
@@ -412,17 +413,21 @@ fn collection_post_inner(state: &AppState, slug: &str, action: Action) -> Fallib
 
     // `Action::Home` returned early above, and it is the only action for which
     // `handle_action` yields `ActionResult::Home`. Every action reaching here
-    // therefore leaves the session running, so the result needs no dispatch and
-    // session closing lives solely in that early return, where it cannot drift
-    // out of step with a second copy.
-    handle_action(&mut session.mutable, session.session_started_at, action)?;
+    // leaves the session running; the only result needing dispatch is
+    // `ContinueWithFlash`, which carries a one-shot message for the user.
+    let result = handle_action(&mut session.mutable, session.session_started_at, action)?;
 
     state
         .sessions
         .lock()
         .unwrap()
         .insert(slug.to_owned(), session);
-    Ok(Redirect::to(&format!("/collection/{slug}")))
+    match result {
+        ActionResult::ContinueWithFlash(flash) => {
+            Ok(flash.redirect(&format!("/collection/{slug}")))
+        }
+        _ => Ok(Redirect::to(&format!("/collection/{slug}"))),
+    }
 }
 
 pub async fn collection_file_handler(
@@ -510,7 +515,10 @@ pub async fn collection_script_handler(
 pub async fn sync_handler(State(state): State<AppState>) -> Redirect {
     let git = match &state.config.git {
         Some(git) => git,
-        None => return Redirect::to("/"),
+        None => {
+            return Flash::error("Sync is not available: no git repository is configured.")
+                .redirect("/");
+        }
     };
 
     match clone_or_pull(&git.repo_url, &git.branch, &git.repo_dir).await {
@@ -520,12 +528,13 @@ pub async fn sync_handler(State(state): State<AppState>) -> Redirect {
             *state.collections.write().await = combined;
             *state.last_synced.lock().unwrap() = Some(Timestamp::now());
             log::debug!("Manual sync completed successfully");
+            Flash::success("Sync complete.").redirect("/")
         }
         Err(e) => {
             log::error!("Manual sync failed: {e}");
+            Flash::error(format!("Sync failed: {e}")).redirect("/")
         }
     }
-    Redirect::to("/")
 }
 
 // ---- HedgeDoc management handlers ----
@@ -560,7 +569,7 @@ pub async fn hedgedoc_add_handler(
     let url = {
         let trimmed = form.url.trim();
         if trimmed.is_empty() {
-            return Redirect::to("/hedgedoc");
+            return Flash::error("Enter a HedgeDoc URL.").redirect("/hedgedoc");
         }
         match reqwest::Url::parse(trimmed) {
             Ok(mut parsed) => {
@@ -580,7 +589,10 @@ pub async fn hedgedoc_add_handler(
         Some(d) => d.clone(),
         None => {
             log::error!("Cannot add HedgeDoc source: no data_dir configured");
-            return Redirect::to("/hedgedoc");
+            return Flash::error(
+                "Cannot add HedgeDoc source: no data directory is configured. Start hashcards with --config.",
+            )
+            .redirect("/hedgedoc");
         }
     };
 
@@ -592,7 +604,7 @@ pub async fn hedgedoc_add_handler(
             .flat_map(|s| s.notes.iter())
             .any(|n| n.url == url)
         {
-            return Redirect::to("/hedgedoc");
+            return Flash::error("This note is already added.").redirect("/hedgedoc");
         }
     }
 
@@ -600,7 +612,8 @@ pub async fn hedgedoc_add_handler(
         Some(uri) => uri,
         None => {
             log::error!("Failed to parse HedgeDoc source URI from {url}");
-            return Redirect::to("/hedgedoc");
+            return Flash::error(format!("Could not parse a HedgeDoc note URL from: {url}"))
+                .redirect("/hedgedoc");
         }
     };
 
@@ -620,7 +633,8 @@ pub async fn hedgedoc_add_handler(
             Ok(note) => new_note = Some(note),
             Err(e) => {
                 log::error!("Failed to add HedgeDoc note {url}: {e}");
-                return Redirect::to("/hedgedoc");
+                return Flash::error(format!("Failed to add HedgeDoc note: {e}"))
+                    .redirect("/hedgedoc");
             }
         }
     } else {
@@ -628,7 +642,8 @@ pub async fn hedgedoc_add_handler(
             Ok(source) => new_source = Some(source),
             Err(e) => {
                 log::error!("Failed to add HedgeDoc source {url}: {e}");
-                return Redirect::to("/hedgedoc");
+                return Flash::error(format!("Failed to add HedgeDoc source: {e}"))
+                    .redirect("/hedgedoc");
             }
         }
     }
@@ -643,12 +658,12 @@ pub async fn hedgedoc_add_handler(
                 .flat_map(|s| s.notes.iter())
                 .any(|n| n.url == url)
             {
-                return Redirect::to("/hedgedoc");
+                return Flash::error("This note is already added.").redirect("/hedgedoc");
             }
         } else if new_note.is_some() {
             if let Some(src) = sources.iter().find(|s| s.source_uri == source_uri) {
                 if src.notes.iter().any(|n| n.url == url) {
-                    return Redirect::to("/hedgedoc");
+                    return Flash::error("This note is already added.").redirect("/hedgedoc");
                 }
             }
         }
@@ -681,7 +696,8 @@ pub async fn hedgedoc_add_handler(
                     Ok(Ok(p)) => p,
                     Ok(Err(e)) | Err(e) => {
                         log::error!("Failed to create minimal config file: {e}");
-                        return Redirect::to("/hedgedoc");
+                        return Flash::error(format!("Failed to create config file: {e}"))
+                            .redirect("/hedgedoc");
                     }
                 };
             *state.config_path.lock().unwrap() = Some(p.clone());
@@ -704,7 +720,8 @@ pub async fn hedgedoc_add_handler(
     .and_then(|r| r)
     {
         log::error!("Failed to persist HedgeDoc entries to config: {e}");
-        return Redirect::to("/hedgedoc");
+        return Flash::error(format!("Failed to save HedgeDoc sources to config: {e}"))
+            .redirect("/hedgedoc");
     }
 
     // Persist succeeded: now update in-memory state.
@@ -733,7 +750,7 @@ pub async fn hedgedoc_add_handler(
         *state.hedgedoc_last_synced.lock().unwrap() = Some(Timestamp::now());
     }
 
-    Redirect::to("/hedgedoc")
+    Flash::success("HedgeDoc source added.").redirect("/hedgedoc")
 }
 
 #[derive(serde::Deserialize)]
@@ -761,41 +778,46 @@ pub async fn hedgedoc_delete_handler(
     // Phase 2: persist to TOML if config file is available, via spawn_blocking.
     // Extract config path before any await so the MutexGuard is dropped first.
     let maybe_config_path: Option<std::path::PathBuf> = state.config_path.lock().unwrap().clone();
-    let persist_ok = if let Some(config_path) = maybe_config_path {
+    let persist_result: Result<(), String> = if let Some(config_path) = maybe_config_path {
         let remaining_for_persist = remaining.clone();
         match tokio::task::spawn_blocking(move || {
             persist_hedgedoc_entries(&config_path, &remaining_for_persist)
         })
         .await
         {
-            Ok(Ok(())) => true,
+            Ok(Ok(())) => Ok(()),
             Ok(Err(e)) => {
                 log::error!("Failed to persist HedgeDoc entries after deletion: {e}");
-                false
+                Err(e.to_string())
             }
             Err(e) => {
                 log::error!("Persist task panicked after deletion: {e}");
-                false
+                Err(e.to_string())
             }
         }
     } else {
-        true // no config file to persist to, treat as success
+        Ok(()) // no config file to persist to, treat as success
     };
 
-    // Phase 3: only update in-memory state if persist succeeded (or was not needed).
-    if persist_ok {
-        *state.hedgedoc_sources.lock().unwrap() = new_sources.clone();
-        let combined = build_combined_infos(&state.config.collections, &new_sources);
-        *state.collections.write().await = combined;
+    // Only update in-memory state if persist succeeded (or was not needed).
+    match persist_result {
+        Ok(()) => {
+            *state.hedgedoc_sources.lock().unwrap() = new_sources.clone();
+            let combined = build_combined_infos(&state.config.collections, &new_sources);
+            *state.collections.write().await = combined;
+            Flash::success("HedgeDoc source removed.").redirect("/hedgedoc")
+        }
+        Err(msg) => {
+            Flash::error(format!("Failed to remove HedgeDoc source: {msg}")).redirect("/hedgedoc")
+        }
     }
-
-    Redirect::to("/hedgedoc")
 }
 
 /// Manually re-sync all HedgeDoc sources.
 pub async fn hedgedoc_sync_now_handler(State(state): State<AppState>) -> Redirect {
     if state.config.data_dir.is_none() {
-        return Redirect::to("/hedgedoc");
+        return Flash::error("HedgeDoc sync is not available: no data directory is configured.")
+            .redirect("/hedgedoc");
     }
 
     // Collect URLs to sync (release lock before awaiting).
@@ -848,5 +870,10 @@ pub async fn hedgedoc_sync_now_handler(State(state): State<AppState>) -> Redirec
         *state.hedgedoc_last_synced.lock().unwrap() = Some(Timestamp::now());
     }
 
-    Redirect::to("/hedgedoc")
+    if any_success || entries.is_empty() {
+        Flash::success("HedgeDoc sync finished.").redirect("/hedgedoc")
+    } else {
+        Flash::error("HedgeDoc sync failed for all notes; see the statuses below.")
+            .redirect("/hedgedoc")
+    }
 }
