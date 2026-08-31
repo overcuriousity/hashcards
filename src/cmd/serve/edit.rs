@@ -21,6 +21,7 @@ use crate::db::Database;
 use crate::error::ErrorReport;
 use crate::error::Fallible;
 use crate::error::fail;
+use crate::flash::Flash;
 use crate::parser::Parser;
 use crate::parser::parse_deck;
 use crate::parser::strip_frontmatter_with_offset;
@@ -128,18 +129,42 @@ pub struct EditForm {
     pub mtime_ms: String,
 }
 
+/// What a successful edit did, for user-facing reporting.
+pub struct EditOutcome {
+    /// Cards whose review history was migrated to a new hash.
+    pub migrated: usize,
+    /// New cards that could not be matched to prior history and start fresh.
+    pub skipped: usize,
+}
+
 pub async fn edit_post_handler(
     State(state): State<AppState>,
     AxumPath((slug, hash_hex)): AxumPath<(String, String)>,
     Form(form): Form<EditForm>,
 ) -> Result<Redirect, (StatusCode, Html<String>)> {
     match edit_post_inner(&state, &slug, &hash_hex, form) {
-        Ok(()) => Ok(Redirect::to(&format!("/collection/{slug}/bookmarks"))),
+        Ok(outcome) => {
+            let target = format!("/collection/{slug}/bookmarks");
+            let flash = if outcome.skipped > 0 {
+                Flash::error(format!(
+                    "Card saved, but {} card(s) could not be matched to their previous review history and will start fresh.",
+                    outcome.skipped
+                ))
+            } else {
+                Flash::success("Card saved.")
+            };
+            Ok(flash.redirect(&target))
+        }
         Err(e) => Err(error_page(&slug, &hash_hex, &e.to_string())),
     }
 }
 
-fn edit_post_inner(state: &AppState, slug: &str, hash_hex: &str, form: EditForm) -> Fallible<()> {
+fn edit_post_inner(
+    state: &AppState,
+    slug: &str,
+    hash_hex: &str,
+    form: EditForm,
+) -> Fallible<EditOutcome> {
     let rc = find_collection(state, slug)
         .ok_or_else(|| ErrorReport::new(format!("Unknown collection: {slug}")))?;
 
@@ -166,10 +191,9 @@ fn edit_post_inner(state: &AppState, slug: &str, hash_hex: &str, form: EditForm)
 
     // Collect sibling cards at the same (file_path, range) (cloze siblings share a range).
     let range = card.range();
-    let old_hashes: Vec<CardHash> = cards
+    let old_cards: Vec<&Card> = cards
         .iter()
         .filter(|c| c.file_path() == &file_path && c.range() == range)
-        .map(|c| c.hash())
         .collect();
 
     let new_text = form.new_text.trim().to_string();
@@ -192,11 +216,12 @@ fn edit_post_inner(state: &AppState, slug: &str, hash_hex: &str, form: EditForm)
     };
 
     // Find new cards at the same start_line (ranges are absolute file lines, same as old).
-    let new_hashes: Vec<CardHash> = new_cards
+    let new_at_block: Vec<&Card> = new_cards
         .iter()
         .filter(|c| c.file_path() == &file_path && c.range().0 == range.0)
-        .map(|c| c.hash())
         .collect();
+
+    let plan = plan_hash_migration(&old_cards, &new_at_block);
 
     let db_path = rc
         .db_path
@@ -205,25 +230,21 @@ fn edit_post_inner(state: &AppState, slug: &str, hash_hex: &str, form: EditForm)
     let db = Database::new(db_path)?;
     let now = Timestamp::now();
 
-    if new_hashes.len() == old_hashes.len() {
-        for (old, new) in old_hashes.iter().zip(new_hashes.iter()) {
-            if old == new {
-                continue;
-            }
-            if db.card_exists(*old)? {
-                db.rename_card_hash(*old, *new)?;
-            } else {
-                db.insert_card_if_new(*new, now)?;
-            }
-        }
-    } else {
-        // Card count changed — insert new hashes fresh (old history stays as orphans).
-        for new in &new_hashes {
+    for (old, new) in &plan.renames {
+        if db.card_exists(*old)? {
+            db.rename_card_hash(*old, *new)?;
+        } else {
             db.insert_card_if_new(*new, now)?;
         }
     }
+    for new in &plan.fresh {
+        db.insert_card_if_new(*new, now)?;
+    }
 
-    Ok(())
+    Ok(EditOutcome {
+        migrated: plan.renames.len(),
+        skipped: plan.skipped,
+    })
 }
 
 // ── Core splice logic ─────────────────────────────────────────────────────────
@@ -239,7 +260,9 @@ fn is_card_terminator(line: &str) -> bool {
 /// normalises to an exclusive bound suitable for `lines[start..end]`.
 fn block_end(lines: &[&str], range: (usize, usize)) -> usize {
     let end = range.1;
-    if end < lines.len() && is_card_terminator(lines[end]) {
+    // `end > range.0` guards the one-line card case: a single-line `C:`/`Q:`
+    // card's own first line is not the terminator of its own block.
+    if end > range.0 && end < lines.len() && is_card_terminator(lines[end]) {
         end
     } else {
         (end + 1).min(lines.len())
@@ -463,7 +486,91 @@ fn error_page(slug: &str, hash_hex: &str, msg: &str) -> (StatusCode, Html<String
 mod tests {
     use super::*;
 
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use parking_lot::Mutex;
+    use tokio::sync::RwLock;
+
+    use crate::cmd::serve::config::ResolvedServeConfig;
+    use crate::db::Database;
     use crate::types::card::CardContent;
+    use crate::types::timestamp::Timestamp;
+
+    fn test_state(coll_dir: &Path) -> Fallible<AppState> {
+        let config = ResolvedServeConfig::from_directories(
+            vec![coll_dir.display().to_string()],
+            "127.0.0.1".to_string(),
+            0,
+        )?;
+        Ok(AppState {
+            config: Arc::new(config),
+            collections: Arc::new(RwLock::new(Vec::new())),
+            sessions: Arc::new(Mutex::new(HashMap::new())),
+            last_synced: Arc::new(Mutex::new(None)),
+            hedgedoc_sources: Arc::new(Mutex::new(Vec::new())),
+            hedgedoc_last_synced: Arc::new(Mutex::new(None)),
+            config_path: Arc::new(Mutex::new(None)),
+        })
+    }
+
+    /// Regression test for BUG-35, end to end: reordering the deletions of a
+    /// cloze card migrates both histories instead of orphaning them.
+    #[test]
+    fn test_edit_reorder_migrates_history_by_content() -> Fallible<()> {
+        let dir = tempfile::tempdir()?;
+        let coll_dir = dir.path().canonicalize()?;
+        let file = coll_dir.join("Deck.md");
+        std::fs::write(&file, "C: A [x] B [y]\n")?;
+
+        let state = test_state(&coll_dir)?;
+        let slug = state.config.collections[0].slug.clone();
+        let db_path = state.config.collections[0].db_path.clone();
+
+        let old_cards = parse_deck(&coll_dir)?.cards;
+        assert_eq!(old_cards.len(), 2);
+        let hash_hex = old_cards[0].hash().to_hex();
+
+        // Seed the DB with both pre-edit cards.
+        {
+            let db_str = db_path
+                .to_str()
+                .ok_or_else(|| ErrorReport::new("non-utf8 db path"))?;
+            let db = Database::new(db_str)?;
+            let now = Timestamp::now();
+            for c in &old_cards {
+                db.insert_card_if_new(c.hash(), now)?;
+            }
+        }
+
+        let mtime = file_mtime_ms(&file)?;
+        let outcome = edit_post_inner(
+            &state,
+            &slug,
+            &hash_hex,
+            EditForm {
+                new_text: "C: A [y] B [x]".to_string(),
+                mtime_ms: mtime.to_string(),
+            },
+        )?;
+        assert_eq!(outcome.migrated, 2);
+        assert_eq!(outcome.skipped, 0);
+
+        // Every post-edit hash is in the DB; no pre-edit hash remains.
+        let db_str = db_path
+            .to_str()
+            .ok_or_else(|| ErrorReport::new("non-utf8 db path"))?;
+        let db = Database::new(db_str)?;
+        let new_cards = parse_deck(&coll_dir)?.cards;
+        assert_eq!(new_cards.len(), 2);
+        for c in &new_cards {
+            assert!(db.card_exists(c.hash())?, "missing new card {}", c.hash());
+        }
+        for c in &old_cards {
+            assert!(!db.card_exists(c.hash())?, "stale old card {}", c.hash());
+        }
+        Ok(())
+    }
 
     fn cloze(text: &str, start: usize, end: usize) -> Card {
         Card::new(
@@ -562,6 +669,15 @@ mod tests {
         let lines = vec!["Q: foo", "A: bar"];
         // Card at (0, 1): range.1 = 1, lines[1] = "A: bar" → not a terminator
         assert_eq!(block_end(&lines, (0, 1)), 2);
+    }
+
+    /// A one-line card (e.g. a single-line `C:` cloze at EOF) has
+    /// `range.0 == range.1`; its own first line must not be mistaken for the
+    /// terminator of the block, or the splice inserts instead of replacing.
+    #[test]
+    fn test_block_end_single_line_card_is_not_its_own_terminator() {
+        let lines = vec!["C: A [x] B [y]"];
+        assert_eq!(block_end(&lines, (0, 0)), 1);
     }
 
     #[test]

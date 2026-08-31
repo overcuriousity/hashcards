@@ -2,6 +2,12 @@
     <unreleased>
         <fixed>
             <change author="mstoeck3">
+                When a cloze card is edited in the browser, review history now follows each deletion by its content instead of its position in the document. Reordering or removing a deletion no longer transplants history onto the wrong sibling card; cards that cannot be matched unambiguously start fresh, and the save notice says how many. (BUG-35)
+            </change>
+            <change author="mstoeck3">
+                Editing a one-line card (such as a single-line `C:` cloze) in the browser no longer duplicates it: the card's own first line is no longer mistaken for the end of its own block, so the edit replaces the line instead of being inserted above it.
+            </change>
+            <change author="mstoeck3">
                 The in-browser card editor now re-checks the source file's modification time immediately before atomically replacing it, so a concurrent change on disk is never silently overwritten. If reverting a rejected edit fails, the editor now reports that the file may be inconsistent instead of silently ignoring the failure. (BUG-36)
             </change>
             <change author="mstoeck3">
