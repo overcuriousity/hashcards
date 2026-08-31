@@ -68,6 +68,12 @@ pub struct GitSection {
     pub branch: String,
     #[serde(default = "default_poll_interval")]
     pub poll_interval_minutes: u64,
+    /// Author name for auto-commits of in-browser edits.
+    #[serde(default = "default_commit_author_name")]
+    pub commit_author_name: String,
+    /// Author email for auto-commits of in-browser edits.
+    #[serde(default = "default_commit_author_email")]
+    pub commit_author_email: String,
 }
 
 fn default_branch() -> String {
@@ -76,6 +82,14 @@ fn default_branch() -> String {
 
 fn default_poll_interval() -> u64 {
     30
+}
+
+fn default_commit_author_name() -> String {
+    "hashcards web edit".to_string()
+}
+
+fn default_commit_author_email() -> String {
+    "hashcards@localhost".to_string()
 }
 
 #[derive(Deserialize)]
@@ -163,6 +177,8 @@ pub struct ResolvedGit {
     pub repo_url: String,
     pub branch: String,
     pub poll_interval_minutes: u64,
+    pub commit_author_name: String,
+    pub commit_author_email: String,
     pub repo_dir: PathBuf,
     pub db_dir: PathBuf,
 }
@@ -292,6 +308,8 @@ impl ResolvedServeConfig {
                     repo_url,
                     branch: g.branch,
                     poll_interval_minutes: g.poll_interval_minutes,
+                    commit_author_name: g.commit_author_name,
+                    commit_author_email: g.commit_author_email,
                     repo_dir: repo_dir.clone(),
                     db_dir: db_dir.clone(),
                 }),

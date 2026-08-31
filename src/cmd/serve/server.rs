@@ -75,6 +75,8 @@ pub async fn start_serve(config: ResolvedServeConfig) -> Fallible<()> {
                 repo_url: git.repo_url.clone(),
                 branch: git.branch.clone(),
                 poll_interval_minutes: git.poll_interval_minutes,
+                commit_author_name: git.commit_author_name.clone(),
+                commit_author_email: git.commit_author_email.clone(),
                 repo_dir: git.repo_dir.clone(),
                 db_dir: git.db_dir.clone(),
             })

@@ -525,7 +525,6 @@ mod tests {
     use crate::cmd::drill::state::Review;
     use crate::db::Database;
     use crate::db::ReviewRecord;
-    use crate::db::ReviewRow;
     use crate::error::ErrorReport;
     use crate::fsrs::Grade;
     use crate::rng::TinyRng;

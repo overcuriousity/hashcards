@@ -18,6 +18,8 @@ data_dir = "/var/lib/hashcards"       # Directory for repo clone and databases
 repo_url = "https://github.com/user/flashcards.git"
 # branch = "main"                     # Branch to track (default: main)
 # poll_interval_minutes = 30          # Sync interval; 0 to disable (default: 30)
+# commit_author_name = "hashcards web edit"     # Author of auto-commits for in-browser edits
+# commit_author_email = "hashcards@localhost"   # Author email for those commits
 
 [defaults]
 # answer_controls = "full"            # "full" or "binary" (default: full)

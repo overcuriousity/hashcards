@@ -1751,7 +1751,7 @@ mod tests {
         db.insert_card(b, now)?;
         let session_id = db.create_session(now)?;
 
-        let mut review = |db: &mut Database, hash, when: Timestamp, grade| -> Fallible<i64> {
+        let review = |db: &mut Database, hash, when: Timestamp, grade| -> Fallible<i64> {
             let mut r = sample_review(hash, when, 2.0);
             r.grade = grade;
             db.insert_review_and_update_performance(
