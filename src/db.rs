@@ -63,6 +63,10 @@ pub struct Bookmark {
     pub created_at: Timestamp,
 }
 
+/// The schema version a freshly created database gets, and the highest
+/// migration number `migrate` knows how to apply.
+const SCHEMA_VERSION: i64 = 3;
+
 impl Database {
     pub fn new(database_path: &str) -> Fallible<Self> {
         let mut conn = Connection::open(database_path)?;
@@ -71,10 +75,9 @@ impl Database {
             let tx = conn.transaction()?;
             if !probe_schema_exists(&tx)? {
                 tx.execute_batch(include_str!("schema.sql"))?;
+                set_schema_version(&tx, SCHEMA_VERSION)?;
             } else {
-                migrate_add_duration_ms(&tx)?;
-                migrate_add_bookmarks(&tx)?;
-                migrate_add_voided(&tx)?;
+                migrate(&tx)?;
             }
             tx.commit()?;
         }
@@ -602,6 +605,61 @@ fn migrate_add_voided(tx: &Transaction) -> Fallible<()> {
     Ok(())
 }
 
+/// Bring an existing database up to SCHEMA_VERSION by applying numbered
+/// migrations in order. Databases from before the version table existed
+/// start at version 0; migrations 1-3 probe before altering, so they are
+/// safe no-ops on legacy databases that already have the feature.
+fn migrate(tx: &Transaction) -> Fallible<()> {
+    ensure_version_table(tx)?;
+    let current = get_schema_version(tx)?;
+    if current > SCHEMA_VERSION {
+        return fail(format!(
+            "This database uses schema version {current}, but this version of hashcards only supports up to schema version {SCHEMA_VERSION}. Please upgrade hashcards."
+        ));
+    }
+    for version in (current + 1)..=SCHEMA_VERSION {
+        match version {
+            1 => migrate_add_duration_ms(tx)?,
+            2 => migrate_add_bookmarks(tx)?,
+            3 => migrate_add_voided(tx)?,
+            other => {
+                return fail(format!(
+                    "Internal error: no migration defined for schema version {other}."
+                ));
+            }
+        }
+        set_schema_version(tx, version)?;
+    }
+    Ok(())
+}
+
+/// Create the schema_version table if missing and seed it at version 0
+/// (the state of databases created before versioning existed).
+fn ensure_version_table(tx: &Transaction) -> Fallible<()> {
+    tx.execute_batch(
+        "create table if not exists schema_version (version integer not null) strict;",
+    )?;
+    let count: i64 = tx.query_row("select count(*) from schema_version;", [], |row| row.get(0))?;
+    if count == 0 {
+        tx.execute("insert into schema_version (version) values (0);", [])?;
+    }
+    Ok(())
+}
+
+fn get_schema_version(tx: &Transaction) -> Fallible<i64> {
+    let version: i64 = tx.query_row("select version from schema_version;", [], |row| row.get(0))?;
+    Ok(version)
+}
+
+fn set_schema_version(tx: &Transaction, version: i64) -> Fallible<()> {
+    tx.execute("delete from schema_version;", [])?;
+    tx.execute(
+        "insert into schema_version (version) values (?);",
+        params![version],
+    )?;
+    Ok(())
+}
+
 fn probe_schema_exists(tx: &Transaction) -> Fallible<bool> {
     let sql = "select count(*) from sqlite_master where type='table' AND name=?;";
     let count: i64 = tx.query_row(sql, ["cards"], |row| row.get(0))?;
@@ -922,6 +980,179 @@ mod tests {
             err.to_string(),
             format!("error: No performance data found for card with hash {card_hash}")
         );
+        Ok(())
+    }
+
+    /// The reviews/cards/sessions schema as it stood before the duration_ms,
+    /// bookmarks, and voided migrations existed (schema.sql minus those three
+    /// features). Used to exercise the full migration chain from version 0.
+    const OLD_SCHEMA: &str = "
+        create table cards (
+            card_hash text primary key,
+            added_at text not null,
+            last_reviewed_at text,
+            stability real,
+            difficulty real,
+            interval_raw real,
+            interval_days integer,
+            due_date text,
+            review_count integer not null
+        ) strict;
+
+        create table sessions (
+            session_id integer primary key,
+            started_at text not null,
+            ended_at text not null
+        ) strict;
+
+        create table reviews (
+            review_id integer primary key,
+            session_id integer not null
+                references sessions (session_id)
+                on update cascade
+                on delete cascade,
+            card_hash text not null
+                references cards (card_hash)
+                on update cascade
+                on delete cascade,
+            reviewed_at text not null,
+            grade text not null,
+            stability real not null,
+            difficulty real not null,
+            interval_raw real not null,
+            interval_days integer not null,
+            due_date text not null
+        ) strict;
+    ";
+
+    /// Render a normalized, order-stable description of every user table:
+    /// all columns (via table_xinfo, so generated columns are included) and
+    /// every explicitly created index. Comparing two snapshots with
+    /// assert_eq! yields a readable diff on mismatch.
+    fn schema_snapshot(conn: &Connection) -> Fallible<String> {
+        use std::fmt::Write;
+        let mut out = String::new();
+        let tables: Vec<String> = {
+            let mut stmt = conn.prepare(
+                "select name from sqlite_master where type = 'table' and name not like 'sqlite_%' order by name;",
+            )?;
+            let rows = stmt.query_map([], |row| row.get(0))?;
+            let mut tables = Vec::new();
+            for row in rows {
+                tables.push(row?);
+            }
+            tables
+        };
+        for table in &tables {
+            writeln!(out, "table {table}").unwrap();
+            let mut stmt = conn.prepare(
+                "select cid, name, type, \"notnull\", dflt_value, pk, hidden from pragma_table_xinfo(?) order by cid;",
+            )?;
+            let mut rows = stmt.query(params![table])?;
+            while let Some(row) = rows.next()? {
+                let cid: i64 = row.get(0)?;
+                let name: String = row.get(1)?;
+                let col_type: String = row.get(2)?;
+                let notnull: i64 = row.get(3)?;
+                let dflt: Option<String> = row.get(4)?;
+                let pk: i64 = row.get(5)?;
+                let hidden: i64 = row.get(6)?;
+                writeln!(
+                    out,
+                    "  column {cid} {name} {col_type} notnull={notnull} default={dflt:?} pk={pk} hidden={hidden}"
+                )
+                .unwrap();
+            }
+            let index_names: Vec<String> = {
+                let mut stmt = conn.prepare(
+                    "select name from pragma_index_list(?) where origin = 'c' order by name;",
+                )?;
+                let rows = stmt.query_map(params![table], |row| row.get(0))?;
+                let mut names = Vec::new();
+                for row in rows {
+                    names.push(row?);
+                }
+                names
+            };
+            for index in &index_names {
+                let mut stmt =
+                    conn.prepare("select name from pragma_index_info(?) order by seqno;")?;
+                let mut rows = stmt.query(params![index])?;
+                let mut columns: Vec<String> = Vec::new();
+                while let Some(row) = rows.next()? {
+                    columns.push(row.get(0)?);
+                }
+                writeln!(out, "  index {index} on ({})", columns.join(", ")).unwrap();
+            }
+        }
+        Ok(out)
+    }
+
+    /// Migrating a pre-migration-era DB produces exactly the same schema as
+    /// executing a fresh schema.sql, and stamps the current schema version.
+    #[test]
+    fn test_migrated_schema_matches_fresh_schema() -> Fallible<()> {
+        let dir = tempfile::TempDir::new().unwrap();
+        let old_path = dir.path().join("old.db");
+        let old_path = old_path.to_str().unwrap();
+        {
+            let conn = Connection::open(old_path)?;
+            conn.execute_batch(OLD_SCHEMA)?;
+        }
+        let migrated = Database::new(old_path)?;
+        let fresh = Database::new(":memory:")?;
+        assert_eq!(
+            schema_snapshot(&migrated.conn)?,
+            schema_snapshot(&fresh.conn)?,
+            "migrated schema diverged from fresh schema.sql"
+        );
+        let version: i64 =
+            migrated
+                .conn
+                .query_row("select version from schema_version;", [], |row| row.get(0))?;
+        assert_eq!(version, SCHEMA_VERSION);
+        Ok(())
+    }
+
+    /// Reopening an already-migrated DB is a no-op (migrations are not
+    /// re-applied, the version is stable).
+    #[test]
+    fn test_reopening_migrated_db_is_stable() -> Fallible<()> {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("stable.db");
+        let path = path.to_str().unwrap();
+        {
+            let conn = Connection::open(path)?;
+            conn.execute_batch(OLD_SCHEMA)?;
+        }
+        let first = Database::new(path)?;
+        let snapshot = schema_snapshot(&first.conn)?;
+        drop(first);
+        let second = Database::new(path)?;
+        assert_eq!(schema_snapshot(&second.conn)?, snapshot);
+        Ok(())
+    }
+
+    /// A DB stamped with a schema version newer than this build supports is
+    /// rejected with a clear error instead of being mangled.
+    #[test]
+    fn test_newer_schema_version_is_rejected() -> Fallible<()> {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("future.db");
+        let path = path.to_str().unwrap();
+        {
+            let conn = Connection::open(path)?;
+            conn.execute_batch(include_str!("schema.sql"))?;
+            conn.execute_batch(
+                "create table if not exists schema_version (version integer not null) strict;",
+            )?;
+            conn.execute("delete from schema_version;", [])?;
+            conn.execute("insert into schema_version (version) values (999);", [])?;
+        }
+        let result = Database::new(path);
+        assert!(result.is_err());
+        let message = result.err().unwrap().to_string();
+        assert!(message.contains("999"), "unhelpful error: {message}");
         Ok(())
     }
 

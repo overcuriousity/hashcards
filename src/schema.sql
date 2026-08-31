@@ -47,3 +47,7 @@ create table bookmarks (
     note text,
     created_at text not null
 ) strict;
+
+create table schema_version (
+    version integer not null
+) strict;
