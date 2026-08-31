@@ -298,7 +298,7 @@ fn splice_card_block(
 
 // ── Utilities ─────────────────────────────────────────────────────────────────
 
-fn find_card_by_hash<'a>(cards: &'a [Card], hash: CardHash) -> Fallible<&'a Card> {
+fn find_card_by_hash(cards: &[Card], hash: CardHash) -> Fallible<&Card> {
     cards
         .iter()
         .find(|c| c.hash() == hash)

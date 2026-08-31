@@ -49,6 +49,7 @@ use crate::types::card::Card;
 use crate::types::card_hash::CardHash;
 use crate::types::date::Date;
 use crate::types::timestamp::Timestamp;
+use crate::db::Database;
 
 pub async fn collection_get_handler(
     State(state): State<AppState>,
@@ -111,12 +112,13 @@ fn collection_get_inner(state: &AppState, slug: &str) -> Fallible<String> {
             }
             map
         };
-        let bookmark_count = rc
-            .db_path
-            .to_str()
-            .and_then(|p| crate::db::Database::new(p).ok())
-            .and_then(|db| db.count_bookmarks().ok())
-            .unwrap_or(0);
+        let db_path = rc.db_path.to_str().ok_or_else(|| {
+            crate::error::ErrorReport::new(format!(
+                "Database path is not valid UTF-8: {}",
+                rc.db_path.display()
+            ))
+        })?;
+        let bookmark_count = Database::new(db_path)?.count_bookmarks()?;
         let html = render_browse_page(&rc.name, slug, &tree, &hedge_urls, bookmark_count);
         return Ok(html.into_string());
     };
