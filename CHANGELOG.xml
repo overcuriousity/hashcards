@@ -14,6 +14,11 @@
                 Cloze cards whose text literally contains the string `CLOZE_DELETION` no longer render that text as a spurious cloze blank. The internal placeholder is now generated per render and checked against the card text.
             </change>
         </fixed>
+        <security>
+            <change author="claude">
+                Titles of audio media references are now HTML-escaped before being embedded in the audio element, preventing HTML injection through a crafted markdown title.
+            </change>
+        </security>
         <added>
             <change author="mstoeck3">
                 Each grade is now written to the database as it happens, so a session interrupted by a dropped connection or a closed tab keeps the progress made up to that point. Previously an interrupted session was lost entirely.
