@@ -1,6 +1,9 @@
 <changelog>
     <unreleased>
         <fixed>
+            <change author="mstoeck3">
+                Grading and undoing now commit to the database before changing the in-memory session. Previously a failed database write during a grade silently discarded the card (unrecorded and not undoable), and a failed write during undo could duplicate the card in the queue.
+            </change>
             <change author="claude">
                 Pressing Shutdown before the drill session is finished now shows a message explaining that the session is still in progress, instead of silently doing nothing.
             </change>

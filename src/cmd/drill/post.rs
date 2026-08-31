@@ -124,26 +124,29 @@ pub fn handle_action(
             Ok(ActionResult::Continue)
         }
         Action::Undo => {
-            if !mutable.reviews.is_empty() {
-                let last_review: Review = mutable.reviews.pop().unwrap();
-                if last_review.should_repeat() {
-                    // Remove the card from the back of the queue.
-                    mutable.cards.pop();
-                }
-                let card: Card = last_review.card;
-                let hash: CardHash = card.hash();
-                mutable.cards.insert(0, card);
-                // Void the review and restore prior performance atomically.
-                mutable.db.void_review_and_restore_performance(
-                    last_review.review_id,
-                    hash,
-                    last_review.prev_performance,
-                )?;
-                mutable.cache.update(hash, last_review.prev_performance)?;
-                mutable.finished_at = None;
-                mutable.reveal = false;
-                mutable.card_shown_at = None;
+            let Some(last_review) = mutable.reviews.last().cloned() else {
+                return Ok(ActionResult::Continue);
+            };
+            let hash: CardHash = last_review.card.hash();
+            // Void the review and restore prior performance atomically, and
+            // commit BEFORE mutating any in-memory state. If this fails, the
+            // queue, cache, and undo stack are untouched.
+            mutable.db.void_review_and_restore_performance(
+                last_review.review_id,
+                hash,
+                last_review.prev_performance,
+            )?;
+            // The transaction committed; it is now safe to mutate memory.
+            mutable.reviews.pop();
+            if last_review.should_repeat() {
+                // Remove the card from the back of the queue.
+                mutable.cards.pop();
             }
+            mutable.cards.insert(0, last_review.card);
+            mutable.cache.update(hash, last_review.prev_performance)?;
+            mutable.finished_at = None;
+            mutable.reveal = false;
+            mutable.card_shown_at = None;
             Ok(ActionResult::Continue)
         }
         Action::End => {
@@ -413,5 +416,32 @@ mod tests {
                 .is_empty(),
             "no review row must exist"
         );
+    }
+
+    #[test]
+    fn test_undo_db_failure_leaves_state_unchanged() {
+        let card_a = make_card("QA");
+        let card_b = make_card("QB");
+        let mut mutable = make_state_with_cards(vec![card_a.clone(), card_b.clone()]);
+        let started = Timestamp::now();
+        handle_action(&mut mutable, started, Action::Reveal).unwrap();
+        handle_action(&mut mutable, started, Action::Good).unwrap();
+        assert_eq!(mutable.cards.len(), 1);
+        assert_eq!(mutable.reviews.len(), 1);
+        // Inject a DB failure into the undo: point the recorded review at a
+        // nonexistent row, so the void update matches zero rows and errors.
+        mutable.reviews[0].review_id = 999_999;
+        let result = handle_action(&mut mutable, started, Action::Undo);
+        assert!(result.is_err(), "the injected DB failure must propagate");
+        // On error, in-memory state must be completely unchanged: no duplicate
+        // card in the queue, undo stack intact.
+        assert_eq!(mutable.cards.len(), 1, "queue must be unchanged");
+        assert_eq!(
+            mutable.cards[0].hash(),
+            card_b.hash(),
+            "head card must be unchanged"
+        );
+        assert_eq!(mutable.reviews.len(), 1, "undo stack must be unchanged");
+        assert!(mutable.finished_at.is_none());
     }
 }
