@@ -2,6 +2,9 @@
     <unreleased>
         <fixed>
             <change author="claude">
+                Pressing Shutdown before the drill session is finished now shows a message explaining that the session is still in progress, instead of silently doing nothing.
+            </change>
+            <change author="claude">
                 The collection browse page now reports database errors instead of silently displaying a bookmark count of zero.
             </change>
             <change author="claude">

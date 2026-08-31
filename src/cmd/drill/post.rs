@@ -154,7 +154,9 @@ pub fn handle_action(
             if mutable.finished_at.is_some() {
                 Ok(ActionResult::Shutdown)
             } else {
-                Ok(ActionResult::Continue)
+                Ok(ActionResult::ContinueWithFlash(Flash::error(
+                    "The session is still in progress. Press End to finish it before shutting down.",
+                )))
             }
         }
         Action::Home => Ok(ActionResult::Home),
@@ -250,6 +252,7 @@ mod tests {
     use crate::cmd::drill::cache::Cache;
     use crate::cmd::drill::state::MutableState;
     use crate::db::Database;
+    use crate::flash::FlashKind;
 
     fn make_mutable() -> MutableState {
         let db = Database::new(":memory:").unwrap();
@@ -283,12 +286,18 @@ mod tests {
     }
 
     #[test]
-    fn test_shutdown_returns_continue_when_unfinished() {
+    fn test_shutdown_before_finish_flashes_explanation() {
         let mut mutable = make_mutable();
         assert!(mutable.finished_at.is_none());
         let now = Timestamp::now();
         let result = handle_action(&mut mutable, now, Action::Shutdown).unwrap();
-        assert!(matches!(result, ActionResult::Continue));
+        match result {
+            ActionResult::ContinueWithFlash(flash) => {
+                assert_eq!(flash.kind, FlashKind::Error);
+                assert!(flash.message.contains("still in progress"));
+            }
+            _ => panic!("expected ContinueWithFlash"),
+        }
     }
 
     #[test]
