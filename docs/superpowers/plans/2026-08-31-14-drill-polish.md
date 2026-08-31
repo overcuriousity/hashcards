@@ -392,7 +392,7 @@ Deriving instead of storing keeps Undo, session finish, and the grade path all c
 - Consumes: `MutableState.reviews`, `Review.card`, `Card::hash()` — all existing.
 - Produces: `pub fn progress(&self) -> (usize, usize)` on `MutableState` returning `(first_graded, repeats)`. **Task 5 calls exactly this.**
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Add at the bottom of `src/cmd/drill/state.rs`:
 
@@ -456,12 +456,12 @@ mod tests {
 
 (`Card`, `Grade`, `Performance`, `Timestamp` are already imported at the top of `state.rs` and arrive via `use super::*;`. `Card` and `Review` derive `Clone`. The deck name is a plain `String` — `DeckName` is `pub type DeckName = String` in `src/types/aliases.rs`.)
 
-- [ ] **Step 2: Run the test and see it fail**
+- [x] **Step 2: Run the test and see it fail**
 
 Run: `cargo test test_progress_counts_first_grades_and_repeats`
 Expected: FAIL to compile with "no method named `progress` found for struct `MutableState`".
 
-- [ ] **Step 3: Implement `MutableState::progress`**
+- [x] **Step 3: Implement `MutableState::progress`**
 
 In `src/cmd/drill/state.rs`, add to the imports at the top:
 
@@ -493,12 +493,12 @@ and add the method inside the existing `impl MutableState` block (below `new`):
     }
 ```
 
-- [ ] **Step 4: Run the tests and see them pass**
+- [x] **Step 4: Run the tests and see them pass**
 
 Run: `cargo test --lib cmd::drill::state`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/cmd/drill/state.rs
@@ -521,7 +521,7 @@ Render the counter next to the bar and drive the bar from `progress()` instead o
 - Consumes: `MutableState::progress() -> (usize, usize)` from Task 4.
 - Produces: `pub fn progress_text(first_graded: usize, total_cards: usize, repeats: usize) -> String` in `src/cmd/drill/get.rs` (pure; unit-tested). Markup gains `div.progress` wrapping a new `div.progress-text` and the existing `div.progress-bar`.
 
-- [ ] **Step 1: Write the failing tests for the text format**
+- [x] **Step 1: Write the failing tests for the text format**
 
 `get.rs` has no tests module yet; add one at the bottom of `src/cmd/drill/get.rs`:
 
@@ -542,12 +542,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run the tests and see them fail**
+- [x] **Step 2: Run the tests and see them fail**
 
 Run: `cargo test test_progress_text_formats`
 Expected: FAIL to compile with "cannot find function `progress_text`".
 
-- [ ] **Step 3: Implement `progress_text`**
+- [x] **Step 3: Implement `progress_text`**
 
 Add to `src/cmd/drill/get.rs` (above `render_session_page`):
 
@@ -564,12 +564,12 @@ pub fn progress_text(first_graded: usize, total_cards: usize, repeats: usize) ->
 }
 ```
 
-- [ ] **Step 4: Run the tests and see them pass**
+- [x] **Step 4: Run the tests and see them pass**
 
 Run: `cargo test test_progress_text_formats`
 Expected: PASS.
 
-- [ ] **Step 5: Wire it into `render_session_page`**
+- [x] **Step 5: Wire it into `render_session_page`**
 
 In `src/cmd/drill/get.rs`, replace lines 88-92 (from `let undo_disabled…` through `let progress_bar_style…`):
 
@@ -603,7 +603,7 @@ Then replace the header block in the markup (lines 145-155):
             }
 ```
 
-- [ ] **Step 6: Style the text**
+- [x] **Step 6: Style the text**
 
 In `src/cmd/drill/style.css`, inside the `.root { .header { … } }` block, add alongside the existing `.progress-bar` rule (which keeps working — CSS nesting produces descendant selectors, and the bar is still a descendant of `.header`):
 
@@ -621,12 +621,12 @@ In `src/cmd/drill/style.css`, inside the `.root { .header { … } }` block, add 
         }
 ```
 
-- [ ] **Step 7: Run the full test suite**
+- [x] **Step 7: Run the full test suite**
 
 Run: `cargo test`
 Expected: PASS (the drill e2e tests in `src/cmd/drill/mod.rs` fetch pages and must still render).
 
-- [ ] **Step 8: Update CHANGELOG.xml**
+- [x] **Step 8: Update CHANGELOG.xml**
 
 Append inside `<unreleased><added>`:
 
@@ -636,7 +636,7 @@ Append inside `<unreleased><added>`:
             </change>
 ```
 
-- [ ] **Step 9: Commit**
+- [x] **Step 9: Commit**
 
 ```bash
 git add src/cmd/drill/get.rs src/cmd/drill/style.css CHANGELOG.xml

@@ -146,6 +146,9 @@
             </change>
         </security>
         <added>
+            <change author="claude">
+                The drill progress bar now has a numeric counter: "7 of 20 (+3 repeats)". The bar advances when a card is graded for the first time; cards re-queued by Forgot/Hard are tallied in the repeats counter instead of silently stalling the bar. Undo rolls the counter back. (FEAT-08)
+            </change>
             <change author="mstoeck3">
                 Session resume: the collection list now shows "Resume session (N cards remaining)" for a running drill session, and starting a new drill no longer silently discards an unfinished one. Session rows left open by a crash or restart are closed and reported on the collection page; every review made before the interruption is kept. (FEAT-03)
             </change>

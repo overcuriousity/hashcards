@@ -103,12 +103,24 @@ async fn inner(state: ServerState, flash: Option<Flash>) -> Fallible<Markup> {
     Ok(html)
 }
 
+/// Human-readable progress: "N of M", plus "(+k repeats)" when cards
+/// re-queued by Forgot/Hard have come around again.
+pub fn progress_text(first_graded: usize, total_cards: usize, repeats: usize) -> String {
+    if repeats > 0 {
+        let noun = if repeats == 1 { "repeat" } else { "repeats" };
+        format!("{first_graded} of {total_cards} (+{repeats} {noun})")
+    } else {
+        format!("{first_graded} of {total_cards}")
+    }
+}
+
 pub fn render_session_page(ctx: &RenderContext, mutable: &MutableState) -> Fallible<Markup> {
     let undo_disabled = mutable.reviews.is_empty();
     let total_cards = ctx.total_cards;
-    let cards_done = ctx.total_cards - mutable.cards.len();
+    let (cards_done, repeats) = mutable.progress();
     let percent_done = (cards_done * 100).checked_div(total_cards).unwrap_or(100);
     let progress_bar_style = format!("width: {}%;", percent_done);
+    let progress_label = progress_text(cards_done, total_cards, repeats);
     let card: Card = match mutable.cards.first() {
         Some(card) => card.clone(),
         None => {
@@ -168,14 +180,17 @@ pub fn render_session_page(ctx: &RenderContext, mutable: &MutableState) -> Falli
     let html = html! {
         div.root {
             div.header {
-                div.progress-bar
-                    role="progressbar"
-                    aria-label="Study progress"
-                    aria-valuenow=(percent_done)
-                    aria-valuemin="0"
-                    aria-valuemax="100"
-                {
-                    div.progress-fill style=(progress_bar_style) {}
+                div.progress {
+                    div.progress-text { (progress_label) }
+                    div.progress-bar
+                        role="progressbar"
+                        aria-label="Study progress"
+                        aria-valuenow=(percent_done)
+                        aria-valuemin="0"
+                        aria-valuemax="100"
+                    {
+                        div.progress-fill style=(progress_bar_style) {}
+                    }
                 }
             }
             div.card-container {
@@ -581,5 +596,15 @@ mod tests {
         let ctx = make_ctx(Path::new("."));
         let result = render_completion_page(&ctx, &mutable);
         assert!(result.is_err());
+    }
+
+    /// FEAT-08: "N of M" text, with "(+k repeats)" only when repeats exist.
+    #[test]
+    fn test_progress_text_formats() {
+        assert_eq!(progress_text(0, 20, 0), "0 of 20");
+        assert_eq!(progress_text(7, 20, 0), "7 of 20");
+        assert_eq!(progress_text(7, 20, 1), "7 of 20 (+1 repeat)");
+        assert_eq!(progress_text(7, 20, 3), "7 of 20 (+3 repeats)");
+        assert_eq!(progress_text(20, 20, 2), "20 of 20 (+2 repeats)");
     }
 }

@@ -41,6 +41,18 @@ body {
         justify-content: center;
         align-items: center;
 
+        .progress {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .progress-text {
+            font-size: 14px;
+            color: #555;
+        }
+
         .progress-bar {
             width: min(300px, 80vw);
             height: 24px;
