@@ -376,6 +376,16 @@ mod tests {
     }
 
     #[test]
+    fn test_undo_with_no_reviews_is_noop() {
+        let mut mutable = make_mutable();
+        let now = Timestamp::now();
+        let result = handle_action(&mut mutable, now, Action::Undo, None).unwrap();
+        assert!(matches!(result, ActionResult::Continue));
+        assert!(mutable.reviews.is_empty());
+        assert!(mutable.cards.is_empty());
+    }
+
+    #[test]
     fn test_action_grade() {
         assert_eq!(Action::Forgot.grade(), Some(Grade::Forgot));
         assert_eq!(Action::Hard.grade(), Some(Grade::Hard));
