@@ -30,12 +30,12 @@ mod tests {
     use tempfile::tempdir;
     use tokio::spawn;
 
-    use crate::types::performance::Jitter;
     use crate::cmd::drill::server::AnswerControls;
     use crate::cmd::drill::server::ServerConfig;
     use crate::cmd::drill::server::start_server;
     use crate::error::Fallible;
     use crate::helper::create_tmp_copy_of_test_directory;
+    use crate::types::performance::Jitter;
     use crate::types::timestamp::Timestamp;
     use crate::utils::wait_for_server;
 

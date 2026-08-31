@@ -63,6 +63,7 @@ impl Jitter {
     }
 
     /// No jitter: intervals are unchanged.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub const fn none() -> Jitter {
         Jitter(0.0)
     }
