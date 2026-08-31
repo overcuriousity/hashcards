@@ -4,7 +4,11 @@
 # See also: hashcards serve --help
 
 [server]
-# host = "0.0.0.0"                    # Bind address (default: 0.0.0.0)
+# host = "127.0.0.1"                  # Bind address (default: 127.0.0.1).
+                                      # Set to "0.0.0.0" to listen on all
+                                      # interfaces. WARNING: hashcards has no
+                                      # authentication; anyone who can reach
+                                      # the port can read and edit your cards.
 # port = 8000                         # Port number (default: 8000)
 data_dir = "/var/lib/hashcards"       # Directory for repo clone and databases
 

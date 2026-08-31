@@ -15,6 +15,9 @@
             <change author="claude">
                 Symlinked directories inside a collection can no longer be used to serve files from outside the collection root: media paths are now canonicalized and must resolve inside the (canonicalized) collection directory, in both the file-serving endpoint and collection-relative (`@/`) media resolution (BUG-46).
             </change>
+            <change author="claude">
+                The server now binds to 127.0.0.1 by default instead of 0.0.0.0. Listening on all interfaces requires an explicit opt-in (`host = "0.0.0.0"` in the config, or `--host 0.0.0.0`); the documentation now states that hashcards has no authentication (BUG-47).
+            </change>
         </security>
         <added>
             <change author="mstoeck3">

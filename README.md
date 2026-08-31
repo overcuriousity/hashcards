@@ -197,7 +197,7 @@ $ hashcards serve --config hashcards.toml
 Options:
 
 - `--config=<PATH>`: Path to a TOML configuration file.
-- `--host=<HOST>`: Bind address (default: `0.0.0.0`).
+- `--host=<HOST>`: Bind address (default: `127.0.0.1`). Set to `0.0.0.0` to listen on all interfaces. **Warning:** hashcards has no authentication — anyone who can reach the port can read your cards and edit the underlying files.
 - `--port=<PORT>`: Port number (default: `8000`).
 
 **Priority:** if explicit `--config` is given, it is used. Otherwise, if one or more directories are passed as arguments, they are served directly without a config file. If neither is given and a `hashcards.toml` exists in the current directory, that is used. If none of these apply, an error is printed.
@@ -419,7 +419,7 @@ For more control, create a `hashcards.toml` (see `hashcards.example.toml` for th
 
 ```toml
 [server]
-host = "0.0.0.0"
+host = "127.0.0.1"
 port = 8000
 data_dir = "/var/lib/hashcards"
 
@@ -440,6 +440,8 @@ path = "japanese"
 name = "Mathematics"
 path = "math"
 ```
+
+By default the server binds to `127.0.0.1` and is only reachable from the local machine. To expose it on the network (for example on a home server), set `host = "0.0.0.0"` explicitly. **Warning:** hashcards has no authentication — anyone who can reach the port can read your cards and edit the underlying files. Only do this on a trusted network or behind an authenticating reverse proxy.
 
 When a `[git]` section is present, the server clones the repository into `{data_dir}/repo` on startup and syncs it periodically. Databases are stored in `{data_dir}/db`. A "Sync Now" button on the landing page triggers an immediate sync.
 

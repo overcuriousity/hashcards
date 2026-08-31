@@ -39,8 +39,11 @@ pub struct ServerSection {
     pub data_dir: String,
 }
 
+/// Default bind address. Deliberately localhost-only: hashcards has no
+/// authentication, so binding to all interfaces must be an explicit opt-in
+/// (`host = "0.0.0.0"` in the config file).
 fn default_host() -> String {
-    "0.0.0.0".to_string()
+    "127.0.0.1".to_string()
 }
 
 fn default_port() -> u16 {
@@ -295,5 +298,21 @@ impl ResolvedServeConfig {
             hedgedoc_entries: Vec::new(),
             _temp_dir: None,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::Fallible;
+
+    /// Regression test for BUG-47: with no `host` key in the config, the
+    /// server must bind to localhost, not to all interfaces.
+    #[test]
+    fn test_default_host_is_localhost() -> Fallible<()> {
+        let toml = "[server]\ndata_dir = \"/var/lib/hashcards\"\n";
+        let config: ServeConfig = toml::from_str(toml)?;
+        assert_eq!(config.server.host, "127.0.0.1");
+        Ok(())
     }
 }
