@@ -78,7 +78,7 @@ Verified facts about the current code that this plan builds on (line numbers che
   - `pub fn Parser::parse_with_duplicates(&self, text: &str) -> Result<ParsedFile, ParserError>`.
   - `Parser::parse` keeps its exact current signature and observable behavior (returns deduped `Vec<Card>`).
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Add to the `tests` module in `src/parser.rs` (alongside the existing tests; `use super::*;` is already in scope there):
 
@@ -120,12 +120,12 @@ fn test_parse_still_dedups_silently() -> Result<(), ParserError> {
 }
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `cargo test test_duplicate_card`
 Expected: compile error — `parse_with_duplicates` does not exist. (A compile failure of the test target counts as the failing state.)
 
-- [ ] **Step 3: Implement the types and `parse_with_duplicates`**
+- [x] **Step 3: Implement the types and `parse_with_duplicates`**
 
 In `src/parser.rs`, add to the imports at the top (keeping the existing ones):
 
@@ -256,12 +256,12 @@ Replace the body of `Parser::parse` (currently `:262-281`) and add `parse_with_d
 
 The old `HashSet`-based dedup block inside `parse` is deleted. `HashSet` is no longer used by production code in this file, so move the import: delete `use std::collections::HashSet;` from the top of `src/parser.rs` and add `use std::collections::HashSet;` inside the `#[cfg(test)] mod tests` block (Task 4's hash-equivalence test uses it from there).
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [x] **Step 4: Run the tests to verify they pass**
 
 Run: `cargo test test_duplicate_card test_parse_still_dedups_silently`
 Expected: 3 passed. Then run `cargo test` — the whole suite must pass (no existing caller of `parse` changes behavior).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/parser.rs
