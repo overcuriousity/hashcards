@@ -195,4 +195,84 @@ mod tests {
         assert!(body.contains("flash-error"));
         Ok(())
     }
+
+    /// Regression test (BUG-01): a request error mid-session must not drop
+    /// the drill session. Forces a render error by deleting the card's
+    /// source file, then asserts the session survives and the next GET
+    /// renders the same card rather than the deck browser.
+    #[tokio::test]
+    async fn test_session_survives_render_error() -> Fallible<()> {
+        let port = pick_unused_port().unwrap();
+        let dir = tempdir()?;
+        let coll_dir = dir.path().to_path_buf();
+        let card_file = coll_dir.join("Alpha.md");
+        write(&card_file, "Q: What is 1+1?\nA: 2\n")?;
+
+        let slug = "test-collection".to_string();
+        let config = ResolvedServeConfig {
+            host: TEST_HOST.to_string(),
+            port,
+            git: None,
+            defaults: DefaultsSection::default(),
+            collections: vec![ResolvedCollection {
+                name: "Test Collection".to_string(),
+                slug: slug.clone(),
+                coll_dir: coll_dir.clone(),
+                db_path: coll_dir.join("hashcards.db"),
+            }],
+            data_dir: None,
+            config_path: None,
+            hedgedoc_entries: Vec::new(),
+            _temp_dir: None,
+        };
+
+        spawn(async move { start_serve(config).await });
+        wait_for_server(TEST_HOST, port).await?;
+        let client = reqwest::Client::new();
+
+        // Start a drill session; the redirect is followed to the session page.
+        let response = client
+            .post(format!("http://{TEST_HOST}:{port}/collection/{slug}/start"))
+            .body("decks=Alpha")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .send()
+            .await?;
+        assert!(response.status().is_success());
+        let body = response.text().await?;
+        assert!(
+            body.contains("progress-bar"),
+            "expected a running session, got: {body}"
+        );
+
+        // Force a render error mid-session: the card's source file vanishes.
+        std::fs::remove_file(&card_file)?;
+        let response = client
+            .get(format!("http://{TEST_HOST}:{port}/collection/{slug}"))
+            .send()
+            .await?;
+        assert_eq!(
+            response.status(),
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR
+        );
+
+        // Restore the file (identical content, identical hash). The session
+        // must have survived the error: the next GET renders the same card,
+        // not the deck browser.
+        write(&card_file, "Q: What is 1+1?\nA: 2\n")?;
+        let response = client
+            .get(format!("http://{TEST_HOST}:{port}/collection/{slug}"))
+            .send()
+            .await?;
+        assert!(response.status().is_success());
+        let body = response.text().await?;
+        assert!(
+            body.contains("progress-bar"),
+            "session was dropped by the render error: {body}"
+        );
+        assert!(
+            !body.contains("deck-tree"),
+            "deck browser rendered instead of the surviving session"
+        );
+        Ok(())
+    }
 }

@@ -11,11 +11,17 @@ use crate::cmd::serve::config::ResolvedCollection;
 use crate::cmd::serve::config::ResolvedServeConfig;
 use crate::types::timestamp::Timestamp;
 
+/// A drill session shared behind a per-slug lock. Handlers clone the `Arc`
+/// out of the map (releasing the map lock immediately) and lock the session
+/// itself for the duration of the request, so an error can never remove the
+/// session from the map.
+pub type SharedSession = Arc<Mutex<DrillSession>>;
+
 #[derive(Clone)]
 pub struct AppState {
     pub config: Arc<ResolvedServeConfig>,
     pub collections: Arc<RwLock<Vec<CollectionInfo>>>,
-    pub sessions: Arc<Mutex<HashMap<String, DrillSession>>>,
+    pub sessions: Arc<Mutex<HashMap<String, SharedSession>>>,
     pub last_synced: Arc<Mutex<Option<Timestamp>>>,
     pub hedgedoc_sources: Arc<Mutex<Vec<HedgedocSource>>>,
     pub hedgedoc_last_synced: Arc<Mutex<Option<Timestamp>>>,
