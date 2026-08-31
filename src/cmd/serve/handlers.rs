@@ -414,7 +414,17 @@ pub async fn collection_file_handler(
         }
     };
 
-    let loader = MediaLoader::new(coll_dir);
+    let loader = match MediaLoader::new(coll_dir) {
+        Ok(loader) => loader,
+        Err(error) => {
+            log::error!("Failed to create media loader: {error}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                [(CONTENT_TYPE, "text/plain")],
+                b"Internal Server Error".to_vec(),
+            );
+        }
+    };
     let validated_path: PathBuf = match loader.validate(&path) {
         Ok(p) => p,
         Err(_) => {

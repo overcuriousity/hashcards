@@ -272,7 +272,17 @@ async fn file_handler(
     State(state): State<ServerState>,
     Path(path): Path<String>,
 ) -> (StatusCode, [(HeaderName, &'static str); 1], Vec<u8>) {
-    let loader = MediaLoader::new(state.directory.clone());
+    let loader = match MediaLoader::new(state.directory.clone()) {
+        Ok(loader) => loader,
+        Err(error) => {
+            log::error!("Failed to create media loader: {error}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                [(CONTENT_TYPE, "text/plain")],
+                b"Internal Server Error".to_vec(),
+            );
+        }
+    };
     let validated_path: PathBuf = match loader.validate(&path) {
         Ok(p) => p,
         Err(_) => {
