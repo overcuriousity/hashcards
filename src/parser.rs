@@ -572,7 +572,7 @@ impl Parser {
                     } else if escape_mode {
                         escape_mode = false;
                         clean_text.push(c);
-                    } else if is_markdown_link_open(&text, bytepos) {
+                    } else if is_markdown_link_open(text, bytepos) {
                         // This bracket opens a markdown link; keep it verbatim.
                         link_mode = true;
                         clean_text.push(c);
@@ -650,7 +650,7 @@ impl Parser {
                 } else if escape_mode {
                     index += 1;
                     escape_mode = false;
-                } else if is_markdown_link_open(&text, bytepos) {
+                } else if is_markdown_link_open(text, bytepos) {
                     // This bracket opens a markdown link; it stays in the text.
                     link_mode = true;
                     index += 1;

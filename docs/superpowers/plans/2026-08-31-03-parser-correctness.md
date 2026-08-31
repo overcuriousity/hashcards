@@ -1230,7 +1230,7 @@ git commit -m "docs: cloze positions are byte offsets; add non-ASCII round-trip 
 ## Final verification (after all tasks)
 
 - [x] Run `cargo test` — everything green. (171 passed)
-- [ ] Run `cargo clippy --all-targets` — no new warnings.
+- [x] Run `cargo clippy --all-targets` — no new warnings.
 - [x] Run `xmllint --schema CHANGELOG.xsd CHANGELOG.xml --noout` — validates.
 
 ## Spec discrepancies
