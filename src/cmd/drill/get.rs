@@ -28,6 +28,7 @@ use crate::cmd::drill::state::ServerState;
 use crate::cmd::drill::template::page_template;
 use crate::error::ErrorReport;
 use crate::error::Fallible;
+use crate::error::fail;
 use crate::flash::Flash;
 use crate::markdown::MarkdownRenderConfig;
 use crate::media::resolve::MediaResolverBuilder;
@@ -108,7 +109,12 @@ pub fn render_session_page(ctx: &RenderContext, mutable: &MutableState) -> Falli
     let cards_done = ctx.total_cards - mutable.cards.len();
     let percent_done = (cards_done * 100).checked_div(total_cards).unwrap_or(100);
     let progress_bar_style = format!("width: {}%;", percent_done);
-    let card = mutable.cards[0].clone();
+    let card: Card = match mutable.cards.first() {
+        Some(card) => card.clone(),
+        None => {
+            return fail("No cards are left in the queue. The session may already be finished.");
+        }
+    };
     let is_bookmarked = mutable.db.bookmark_exists(card.hash())?;
     let coll_path = ctx.directory.to_path_buf();
     let deck_path = card.relative_file_path(&coll_path)?;
@@ -268,7 +274,11 @@ pub fn render_completion_page(ctx: &RenderContext, mutable: &MutableState) -> Fa
     let total_cards = ctx.total_cards;
     let cards_reviewed = ctx.total_cards - mutable.cards.len();
     let start = ctx.session_started_at.into_inner();
-    let end = mutable.finished_at.unwrap().into_inner();
+    let finished_at = match mutable.finished_at {
+        Some(finished_at) => finished_at,
+        None => return fail("The completion page was requested before the session finished."),
+    };
+    let end = finished_at.into_inner();
     let duration_s = (end - start).num_seconds();
 
     // Compute per-card durations for median pace and slowest card.
@@ -467,8 +477,10 @@ mod tests {
 
     use super::*;
     use crate::cmd::drill::cache::Cache;
+    use crate::cmd::drill::state::Review;
     use crate::db::Database;
     use crate::error::ErrorReport;
+    use crate::types::performance::Performance;
 
     #[test]
     fn test_completion_page_without_reviews_skips_stats() -> Fallible<()> {
@@ -507,5 +519,56 @@ mod tests {
         assert!(body.contains("class=\"error\""));
         assert!(body.contains("kaboom"));
         assert!(body.contains("href=\"/\""), "body: {body}");
+    }
+
+    fn make_empty_mutable() -> MutableState {
+        let db = Database::new(":memory:").unwrap();
+        let session_id = db.create_session(Timestamp::now()).unwrap();
+        MutableState::new(db, session_id, Cache::new(), Vec::new())
+    }
+
+    fn make_ctx(directory: &Path) -> RenderContext<'_> {
+        RenderContext {
+            directory,
+            total_cards: 0,
+            session_started_at: Timestamp::now(),
+            answer_controls: AnswerControls::Full,
+            form_action: "/",
+            file_url_prefix: "http://localhost:0/file",
+            completion_action: CompletionAction::Shutdown,
+        }
+    }
+
+    #[test]
+    fn test_render_session_page_with_empty_queue_is_error() {
+        let mutable = make_empty_mutable();
+        let ctx = make_ctx(Path::new("."));
+        let result = render_session_page(&ctx, &mutable);
+        assert!(result.is_err());
+    }
+
+    /// A completion page requested with reviews recorded but no finish
+    /// timestamp must return an error, not panic. (With no reviews at all the
+    /// page short-circuits to the empty-session variant before reaching here.)
+    #[test]
+    fn test_render_completion_page_without_finished_at_is_error() {
+        let mut mutable = make_empty_mutable();
+        let card = Card::new(
+            "TestDeck".to_string(),
+            std::path::PathBuf::from("/tmp/test-deck.md"),
+            (1, 2),
+            crate::types::card::CardContent::new_basic("q", "a"),
+        );
+        mutable.reviews.push(Review {
+            card,
+            review_id: 1,
+            grade: crate::fsrs::Grade::Good,
+            duration_ms: None,
+            prev_performance: Performance::New,
+        });
+        assert!(mutable.finished_at.is_none());
+        let ctx = make_ctx(Path::new("."));
+        let result = render_completion_page(&ctx, &mutable);
+        assert!(result.is_err());
     }
 }
