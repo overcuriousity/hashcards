@@ -1,5 +1,10 @@
 <changelog>
     <unreleased>
+        <breaking>
+            <change author="mstoeck3">
+                Cloze card hashes are now derived from the card's text, the deleted substring, and an occurrence index, instead of the deletion's raw byte offsets. Card identity no longer depends on CPU endianness or pointer width, so a hashcards.db can move between machines. On first load with this version, an existing database is upgraded automatically in a single transaction: every cloze card's reviews, performance data, and bookmarks are re-linked to its new hash. Cards no longer present in the deck keep their old hashes and remain visible to the orphans command. An upgraded database is rejected by the immediately-preceding hashcards versions (which check the schema version); versions older than that would treat all cloze history as orphaned — do not open an upgraded database with an old hashcards. (BUG-27)
+            </change>
+        </breaking>
         <fixed>
             <change author="mstoeck3">
                 Session completion stats are now computed from the session's persisted reviews: distinct cards and total reviews (including repeats) are reported separately, and the slowest-card row shows the card's question preview instead of its deck name. (BUG-13)

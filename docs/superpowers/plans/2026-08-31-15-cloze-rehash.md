@@ -793,7 +793,7 @@ git commit -m "feat: re-link legacy cloze hashes at collection load (BUG-27)"
 
 **JSON export implications, for the record:** `CardExport.hash`, `CardExport.family_hash`, and `ReviewExport.hash` (`src/cmd/export.rs:56-57`, `:111`) are read through `Collection`, which upgrades the DB before export — so an export taken after upgrading is internally consistent, but its cloze hash values differ from any export taken with an older hashcards. `CardContentExport::Cloze::start`/`end` (`src/cmd/export.rs:79-83`) remain BYTE positions in the export, unchanged (see BUG-26 for their doc wording). External consumers that key on cloze hash values must re-key once — the changelog entry says so.
 
-- [ ] **Step 1: Write the export pin-down test**
+- [x] **Step 1: Write the export pin-down test**
 
 Add to the `tests` module in `src/cmd/export.rs` (imports shown go at the top of the module, next to the existing ones):
 
@@ -831,12 +831,12 @@ Add to the `tests` module in `src/cmd/export.rs` (imports shown go at the top of
 
 Note: `create_tmp_directory` may already be imported in this tests module (it is used by `test_full_export`); if so, skip the duplicate `use`.
 
-- [ ] **Step 2: Run the test and see it pass**
+- [x] **Step 2: Run the test and see it pass**
 
 Run: `cargo test test_export_uses_content_based_cloze_hashes`
 Expected: PASS — this is a pin-down test guarding the export against future hash-input drift (any change to the scheme now fails here and in Task 1's reference tests together).
 
-- [ ] **Step 3: Document the scheme in README.md**
+- [x] **Step 3: Document the scheme in README.md**
 
 In `README.md`, in the "Cloze Cards" section, insert after the multi-line cloze example's closing fence (line 264, just before the `### Separators` heading) the following paragraph:
 
@@ -848,7 +848,7 @@ depend on byte offsets or on the machine's CPU architecture, so a
 `hashcards.db` written on one computer works on any other.
 ```
 
-- [ ] **Step 4: Update CHANGELOG.xml (breaking-change entry)**
+- [x] **Step 4: Update CHANGELOG.xml (breaking-change entry)**
 
 `CHANGELOG.xsd` allows a `<breaking>` change list inside `<unreleased>` (the `changesType` choice includes `added`/`fixed`/`changed`/`removed`/`deprecated`/`security`/`breaking` in any order). In `CHANGELOG.xml`, inside `<unreleased>`, after the closing `</changed>` tag, add (match the file's 8/12-space indentation; if a `<breaking>` block already exists by then, just append the `<change>` to it):
 
@@ -862,16 +862,16 @@ depend on byte offsets or on the machine's CPU architecture, so a
 
 Validate: `xmllint --noout --schema CHANGELOG.xsd CHANGELOG.xml` (if `xmllint` is unavailable, eyeball against the XSD: `breaking` contains `change` elements with an optional `author` attribute).
 
-- [ ] **Step 5: Confirm IDEAS.md needs no change**
+- [x] **Step 5: Confirm IDEAS.md needs no change**
 
 Read `IDEAS.md`. As of this plan's writing it contains: Card Stages, Term-Definition Cards, Preview Command, Jitter, Logo — **no** entry about the cloze rehash. The spec's BUG-27 instruction to "document it in IDEAS.md with a migration sketch" applied only to the deferred option, which the project owner has rejected in favor of doing the rehash now; since the work is done, nothing is added to IDEAS.md. If someone has added a cloze-rehash/BUG-27 entry to IDEAS.md in the meantime, delete that entry (the work is no longer future work) and include the deletion in this task's commit.
 
-- [ ] **Step 6: Run the full suite one last time**
+- [x] **Step 6: Run the full suite one last time**
 
 Run: `cargo test`
 Expected: all tests PASS.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add src/cmd/export.rs README.md CHANGELOG.xml

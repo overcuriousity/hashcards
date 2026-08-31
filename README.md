@@ -279,6 +279,12 @@ exact rules:
 - Nested brackets (`[[a]]`) and deletions left open at the end of a line
   are parse errors.
 
+Each bracketed deletion becomes its own card. A cloze card's identity (its
+hash) is derived from the card's text, the deleted substring, and — when the
+same substring is deleted more than once — an occurrence index. It does not
+depend on byte offsets or on the machine's CPU architecture, so a
+`hashcards.db` written on one computer works on any other.
+
 ### Term-Definition Cards
 
 Term-definition pairs start with the `T:` and `D:` tags:

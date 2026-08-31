@@ -236,6 +236,7 @@ mod tests {
     use crate::helper::create_tmp_copy_of_test_directory;
     use crate::helper::create_tmp_directory;
     use crate::parser::parse_deck;
+    use crate::types::card_hash::Hasher;
 
     #[test]
     fn test_full_export() -> Fallible<()> {
@@ -279,6 +280,31 @@ mod tests {
         let tmp = create_tmp_directory()?;
         let output = tmp.join("export.json").display().to_string();
         export_collection(Some(dir), Some(output))?;
+        Ok(())
+    }
+
+    /// The JSON export carries the content-based (v2) cloze hashes.
+    #[test]
+    fn test_export_uses_content_based_cloze_hashes() -> Fallible<()> {
+        let dir = create_tmp_directory()?;
+        std::fs::write(dir.join("Deck.md"), "C: Water is [wet].\n")?;
+        let coll = Collection::new(Some(dir.display().to_string()))?;
+        let export = get_export(coll)?;
+        let json = serde_json::to_string(&export)?;
+        // Reference formula: clean text "Water is wet." with deletion "wet"
+        // (bytes 9..=11), first occurrence.
+        let mut hasher = Hasher::new();
+        hasher.update(b"ClozeV2");
+        hasher.update(b"Water is wet.");
+        hasher.update(&[0xFF]);
+        hasher.update(b"wet");
+        hasher.update(&[0xFF]);
+        hasher.update(b"0");
+        let expected = hasher.finalize();
+        assert!(
+            json.contains(&expected.to_hex()),
+            "export does not contain the v2 cloze hash"
+        );
         Ok(())
     }
 }
