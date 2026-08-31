@@ -16,6 +16,9 @@
             <change author="claude">
                 Nested cloze brackets (`[[a]]`) and cloze deletions left open at the end of a line or file now produce clear parse errors with the file and line, instead of silently dropping brackets or reporting a misleading "must contain at least one cloze deletion" message. (BUG-19)
             </change>
+            <change author="claude">
+                Markdown links (`[text](url)`) inside cloze cards are no longer misparsed as cloze deletions; they are passed through to Markdown like image syntax. The bracket escape rules are now documented in the README. (BUG-17)
+            </change>
         </fixed>
         <added>
             <change author="mstoeck3">

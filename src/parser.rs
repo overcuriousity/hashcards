@@ -250,6 +250,23 @@ fn trim(line: &str) -> String {
     line[2..].trim().to_string()
 }
 
+/// Returns true if the unescaped `[` at byte position `open_pos` in `text`
+/// opens a markdown link: its bracket group closes with `](`. Nested `[`
+/// before the close means this is not a simple link.
+fn is_markdown_link_open(text: &str, open_pos: usize) -> bool {
+    let bytes = text.as_bytes();
+    let mut i = open_pos + 1;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' => i += 2,
+            b'[' => return false,
+            b']' => return bytes.get(i + 1) == Some(&b'('),
+            _ => i += 1,
+        }
+    }
+    false
+}
+
 impl Parser {
     pub fn new(deck_name: DeckName, file_path: PathBuf) -> Self {
         Parser {
@@ -473,6 +490,7 @@ impl Parser {
             // Set when the preceeding byte indicates it should be evaluated as
             // markdown and not part of the cloze and therefore added to clean_text.
             let mut image_mode = false; // ![
+            let mut link_mode = false; // [text](url)
             let mut escape_mode = false; // \[ and \]
             // We use `bytes` rather than `chars` because the cloze start/end
             // positions are byte positions, not character positions. This
@@ -480,11 +498,14 @@ impl Parser {
             // are a vague abstract concept.
             for (bytepos, c) in text.bytes().enumerate() {
                 if c == b'[' {
-                    if image_mode {
+                    if image_mode || link_mode {
                         clean_text.push(c);
-                    }
-                    if escape_mode {
+                    } else if escape_mode {
                         escape_mode = false;
+                        clean_text.push(c);
+                    } else if is_markdown_link_open(&text, bytepos) {
+                        // This bracket opens a markdown link; keep it verbatim.
+                        link_mode = true;
                         clean_text.push(c);
                     }
                 } else if c == b']' {
@@ -492,6 +513,10 @@ impl Parser {
                         // We are in image mode, so this closing bracket is
                         // part of a Markdown image.
                         image_mode = false;
+                        clean_text.push(c);
+                    } else if link_mode {
+                        // Closing bracket of a markdown link.
+                        link_mode = false;
                         clean_text.push(c);
                     } else if escape_mode {
                         // We are in escape mode, so this closing bracket is
@@ -547,16 +572,19 @@ impl Parser {
         let mut start = None;
         let mut index = 0;
         let mut image_mode = false;
+        let mut link_mode = false;
         let mut escape_mode = false;
         for (bytepos, c) in text.bytes().enumerate() {
             if c == b'[' {
-                if image_mode {
-                    // We are in image mode, so this closing bracket is part of a markdown image.
+                if image_mode || link_mode {
                     index += 1;
                 } else if escape_mode {
-                    // We are in escape mode, so this closing bracket is part of a markdown text.
                     index += 1;
                     escape_mode = false;
+                } else if is_markdown_link_open(&text, bytepos) {
+                    // This bracket opens a markdown link; it stays in the text.
+                    link_mode = true;
+                    index += 1;
                 } else if start.is_some() {
                     return Err(ParserError::new(
                         "Nested cloze brackets.",
@@ -568,11 +596,12 @@ impl Parser {
                 }
             } else if c == b']' {
                 if image_mode {
-                    // We are in image mode, so this closing bracket is part of a markdown image.
                     image_mode = false;
                     index += 1;
+                } else if link_mode {
+                    link_mode = false;
+                    index += 1;
                 } else if escape_mode {
-                    // We are in escape mode, so this closing bracket is part of a markdown text.
                     escape_mode = false;
                     index += 1;
                 } else if let Some(s) = start {
@@ -967,6 +996,19 @@ mod tests {
             err.to_string(),
             "Unterminated cloze deletion. Location: test.md:1"
         );
+    }
+
+    /// BUG-17: `[text](url)` is a markdown link, not a cloze deletion.
+    /// Byte positions: "See [the docs](https://x) for " is 30 bytes of clean
+    /// text; the deletion covers "answer", bytes 30..=35.
+    #[test]
+    fn test_markdown_link_is_not_a_deletion() -> Result<(), ParserError> {
+        let input = "C: See [the docs](https://x) for [answer]";
+        let parser = make_test_parser();
+        let cards = parser.parse(input)?;
+
+        assert_cloze(&cards, "See [the docs](https://x) for answer", &[(30, 35)]);
+        Ok(())
     }
 
     #[test]
