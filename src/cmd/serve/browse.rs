@@ -213,8 +213,11 @@ pub fn render_browse_page(
                         }
                     }
                 }
-                @if bookmark_count > 0 {
-                    div.bookmark-bar {
+                div.bookmark-bar {
+                    a.btn.btn-secondary href=(format!("/collection/{slug}/stats")) {
+                        "Stats"
+                    }
+                    @if bookmark_count > 0 {
                         a.btn.btn-secondary href=(format!("/collection/{slug}/bookmarks")) {
                             "\u{2605} Bookmarks (" (bookmark_count) ")"
                         }

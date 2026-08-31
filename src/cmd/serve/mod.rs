@@ -10,6 +10,7 @@ mod href;
 mod landing;
 pub mod server;
 mod state;
+pub mod stats;
 
 #[cfg(test)]
 mod tests {
