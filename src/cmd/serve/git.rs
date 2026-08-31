@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::process::Command as SyncCommand;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -187,4 +188,188 @@ pub fn spawn_sync_task(
             log::debug!("Periodic git sync complete");
         }
     });
+}
+
+/// Stage and commit a single edited file in its containing git repository.
+///
+/// Synchronous by design: the edit path (`edit_post_inner`) is synchronous.
+/// Returns `Ok(false)` when the file is not inside a git work tree or the
+/// edit produced no diff; `Ok(true)` when a commit was created.
+pub fn commit_edit(file_path: &Path, author_name: &str, author_email: &str) -> Fallible<bool> {
+    let dir = match file_path.parent() {
+        Some(d) => d,
+        None => {
+            return fail(format!(
+                "file has no parent directory: {}",
+                file_path.display()
+            ));
+        }
+    };
+
+    let inside = SyncCommand::new("git")
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .current_dir(dir)
+        .output()?;
+    if !inside.status.success() {
+        // Not a git-backed collection: nothing to do.
+        return Ok(false);
+    }
+
+    let add = SyncCommand::new("git")
+        .arg("add")
+        .arg("--")
+        .arg(file_path)
+        .current_dir(dir)
+        .output()?;
+    if !add.status.success() {
+        let stderr = String::from_utf8_lossy(&add.stderr);
+        return fail(format!(
+            "git add failed for {}: {stderr}",
+            file_path.display()
+        ));
+    }
+
+    let status = SyncCommand::new("git")
+        .args(["status", "--porcelain"])
+        .arg("--")
+        .arg(file_path)
+        .current_dir(dir)
+        .output()?;
+    if !status.status.success() {
+        let stderr = String::from_utf8_lossy(&status.stderr);
+        return fail(format!(
+            "git status failed for {}: {stderr}",
+            file_path.display()
+        ));
+    }
+    if status.stdout.is_empty() {
+        // The edit produced no diff: nothing to commit.
+        return Ok(false);
+    }
+
+    let file_name = file_path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| file_path.display().to_string());
+    let commit = SyncCommand::new("git")
+        .arg("-c")
+        .arg(format!("user.name={author_name}"))
+        .arg("-c")
+        .arg(format!("user.email={author_email}"))
+        .arg("commit")
+        .arg("-m")
+        .arg(format!("hashcards: web edit of {file_name}"))
+        .arg("--")
+        .arg(file_path)
+        .current_dir(dir)
+        .output()?;
+    if !commit.status.success() {
+        let stderr = String::from_utf8_lossy(&commit.stderr);
+        return fail(format!(
+            "git commit failed for {}: {stderr}",
+            file_path.display()
+        ));
+    }
+    Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+    use std::process::Command as SyncCommand;
+
+    use super::commit_edit;
+
+    fn git(dir: &Path, args: &[&str]) {
+        let out = SyncCommand::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    #[test]
+    fn test_commit_edit_commits_and_leaves_clean_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        git(repo, &["init", "-b", "main"]);
+        let file = repo.join("Deck.md");
+        std::fs::write(&file, "Q: foo\nA: bar\n").unwrap();
+        git(repo, &["add", "."]);
+        git(
+            repo,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-m",
+                "init",
+            ],
+        );
+
+        std::fs::write(&file, "Q: foo\nA: baz\n").unwrap();
+        let committed = commit_edit(&file, "hashcards web edit", "hashcards@localhost").unwrap();
+        assert!(committed);
+
+        let status = SyncCommand::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        assert!(
+            status.stdout.is_empty(),
+            "working tree not clean: {}",
+            String::from_utf8_lossy(&status.stdout)
+        );
+
+        let log = SyncCommand::new("git")
+            .args(["log", "-1", "--pretty=%an %s"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        let log = String::from_utf8_lossy(&log.stdout);
+        assert!(log.contains("hashcards web edit"), "unexpected log: {log}");
+        assert!(log.contains("web edit of Deck.md"), "unexpected log: {log}");
+    }
+
+    #[test]
+    fn test_commit_edit_outside_git_repo_is_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("Deck.md");
+        std::fs::write(&file, "Q: foo\nA: bar\n").unwrap();
+        let committed = commit_edit(&file, "n", "e@e").unwrap();
+        assert!(!committed);
+    }
+
+    #[test]
+    fn test_commit_edit_without_changes_is_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        git(repo, &["init", "-b", "main"]);
+        let file = repo.join("Deck.md");
+        std::fs::write(&file, "Q: foo\nA: bar\n").unwrap();
+        git(repo, &["add", "."]);
+        git(
+            repo,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-m",
+                "init",
+            ],
+        );
+
+        let committed = commit_edit(&file, "n", "e@e").unwrap();
+        assert!(!committed);
+    }
 }
