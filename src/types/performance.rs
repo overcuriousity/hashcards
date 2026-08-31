@@ -15,6 +15,8 @@
 use chrono::Duration;
 use chrono::NaiveDate;
 
+use crate::error::Fallible;
+use crate::error::fail;
 use crate::fsrs::Difficulty;
 use crate::fsrs::Grade;
 use crate::fsrs::Interval;
@@ -26,6 +28,7 @@ use crate::fsrs::interval;
 use crate::fsrs::new_difficulty;
 use crate::fsrs::new_stability;
 use crate::fsrs::retrievability;
+use crate::rng::TinyRng;
 use crate::types::date::Date;
 use crate::types::timestamp::Timestamp;
 
@@ -37,6 +40,39 @@ const MIN_INTERVAL: f64 = 1.0;
 
 /// The maximum review interval in days.
 const MAX_INTERVAL: f64 = 256.0;
+
+/// Fractional random jitter applied to computed review intervals.
+///
+/// A value of 0.05 means each computed interval is scaled by a uniformly
+/// random factor in [0.95, 1.05], to diffuse review peaks over time.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Jitter(f64);
+
+impl Jitter {
+    /// The default jitter fraction: plus or minus 5%.
+    pub const DEFAULT_FRACTION: f64 = 0.05;
+
+    /// Construct a jitter fraction, validating its range.
+    pub fn new(fraction: f64) -> Fallible<Jitter> {
+        if !fraction.is_finite() || !(0.0..=0.5).contains(&fraction) {
+            return fail(format!(
+                "interval jitter must be a number between 0.0 and 0.5, got: {fraction}"
+            ));
+        }
+        Ok(Jitter(fraction))
+    }
+
+    /// No jitter: intervals are unchanged.
+    pub const fn none() -> Jitter {
+        Jitter(0.0)
+    }
+
+    /// Draw a random scale factor in [1 - fraction, 1 + fraction].
+    pub fn factor(self, rng: &mut TinyRng) -> f64 {
+        let unit: f64 = f64::from(rng.next_u32()) / f64::from(u32::MAX);
+        1.0 + self.0 * (2.0 * unit - 1.0)
+    }
+}
 
 /// Represents performance information for a card.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -234,5 +270,39 @@ mod tests {
         assert!(result.stability.is_finite());
         assert!(result.interval_raw.is_finite());
         assert!(result.interval_days >= 1);
+    }
+
+    #[test]
+    fn test_jitter_new_validates_fraction() {
+        assert!(Jitter::new(0.0).is_ok());
+        assert!(Jitter::new(0.05).is_ok());
+        assert!(Jitter::new(0.5).is_ok());
+        assert!(Jitter::new(-0.01).is_err());
+        assert!(Jitter::new(0.51).is_err());
+        assert!(Jitter::new(f64::NAN).is_err());
+        let err = Jitter::new(2.0).err().unwrap().to_string();
+        assert!(err.contains("2"), "message was: {err}");
+    }
+
+    #[test]
+    fn test_jitter_factor_bounds_and_determinism() {
+        let jitter = Jitter::new(0.05).unwrap();
+        // Deterministic under a fixed seed.
+        let mut rng_a = TinyRng::from_seed(42);
+        let mut rng_b = TinyRng::from_seed(42);
+        for _ in 0..100 {
+            assert_eq!(jitter.factor(&mut rng_a), jitter.factor(&mut rng_b));
+        }
+        // Always within [0.95, 1.05].
+        let mut rng = TinyRng::from_seed(7);
+        for _ in 0..1000 {
+            let f = jitter.factor(&mut rng);
+            assert!((0.95..=1.05).contains(&f), "factor out of bounds: {f}");
+        }
+        // Zero jitter is always exactly 1.0.
+        let mut rng = TinyRng::from_seed(7);
+        for _ in 0..100 {
+            assert_eq!(Jitter::none().factor(&mut rng), 1.0);
+        }
     }
 }
