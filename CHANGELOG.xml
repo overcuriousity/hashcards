@@ -43,6 +43,12 @@
             <change author="claude">
                 Malformed lines in `macros.tex` (lines without a space between the macro name and its definition) are now reported as warnings with their line number instead of being silently ignored.
             </change>
+            <change author="claude">
+                Removed panics reachable from web request handlers: an empty card queue and a premature completion-page request now render an error page instead of crashing the server; internal parser and grade-action inconsistencies, system-clock errors, and Ctrl+C handler failures are reported as errors instead of panicking.
+            </change>
+            <change author="claude">
+                Session and sync state locks no longer use `.lock().unwrap()`: a panic in one request can no longer poison the locks and cascade into crashes of every subsequent request.
+            </change>
         </fixed>
         <added>
             <change author="claude">
