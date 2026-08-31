@@ -28,6 +28,9 @@
             <change author="claude">
                 Frontmatter and file-read errors now name the file they came from; I/O, database, path, UTF-8, and JSON errors are rendered as human-readable messages instead of debug dumps; and parse errors no longer carry a redundant "Parse error:" prefix. (BUG-21)
             </change>
+            <change author="claude">
+                Cloze deletion positions are documented as byte offsets (they were previously described as character positions, including in the JSON export), and a non-ASCII cloze round-trip test now pins this behavior. (BUG-26)
+            </change>
         </fixed>
         <added>
             <change author="mstoeck3">

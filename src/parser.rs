@@ -1588,4 +1588,17 @@ A: Genetic material."#,
         assert!(err.to_string().contains("no closing '---'"));
         Ok(())
     }
+
+    /// BUG-26: cloze positions are byte offsets. Multi-byte characters before
+    /// and inside the deletion must yield byte positions, not char positions.
+    /// "Größe: " is 9 bytes; "10 µm" is 6 bytes (µ is 2 bytes).
+    #[test]
+    fn test_non_ascii_cloze_positions_are_bytes() -> Result<(), ParserError> {
+        let input = "C: Größe: [10 µm]";
+        let parser = make_test_parser();
+        let cards = parser.parse(input)?;
+
+        assert_cloze(&cards, "Größe: 10 µm", &[(9, 14)]);
+        Ok(())
+    }
 }

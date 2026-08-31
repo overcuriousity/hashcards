@@ -77,8 +77,13 @@ enum CardContentExport {
         answer: String,
     },
     Cloze {
+        /// The text of the card without cloze brackets.
         text: String,
+        /// Byte offset (not character offset) of the first byte of the
+        /// deletion within `text`.
         start: usize,
+        /// Byte offset (not character offset) of the last byte of the
+        /// deletion within `text`, inclusive.
         end: usize,
     },
 }
