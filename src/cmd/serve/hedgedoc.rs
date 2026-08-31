@@ -66,11 +66,28 @@ fn validate_hedgedoc_url(url: &str) -> Fallible<()> {
 
 /// Build the `/download` URL for a HedgeDoc note, safely appending the path
 /// segment without interfering with any query string or fragment.
+///
+/// HedgeDoc published/shared notes are served at `/s/<noteId>`. The `/s/`
+/// prefix is stripped here because the `/download` endpoint lives at
+/// `/<noteId>/download`, not `/s/<noteId>/download`.
 fn build_download_url(url: &str) -> Fallible<reqwest::Url> {
     let mut parsed = reqwest::Url::parse(url)
         .map_err(|e| crate::error::ErrorReport::new(format!("Invalid HedgeDoc URL `{}`: {}", url, e)))?;
     parsed.set_query(None);
     parsed.set_fragment(None);
+    // Strip /s/<noteId> → /<noteId> for shared/published note URLs.
+    {
+        let segments: Vec<String> = parsed
+            .path_segments()
+            .into_iter()
+            .flatten()
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .collect();
+        if segments.first().map(|s| s == "s").unwrap_or(false) && segments.len() >= 2 {
+            parsed.set_path(&format!("/{}", segments[1..].join("/")));
+        }
+    }
     {
         let mut segments = parsed
             .path_segments_mut()
@@ -110,6 +127,24 @@ pub async fn fetch_markdown(url: &str) -> Fallible<String> {
         return fail(format!(
             "HedgeDoc fetch returned HTTP {} for {}",
             response.status(),
+            download_url
+        ));
+    }
+    // HedgeDoc's /download endpoint requires edit permission. For notes that
+    // are publicly viewable but not editable, HedgeDoc redirects to the HTML
+    // view instead of returning 403. Detect this to avoid silently storing
+    // HTML as markdown (which would show "OK" status but yield no cards).
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    if content_type.starts_with("text/html") {
+        return fail(format!(
+            "HedgeDoc returned an HTML page for {} — the note's permission \
+            level may require sign-in to download (try setting the note to \
+            \"Freely\" or \"Editable\" in HedgeDoc)",
             download_url
         ));
     }
@@ -550,6 +585,20 @@ mod tests {
     fn build_download_url_trailing_slash() {
         let url = build_download_url("https://notes.example.com/abc123/").unwrap();
         assert_eq!(url.as_str(), "https://notes.example.com/abc123/download");
+    }
+
+    #[test]
+    fn build_download_url_shared_note_strips_s_prefix() {
+        // Published/shared notes at /s/<noteId> use the same note ID as the
+        // primary note. Strip /s/ so we fetch /<noteId>/download directly.
+        let url = build_download_url("https://notes.example.com/s/NNOBZSN2Yi").unwrap();
+        assert_eq!(url.as_str(), "https://notes.example.com/NNOBZSN2Yi/download");
+    }
+
+    #[test]
+    fn build_download_url_shared_note_trailing_slash() {
+        let url = build_download_url("https://notes.example.com/s/NNOBZSN2Yi/").unwrap();
+        assert_eq!(url.as_str(), "https://notes.example.com/NNOBZSN2Yi/download");
     }
 
     #[test]
