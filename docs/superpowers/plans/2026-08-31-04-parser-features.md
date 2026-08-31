@@ -651,7 +651,7 @@ git commit -m "feat: list duplicate cards with both locations in hashcards check
   - `State::ReadingTerm { term: String, start_line: usize }` and `State::ReadingDefinition { term: String, definition: String, start_line: usize }` variants.
   - `fn Parser::push_term_cards(&self, term: String, definition: String, start_line: usize, end_line: usize, cards: &mut Vec<Card>)` — pushes the "Define:" card then the "Term for:" card.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Add to the `tests` module in `src/parser.rs`:
 
@@ -717,12 +717,12 @@ fn test_term_pair_followed_directly_by_term_pair() -> Result<(), ParserError> {
 
 (`HashSet` is available in the tests module via the `use std::collections::HashSet;` import that Task 1 moved there.)
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `cargo test test_term_definition test_two_term_pairs test_term_pair_followed`
 Expected: FAIL — `T:`/`D:` lines are treated as plain `Text`, so `parse` returns 0 cards (`assert_eq!(cards.len(), 2)` fails) or errors.
 
-- [ ] **Step 3: Implement the shorthand**
+- [x] **Step 3: Implement the shorthand**
 
 In `src/parser.rs`:
 
@@ -975,12 +975,12 @@ Add the two new state arms before `State::End`:
             },
 ```
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [x] **Step 4: Run the tests to verify they pass**
 
 Run: `cargo test test_term_definition test_two_term_pairs test_term_pair_followed`
 Expected: 4 passed. Then `cargo test` — full suite green (the compiler enforces that every `match` on `Line` covers the new variants).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/parser.rs
