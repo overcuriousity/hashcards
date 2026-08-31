@@ -282,7 +282,7 @@ impl Display for DuplicateCard {
         write!(
             f,
             "duplicate card {}: kept {}, ignored {}",
-            self.hash, self.kept, self.ignored
+            self.hash, self.kept(), self.ignored()
         )
     }
 }

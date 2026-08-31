@@ -37,13 +37,11 @@ fn duplicate_report(duplicates: &[DuplicateCard]) -> Vec<String> {
 mod tests {
     use std::fs::write;
 
-    use super::check_collection;
+    use super::{check_collection, duplicate_report};
     use crate::collection::Collection;
     use crate::error::Fallible;
     use crate::helper::create_tmp_copy_of_test_directory;
     use crate::helper::create_tmp_directory;
-
-    use super::duplicate_report;
 
     #[test]
     fn test_non_existent_directory() {
