@@ -22,7 +22,6 @@ use crate::error::ErrorReport;
 use crate::error::Fallible;
 use crate::flash::Flash;
 use crate::types::card::Card;
-use crate::types::card::CardContent;
 use crate::types::card_hash::CardHash;
 
 // ── List ─────────────────────────────────────────────────────────────────────
@@ -57,24 +56,6 @@ fn bookmark_list_inner(state: &AppState, slug: &str, flash: Option<Flash>) -> Fa
         flash,
     );
     Ok(html.into_string())
-}
-
-fn card_preview(content: &CardContent) -> String {
-    let raw = match content {
-        CardContent::Basic { question, .. } => question.as_str(),
-        CardContent::Cloze { text, .. } => text.as_str(),
-    };
-    let trimmed = raw.trim();
-    if trimmed.len() > 120 {
-        // Truncate at char boundary before 120 bytes
-        let mut end = 120;
-        while !trimmed.is_char_boundary(end) {
-            end -= 1;
-        }
-        format!("{}…", &trimmed[..end])
-    } else {
-        trimmed.to_string()
-    }
 }
 
 fn render_bookmark_list(
@@ -128,7 +109,7 @@ fn render_bookmark_list(
 
 fn render_bookmark_row(slug: &str, coll_dir: &Path, bm: &Bookmark, card: &Card) -> Markup {
     let hash_hex = bm.card_hash.to_hex();
-    let preview = card_preview(card.content());
+    let preview = card.preview();
     let rel_path = card
         .file_path()
         .strip_prefix(coll_dir)

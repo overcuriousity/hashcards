@@ -143,6 +143,27 @@ impl Card {
         }
     }
 
+    /// A short plain-text preview of the card's question (or cloze prompt),
+    /// trimmed and truncated to 120 bytes at a char boundary, for display in
+    /// lists and stats.
+    pub fn preview(&self) -> String {
+        let raw = match &self.content {
+            CardContent::Basic { question, .. } => question.as_str(),
+            CardContent::Cloze { text, .. } => text.as_str(),
+        };
+        let trimmed = raw.trim();
+        if trimmed.len() > 120 {
+            // Truncate at a char boundary before 120 bytes.
+            let mut end = 120;
+            while !trimmed.is_char_boundary(end) {
+                end -= 1;
+            }
+            format!("{}…", &trimmed[..end])
+        } else {
+            trimmed.to_string()
+        }
+    }
+
     pub fn html_front(&self, config: &MarkdownRenderConfig) -> Fallible<Markup> {
         self.content.html_front(config)
     }
@@ -361,5 +382,43 @@ mod tests {
             "exactly one reveal span expected: {back}"
         );
         Ok(())
+    }
+
+    #[test]
+    fn test_preview_basic_short() {
+        let card = Card::new(
+            "Deck".to_string(),
+            PathBuf::from("/tmp/deck.md"),
+            (1, 2),
+            CardContent::new_basic("  What is 2+2?  ", "4"),
+        );
+        assert_eq!(card.preview(), "What is 2+2?");
+    }
+
+    #[test]
+    fn test_preview_truncates_at_char_boundary() {
+        // 40 four-byte emoji = 160 bytes; the cut at 120 lands on a boundary.
+        let long: String = "🦀".repeat(40);
+        let card = Card::new(
+            "Deck".to_string(),
+            PathBuf::from("/tmp/deck.md"),
+            (1, 2),
+            CardContent::new_basic(long.clone(), "answer"),
+        );
+        let preview = card.preview();
+        assert!(preview.ends_with('…'));
+        assert!(preview.len() <= 124); // 120 bytes + 3-byte ellipsis, boundary-safe
+        assert!(preview.starts_with("🦀"));
+    }
+
+    #[test]
+    fn test_preview_cloze_uses_text() {
+        let card = Card::new(
+            "Deck".to_string(),
+            PathBuf::from("/tmp/deck.md"),
+            (1, 2),
+            CardContent::new_cloze("Paris is the capital of France", 0, 4),
+        );
+        assert_eq!(card.preview(), "Paris is the capital of France");
     }
 }
