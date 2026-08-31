@@ -656,7 +656,7 @@ git commit -m "fix: ignore card syntax inside fenced code blocks (BUG-18)"
 
 Background: `parse_deck` strips frontmatter (`src/parser.rs:113`) and then parses the remainder (`:133-134`), so every reported line is off by the frontmatter length. `src/cmd/serve/edit.rs` currently compensates by also stripping frontmatter in `extract_card_block`/`splice_card_block` (`edit.rs:255`, `:272-274`); once ranges are absolute, those functions must index the full file instead, and the re-parse in `edit_post_inner` (`edit.rs:184-186`) must pass the same offset so its range comparison against collection cards still matches.
 
-- [ ] **Step 1: Write the failing regression tests**
+- [x] **Step 1: Write the failing regression tests**
 
 Add to the `tests` module in `src/parser.rs` (uses the existing `use std::env::temp_dir;` and `use std::fs::create_dir_all;` imports):
 
@@ -710,12 +710,12 @@ Add to the `tests` module in `src/parser.rs` (uses the existing `use std::env::t
     }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cargo test test_parse_error_after_frontmatter_reports_real_line test_card_range_accounts_for_frontmatter`
 Expected: both FAIL — the error reports `deck.md:2` (content-relative) and the range is `(1, 2)`.
 
-- [ ] **Step 3: Implement the offset**
+- [x] **Step 3: Implement the offset**
 
 (a) `extract_frontmatter` returns the content-start line. Change the signature and the two return points (`src/parser.rs:42`, `:48`, `:94`):
 
@@ -888,12 +888,12 @@ fn splice_card_block(
 }
 ```
 
-- [ ] **Step 4: Run the full test suite**
+- [x] **Step 4: Run the full test suite**
 
 Run: `cargo test`
 Expected: all PASS. The edit.rs tests (`test_extract_card_block_no_fm`, `test_splice_basic`, `test_splice_eof`, ...) use frontmatter-free content, so full-file indexing keeps them green. Also run `cargo clippy --all-targets` and fix any leftover-import warnings (e.g. an unused `strip_frontmatter` import).
 
-- [ ] **Step 5: Add an edit.rs regression test for frontmatter files**
+- [x] **Step 5: Add an edit.rs regression test for frontmatter files**
 
 Add to the `tests` module in `src/cmd/serve/edit.rs` (absolute ranges must splice the right lines in a file *with* frontmatter):
 
@@ -918,7 +918,7 @@ Add to the `tests` module in `src/cmd/serve/edit.rs` (absolute ranges must splic
 Run: `cargo test test_splice_with_frontmatter_absolute_range`
 Expected: PASS.
 
-- [ ] **Step 6: Update CHANGELOG.xml**
+- [x] **Step 6: Update CHANGELOG.xml**
 
 In `CHANGELOG.xml`, inside `<unreleased><fixed>`, add after the Task 4 entry:
 
@@ -928,7 +928,7 @@ In `CHANGELOG.xml`, inside `<unreleased><fixed>`, add after the Task 4 entry:
             </change>
 ```
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add src/parser.rs src/cmd/serve/edit.rs src/media/validate.rs CHANGELOG.xml
