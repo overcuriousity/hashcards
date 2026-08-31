@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::env::current_dir;
 use std::fs::read_to_string;
 use std::path::Component;
@@ -211,6 +212,24 @@ pub struct ResolvedServeConfig {
     pub _temp_dir: Option<std::sync::Arc<TempDirTracker>>,
 }
 
+/// Reject collections whose names map to the same URL slug.
+///
+/// `slugify` collapses every non-alphanumeric character to `-`, so distinct
+/// paths like `a/b` and `a-b` collide and would silently share one database.
+fn check_slug_collisions(collections: &[ResolvedCollection]) -> Fallible<()> {
+    let mut seen: HashMap<&str, &ResolvedCollection> = HashMap::new();
+    for rc in collections {
+        if let Some(first) = seen.get(rc.slug.as_str()) {
+            return fail(format!(
+                "configuration error: collections '{}' and '{}' both map to the URL slug '{}'. Rename one of them so their slugs differ.",
+                first.name, rc.name, rc.slug
+            ));
+        }
+        seen.insert(rc.slug.as_str(), rc);
+    }
+    Ok(())
+}
+
 impl ResolvedServeConfig {
     pub fn from_toml(config: ServeConfig) -> Fallible<Self> {
         let data_dir = {
@@ -253,6 +272,8 @@ impl ResolvedServeConfig {
                 })
             })
             .collect::<Fallible<Vec<ResolvedCollection>>>()?;
+
+        check_slug_collisions(&collections)?;
 
         let git = match config.git {
             None => None,
@@ -317,6 +338,8 @@ impl ResolvedServeConfig {
             });
         }
 
+        check_slug_collisions(&collections)?;
+
         Ok(Self {
             host,
             port,
@@ -334,6 +357,7 @@ impl ResolvedServeConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::ErrorReport;
     use crate::error::Fallible;
 
     /// Regression test for BUG-47: with no `host` key in the config, the
@@ -389,6 +413,63 @@ mod tests {
             resolved.collections[0].coll_dir,
             PathBuf::from("/var/lib/hashcards/repo/japanese")
         );
+        Ok(())
+    }
+
+    /// BUG-43 regression: `a/b` and `a-b` slugify identically and must be
+    /// rejected at config load with a message naming both collections.
+    #[test]
+    fn test_slug_collision_in_config_is_rejected() -> Fallible<()> {
+        let toml_str = r#"
+[server]
+data_dir = "/tmp/hc-test-data"
+
+[[collection]]
+name = "Alpha Slash"
+path = "a/b"
+
+[[collection]]
+name = "Alpha Dash"
+path = "a-b"
+"#;
+        let config: ServeConfig =
+            toml::from_str(toml_str).map_err(|e| ErrorReport::new(e.to_string()))?;
+        let err = match ResolvedServeConfig::from_toml(config) {
+            Ok(_) => return fail("expected a slug collision error"),
+            Err(e) => e,
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Alpha Slash"),
+            "must name the first collection: {msg}"
+        );
+        assert!(
+            msg.contains("Alpha Dash"),
+            "must name the second collection: {msg}"
+        );
+        assert!(msg.contains("a-b"), "must name the colliding slug: {msg}");
+        Ok(())
+    }
+
+    /// Distinct slugs still load fine.
+    #[test]
+    fn test_distinct_slugs_are_accepted() -> Fallible<()> {
+        let toml_str = r#"
+[server]
+data_dir = "/tmp/hc-test-data"
+
+[[collection]]
+name = "Alpha"
+path = "alpha"
+
+[[collection]]
+name = "Beta"
+path = "beta"
+"#;
+        let config: ServeConfig =
+            toml::from_str(toml_str).map_err(|e| ErrorReport::new(e.to_string()))?;
+        let resolved = ResolvedServeConfig::from_toml(config)?;
+        assert_eq!(resolved.collections.len(), 2);
         Ok(())
     }
 }
