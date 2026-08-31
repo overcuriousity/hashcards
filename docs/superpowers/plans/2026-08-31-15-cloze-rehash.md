@@ -288,7 +288,7 @@ git commit -m "fix: derive cloze hashes from deletion content, not byte offsets 
   - `pub fn migrate_cloze_hashes(&mut self, renames: &[(CardHash, CardHash)]) -> Fallible<usize>` on `Database` — renames every `(legacy, new)` pair and stamps the scheme `'2'`, all in ONE transaction; returns the number of cards renamed
   - `fn migrate_add_meta(tx: &Transaction) -> Fallible<()>`; `SCHEMA_VERSION` becomes 6
 
-- [ ] **Step 1: Write the failing regression tests**
+- [x] **Step 1: Write the failing regression tests**
 
 Add to the `tests` module in `src/db.rs`:
 
@@ -394,12 +394,12 @@ Add to the `tests` module in `src/db.rs`:
     }
 ```
 
-- [ ] **Step 2: Run the tests and see them fail**
+- [x] **Step 2: Run the tests and see them fail**
 
 Run: `cargo test test_fresh_db_has_current_cloze_hash_scheme test_legacy_db_is_stamped_with_legacy_scheme test_migrate_cloze_hashes`
 Expected: COMPILE ERROR — `CLOZE_HASH_SCHEME_CURRENT`, `cloze_hash_scheme`, and `migrate_cloze_hashes` do not exist yet. That is the failing state.
 
-- [ ] **Step 3: Implement migration 6, the constants, and the two methods**
+- [x] **Step 3: Implement migration 6, the constants, and the two methods**
 
 3a. In `src/schema.sql`, append at the end of the file (after the `schema_version` table plan 08 added). Fresh databases only ever contain new-scheme hashes, so they are seeded `'2'`:
 
@@ -522,12 +522,12 @@ fn migrate_add_meta(tx: &Transaction) -> Fallible<()> {
     }
 ```
 
-- [ ] **Step 4: Run the tests and see them pass**
+- [x] **Step 4: Run the tests and see them pass**
 
 Run: `cargo test`
 Expected: all tests PASS, including the four new ones and plan 08's `test_migrated_schema_matches_fresh_schema` (which now also proves migration 6's `meta` table structure matches `schema.sql` — the seeded *value* differs by design and is not part of the structural snapshot) and `test_newer_schema_version_is_rejected` (unchanged: 999 > 6).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/db.rs src/schema.sql

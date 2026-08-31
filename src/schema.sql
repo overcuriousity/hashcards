@@ -56,3 +56,10 @@ create index idx_reviews_reviewed_date on reviews (reviewed_date);
 create table schema_version (
     version integer not null
 ) strict;
+
+create table meta (
+    key text primary key,
+    value text not null
+) strict;
+
+insert into meta (key, value) values ('cloze_hash_scheme', '2');
