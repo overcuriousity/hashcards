@@ -1,7 +1,9 @@
 use std::collections::HashMap;
+use std::future::pending;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::Mutex;
+
+use parking_lot::Mutex;
 
 use axum::Router;
 use axum::routing::get;
@@ -290,8 +292,11 @@ async fn style_handler() -> (
 }
 
 async fn shutdown_signal() {
-    signal::ctrl_c()
-        .await
-        .expect("failed to install Ctrl+C handler");
+    if let Err(e) = signal::ctrl_c().await {
+        log::error!(
+            "Failed to install Ctrl+C handler; graceful shutdown on Ctrl+C is disabled: {e}"
+        );
+        pending::<()>().await;
+    }
     log::debug!("Received shutdown signal");
 }

@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::Mutex;
+
+use parking_lot::Mutex;
 
 use tokio::sync::RwLock;
 

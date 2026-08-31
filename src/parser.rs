@@ -453,7 +453,11 @@ impl Parser {
                     }
                 }
             }
-            State::End => unreachable!("Parsed a line after the end of the file."),
+            State::End => Err(ParserError::new(
+                "Internal parser error: a line was parsed after the end of the file.",
+                self.file_path.clone(),
+                line_num,
+            )),
         }
     }
 
@@ -1265,5 +1269,13 @@ A: Genetic material."#,
             } if question == "foo" && answer == "bar"
         ));
         Ok(())
+    }
+
+    #[test]
+    fn test_line_after_end_state_is_error() {
+        let parser = make_test_parser();
+        let mut cards = Vec::new();
+        let result = parser.parse_line(State::End, Line::Eof, 0, &mut cards);
+        assert!(result.is_err());
     }
 }

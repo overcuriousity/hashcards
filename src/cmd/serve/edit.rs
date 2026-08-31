@@ -57,7 +57,7 @@ fn edit_get_inner(state: &AppState, slug: &str, hash_hex: &str) -> Fallible<Stri
         .display()
         .to_string();
 
-    let active_session = state.sessions.lock().unwrap().contains_key(slug);
+    let active_session = state.sessions.lock().contains_key(slug);
     let html = render_edit_form(
         &rc.name,
         slug,
@@ -140,7 +140,7 @@ fn edit_post_inner(state: &AppState, slug: &str, hash_hex: &str, form: EditForm)
     let rc = find_collection(state, slug)
         .ok_or_else(|| ErrorReport::new(format!("Unknown collection: {slug}")))?;
 
-    if state.sessions.lock().unwrap().contains_key(slug) {
+    if state.sessions.lock().contains_key(slug) {
         return fail("A drill session is active. End it before editing.");
     }
 
