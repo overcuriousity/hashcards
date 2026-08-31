@@ -30,6 +30,7 @@ mod tests {
     use tempfile::tempdir;
     use tokio::spawn;
 
+    use crate::types::performance::Jitter;
     use crate::cmd::drill::server::AnswerControls;
     use crate::cmd::drill::server::ServerConfig;
     use crate::cmd::drill::server::start_server;
@@ -53,6 +54,7 @@ mod tests {
             new_card_limit: None,
             deck_filter: None,
             shuffle: false,
+            jitter: Jitter::none(),
             answer_controls: AnswerControls::Full,
             bury_siblings: false,
         };
@@ -79,6 +81,7 @@ mod tests {
             new_card_limit: None,
             deck_filter: None,
             shuffle: false,
+            jitter: Jitter::none(),
             answer_controls: AnswerControls::Full,
             bury_siblings: false,
         };
@@ -100,6 +103,7 @@ mod tests {
             new_card_limit: None,
             deck_filter: None,
             shuffle: false,
+            jitter: Jitter::none(),
             answer_controls: AnswerControls::Full,
             bury_siblings: false,
         };
@@ -202,6 +206,7 @@ mod tests {
             new_card_limit: None,
             deck_filter: None,
             shuffle: false,
+            jitter: Jitter::none(),
             answer_controls: AnswerControls::Full,
             bury_siblings: false,
         };
@@ -251,6 +256,7 @@ mod tests {
             new_card_limit: None,
             deck_filter: None,
             shuffle: false,
+            jitter: Jitter::none(),
             answer_controls: AnswerControls::Full,
             bury_siblings: false,
         };
@@ -282,6 +288,7 @@ mod tests {
             new_card_limit: None,
             deck_filter: None,
             shuffle: false,
+            jitter: Jitter::none(),
             answer_controls: AnswerControls::Full,
             bury_siblings: false,
         };
@@ -313,6 +320,7 @@ mod tests {
             new_card_limit: None,
             deck_filter: None,
             shuffle: false,
+            jitter: Jitter::none(),
             answer_controls: AnswerControls::Full,
             bury_siblings: false,
         };
@@ -362,6 +370,7 @@ mod tests {
             new_card_limit: None,
             deck_filter: None,
             shuffle: false,
+            jitter: Jitter::none(),
             answer_controls: AnswerControls::Full,
             bury_siblings: false,
         };

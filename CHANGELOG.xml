@@ -63,6 +63,9 @@
             <change author="mstoeck3">
                 Added HedgeDoc source support in serve mode: publicly accessible HedgeDoc notes can be used as collections. Sources are managed via a web interface at `/hedgedoc` and persisted to the TOML config file. Syncing follows the same polling interval as git.
             </change>
+            <change author="claude">
+                Review intervals now get a small random jitter (default plus or minus 5%) to diffuse review peaks over time. Configurable via `--jitter` on `hashcards drill` and the `[defaults] jitter` key in the serve config; set to 0.0 to disable. (FEAT-05)
+            </change>
         </added>
         <changed>
             <change author="eudoxia0">

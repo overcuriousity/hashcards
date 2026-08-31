@@ -48,6 +48,7 @@ use crate::rng::shuffle;
 use crate::types::card::Card;
 use crate::types::card_hash::CardHash;
 use crate::types::date::Date;
+use crate::types::performance::Jitter;
 use crate::types::timestamp::Timestamp;
 use crate::db::Database;
 
@@ -290,11 +291,11 @@ fn create_session(
         return Ok(None);
     }
 
-    // Shuffle
+    // Seed a session RNG, used for shuffling and interval jitter.
     let seed = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos() as u64;
+        .map(|duration| duration.as_nanos() as u64)
+        .unwrap_or(0);
     let mut rng = TinyRng::from_seed(seed);
     due_cards = shuffle(due_cards, &mut rng);
 
@@ -320,7 +321,14 @@ fn create_session(
         collection.macros,
         session_started_at,
         answer_controls,
-        MutableState::new(collection.db, session_id, cache, due_cards),
+        MutableState::new(
+            collection.db,
+            session_id,
+            cache,
+            due_cards,
+            Jitter::new(state.config.defaults.jitter)?,
+            rng,
+        ),
     )))
 }
 

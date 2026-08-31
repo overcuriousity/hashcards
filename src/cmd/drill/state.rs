@@ -21,8 +21,10 @@ use tokio::sync::oneshot::Sender;
 use crate::cmd::drill::cache::Cache;
 use crate::cmd::drill::server::AnswerControls;
 use crate::db::Database;
+use crate::rng::TinyRng;
 use crate::fsrs::Grade;
 use crate::types::card::Card;
+use crate::types::performance::Jitter;
 use crate::types::performance::Performance;
 use crate::types::timestamp::Timestamp;
 
@@ -48,11 +50,22 @@ pub struct MutableState {
     pub finished_at: Option<Timestamp>,
     /// Timestamp when the current card was revealed (for per-card timing).
     pub card_shown_at: Option<Timestamp>,
+    /// Fractional random jitter applied to computed intervals (FEAT-05).
+    pub jitter: Jitter,
+    /// RNG for interval jitter, seeded once per session.
+    pub rng: TinyRng,
 }
 
 impl MutableState {
     /// State for a freshly started session: nothing revealed, nothing graded.
-    pub fn new(db: Database, session_id: i64, cache: Cache, cards: Vec<Card>) -> Self {
+    pub fn new(
+        db: Database,
+        session_id: i64,
+        cache: Cache,
+        cards: Vec<Card>,
+        jitter: Jitter,
+        rng: TinyRng,
+    ) -> Self {
         Self {
             reveal: false,
             db,
@@ -62,6 +75,8 @@ impl MutableState {
             reviews: Vec::new(),
             finished_at: None,
             card_shown_at: None,
+            jitter,
+            rng,
         }
     }
 }

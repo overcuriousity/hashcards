@@ -112,6 +112,8 @@ pub fn update_performance(
     perf: Performance,
     grade: Grade,
     reviewed_at: Timestamp,
+    jitter: Jitter,
+    rng: &mut TinyRng,
 ) -> ReviewedPerformance {
     let today: NaiveDate = reviewed_at.date().into_inner();
     let (stability, difficulty, review_count): (Stability, Difficulty, usize) = match perf {
@@ -135,7 +137,10 @@ pub fn update_performance(
         }
     };
     let interval_raw: Interval = interval(TARGET_RECALL, stability);
-    let interval_rounded: Interval = interval_raw.round();
+    // FEAT-05: scale the realized interval by a small random factor to
+    // diffuse review peaks. `interval_raw` stays un-jittered.
+    let interval_jittered: Interval = interval_raw * jitter.factor(rng);
+    let interval_rounded: Interval = interval_jittered.round();
     let interval_clamped: Interval = interval_rounded.clamp(MIN_INTERVAL, MAX_INTERVAL);
     let interval_days: i64 = interval_clamped as i64;
     let interval_duration: Duration = Duration::days(interval_days);
@@ -163,14 +168,28 @@ mod tests {
     fn test_new() {
         assert!(Performance::New.is_new());
         let reviewed_at = Timestamp::now();
-        let reviewed_perf = update_performance(Performance::New, Grade::Good, reviewed_at);
+        let mut rng = TinyRng::from_seed(0);
+        let reviewed_perf = update_performance(
+            Performance::New,
+            Grade::Good,
+            reviewed_at,
+            Jitter::none(),
+            &mut rng,
+        );
         assert!(!Performance::Reviewed(reviewed_perf).is_new());
     }
 
     #[test]
     fn test_update_new_card() {
         let reviewed_at = Timestamp::now();
-        let result = update_performance(Performance::New, Grade::Good, reviewed_at);
+        let mut rng = TinyRng::from_seed(0);
+        let result = update_performance(
+            Performance::New,
+            Grade::Good,
+            reviewed_at,
+            Jitter::none(),
+            &mut rng,
+        );
         let ReviewedPerformance {
             last_reviewed_at,
             stability,
@@ -204,10 +223,13 @@ mod tests {
             review_count: 1,
         };
         let reviewed_at = now;
+        let mut rng = TinyRng::from_seed(0);
         let result = update_performance(
             Performance::Reviewed(initial_perf),
             Grade::Easy,
             reviewed_at,
+            Jitter::none(),
+            &mut rng,
         );
         let ReviewedPerformance {
             last_reviewed_at,
@@ -246,7 +268,14 @@ mod tests {
             due_date: Date::new(today.into_inner() + one_day),
             review_count: 1,
         };
-        let result = update_performance(Performance::Reviewed(perf), Grade::Good, now);
+        let mut rng = TinyRng::from_seed(0);
+        let result = update_performance(
+            Performance::Reviewed(perf),
+            Grade::Good,
+            now,
+            Jitter::none(),
+            &mut rng,
+        );
         assert!(result.stability.is_finite());
         assert!(result.interval_raw.is_finite());
         // With elapsed time clamped to 0, retrievability is 1.0 and a Good
@@ -266,7 +295,14 @@ mod tests {
             due_date: Date::new(today.into_inner() + five_days),
             review_count: 1,
         };
-        let result = update_performance(Performance::Reviewed(perf), Grade::Good, now);
+        let mut rng = TinyRng::from_seed(0);
+        let result = update_performance(
+            Performance::Reviewed(perf),
+            Grade::Good,
+            now,
+            Jitter::none(),
+            &mut rng,
+        );
         assert!(result.stability.is_finite());
         assert!(result.interval_raw.is_finite());
         assert!(result.interval_days >= 1);
@@ -304,5 +340,61 @@ mod tests {
         for _ in 0..100 {
             assert_eq!(Jitter::none().factor(&mut rng), 1.0);
         }
+    }
+
+    /// FEAT-05: jitter scales the realized interval within bounds, is
+    /// deterministic under a seeded RNG, and actually varies across seeds.
+    #[test]
+    fn test_update_performance_jitter() {
+        let reviewed_at = Timestamp::now();
+        let today = reviewed_at.date();
+        let duration = Duration::days(35);
+        let perf = ReviewedPerformance {
+            last_reviewed_at: Timestamp::new(reviewed_at.into_inner() - duration),
+            stability: 34.57,
+            difficulty: 5.26,
+            interval_raw: 34.57,
+            interval_days: 35,
+            due_date: Date::new(today.into_inner()),
+            review_count: 3,
+        };
+        let jitter = Jitter::new(0.05).unwrap();
+        let run = |seed: u64| {
+            let mut rng = TinyRng::from_seed(seed);
+            update_performance(
+                Performance::Reviewed(perf),
+                Grade::Good,
+                reviewed_at,
+                jitter,
+                &mut rng,
+            )
+        };
+        // Deterministic under a fixed seed.
+        assert_eq!(run(42), run(42));
+        // The realized interval stays within +/-5% of the raw interval
+        // (plus rounding).
+        for seed in 0..100 {
+            let result = run(seed);
+            let days = result.interval_days as f64;
+            assert!(days >= (result.interval_raw * 0.95).floor());
+            assert!(days <= (result.interval_raw * 1.05).ceil());
+        }
+        // Across 100 seeds at least two distinct interval lengths appear;
+        // without jitter every seed would yield the same value.
+        let distinct: std::collections::HashSet<i64> =
+            (0..100).map(|seed| run(seed).interval_days).collect();
+        assert!(distinct.len() > 1);
+        // interval_raw itself stays un-jittered.
+        let baseline = {
+            let mut rng = TinyRng::from_seed(0);
+            update_performance(
+                Performance::Reviewed(perf),
+                Grade::Good,
+                reviewed_at,
+                Jitter::none(),
+                &mut rng,
+            )
+        };
+        assert_eq!(run(42).interval_raw, baseline.interval_raw);
     }
 }
