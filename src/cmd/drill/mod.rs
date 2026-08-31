@@ -147,48 +147,61 @@ mod tests {
             response.headers().get("content-type").unwrap(),
             "text/html; charset=utf-8"
         );
-        let html = response.text().await?;
-        assert!(html.contains("baz <span class='cloze'>.............</span>"));
+        // The collection has one basic and one cloze card. Their order in the
+        // queue follows the hash sort in parse_deck, so drive both cards and
+        // assert on what the whole session showed rather than on the order.
+        let mut fronts = vec![response.text().await?];
+        let mut backs: Vec<String> = Vec::new();
+        let mut completion: Option<String> = None;
+        for card in 0..2 {
+            // Hit reveal.
+            let response = reqwest::Client::new()
+                .post(format!("http://{TEST_HOST}:{port}/"))
+                .form(&[("action", "Reveal")])
+                .send()
+                .await?;
+            assert!(response.status().is_success());
+            backs.push(response.text().await?);
 
-        // Hit reveal.
-        let response = reqwest::Client::new()
-            .post(format!("http://{TEST_HOST}:{port}/"))
-            .form(&[("action", "Reveal")])
-            .send()
-            .await?;
-        assert!(response.status().is_success());
-        let html = response.text().await?;
-        assert!(html.contains("baz <span class='cloze-reveal'>quux</span>"));
+            // Hit 'Good'.
+            let response = reqwest::Client::new()
+                .post(format!("http://{TEST_HOST}:{port}/"))
+                .form(&[("action", "Good")])
+                .send()
+                .await?;
+            assert!(response.status().is_success());
+            let html = response.text().await?;
+            if card == 0 {
+                fronts.push(html);
+            } else {
+                completion = Some(html);
+            }
+        }
 
-        // Hit 'Good'.
-        let response = reqwest::Client::new()
-            .post(format!("http://{TEST_HOST}:{port}/"))
-            .form(&[("action", "Good")])
-            .send()
-            .await?;
-        assert!(response.status().is_success());
-        let html = response.text().await?;
-        assert!(html.contains("FOO"));
-
-        // Hit reveal.
-        let response = reqwest::Client::new()
-            .post(format!("http://{TEST_HOST}:{port}/"))
-            .form(&[("action", "Reveal")])
-            .send()
-            .await?;
-        assert!(response.status().is_success());
-        let html = response.text().await?;
-        assert!(html.contains("BAR"));
-
-        // Hit 'Good'.
-        let response = reqwest::Client::new()
-            .post(format!("http://{TEST_HOST}:{port}/"))
-            .form(&[("action", "Good")])
-            .send()
-            .await?;
-        assert!(response.status().is_success());
-        let html = response.text().await?;
-        assert!(html.contains("Session Completed"));
+        // Both cards were shown, front and back, in some order.
+        assert!(
+            fronts
+                .iter()
+                .any(|h| h.contains("baz <span class='cloze'>.............</span>")),
+            "the cloze card's front was never shown: {fronts:?}"
+        );
+        assert!(
+            fronts.iter().any(|h| h.contains("FOO")),
+            "the basic card's front was never shown: {fronts:?}"
+        );
+        assert!(
+            backs
+                .iter()
+                .any(|h| h.contains("baz <span class='cloze-reveal'>quux</span>")),
+            "the cloze card's back was never shown: {backs:?}"
+        );
+        assert!(
+            backs.iter().any(|h| h.contains("BAR")),
+            "the basic card's back was never shown: {backs:?}"
+        );
+        // Grading the second card finishes the session.
+        let completion = completion.expect("the loop ran twice");
+        assert!(completion.contains("Session Completed"), "{completion}");
 
         Ok(())
     }
@@ -214,6 +227,12 @@ mod tests {
         spawn(async move { start_server(config).await });
         wait_for_server(TEST_HOST, port).await?;
 
+        // The first card of the session; which one it is follows the hash
+        // sort in parse_deck, so capture it instead of assuming.
+        let response = reqwest::get(format!("http://{TEST_HOST}:{port}/")).await?;
+        assert!(response.status().is_success());
+        let first_card = response.text().await?;
+
         // Hit reveal.
         let response = reqwest::Client::new()
             .post(format!("http://{TEST_HOST}:{port}/"))
@@ -238,7 +257,8 @@ mod tests {
             .await?;
         assert!(response.status().is_success());
         let html = response.text().await?;
-        assert!(html.contains("baz <span class='cloze'>.............</span>"));
+        // Undo puts the graded card back at the head of the queue.
+        assert_eq!(html, first_card);
 
         Ok(())
     }
@@ -328,6 +348,12 @@ mod tests {
         spawn(async move { start_server(config).await });
         wait_for_server(TEST_HOST, port).await?;
 
+        // The first card of the session; which one it is follows the hash
+        // sort in parse_deck, so capture it instead of assuming.
+        let response = reqwest::get(format!("http://{TEST_HOST}:{port}/")).await?;
+        assert!(response.status().is_success());
+        let first_card = response.text().await?;
+
         // Hit reveal.
         let response = reqwest::Client::new()
             .post(format!("http://{TEST_HOST}:{port}/"))
@@ -352,7 +378,8 @@ mod tests {
             .await?;
         assert!(response.status().is_success());
         let html = response.text().await?;
-        assert!(html.contains("baz <span class='cloze'>.............</span>"));
+        // Undo puts the graded card back at the head of the queue.
+        assert_eq!(html, first_card);
 
         Ok(())
     }

@@ -79,7 +79,7 @@ blake3( "ClozeV2" ++ text ++ 0xFF ++ deletion ++ 0xFF ++ decimal(occurrence_inde
   - `pub fn legacy_hash(&self) -> Option<CardHash>` on `Card` — delegates to its content.
   - `fn occurrence_index(bytes: &[u8], start: usize, deletion: &[u8]) -> usize` (private free function in `card.rs`).
 
-- [ ] **Step 1: Write the failing regression tests**
+- [x] **Step 1: Write the failing regression tests**
 
 Add to the `tests` module at the bottom of `src/types/card.rs` (after `test_family_hash`). Byte-position sanity for the fixtures: in `"The capital of France is Paris"`, `France` occupies bytes 15–20 and `Paris` bytes 25–29; in `"je bois du café"`, `café` occupies bytes 11–15 (`é` is two bytes — positions are BYTE positions per CLAUDE.md).
 
@@ -172,12 +172,12 @@ Add to the `tests` module at the bottom of `src/types/card.rs` (after `test_fami
     }
 ```
 
-- [ ] **Step 2: Run the tests and see them fail**
+- [x] **Step 2: Run the tests and see them fail**
 
 Run: `cargo test types::card`
 Expected: COMPILE ERROR — `legacy_hash` does not exist yet. Comment out the two `legacy_hash` assertions temporarily if you want to see the value failures directly: `test_cloze_hash_is_content_based`, `test_cloze_hash_is_content_based_non_ascii`, and `test_cloze_hash_no_longer_uses_offsets` FAIL against the current offset-based algorithm; `test_repeated_identical_deletions_hash_differently`, `test_distinct_deletions_hash_differently`, and `test_duplicate_cards_still_collide` already pass (pin-down tests). Restore the assertions before Step 3.
 
-- [ ] **Step 3: Implement the new hash, `occurrence_index`, and `legacy_hash`**
+- [x] **Step 3: Implement the new hash, `occurrence_index`, and `legacy_hash`**
 
 3a. Replace `CardContent::hash` (currently `src/types/card.rs:155-171`) with:
 
@@ -259,12 +259,12 @@ fn occurrence_index(bytes: &[u8], start: usize, deletion: &[u8]) -> usize {
     }
 ```
 
-- [ ] **Step 4: Run the full test suite and see it pass**
+- [x] **Step 4: Run the full test suite and see it pass**
 
 Run: `cargo test`
 Expected: all tests PASS. Parser, drill, serve, edit, and export tests never assert concrete cloze hash values — they compare hashes computed through `Card::hash()` on both sides — so the scheme change must not break any of them. If any test fails on a hard-coded cloze hash value, update that value using the reference formula from Step 1 and note it in the commit message.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/types/card.rs

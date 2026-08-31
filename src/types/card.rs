@@ -115,6 +115,11 @@ impl Card {
         self.content.family_hash()
     }
 
+    /// See [`CardContent::legacy_hash`].
+    pub fn legacy_hash(&self) -> Option<CardHash> {
+        self.content.legacy_hash()
+    }
+
     /// Return the absolute path of the file this card was parsed from.
     pub fn file_path(&self) -> &PathBuf {
         &self.file_path
@@ -198,13 +203,44 @@ impl CardContent {
                 hasher.update(answer.as_bytes());
             }
             CardContent::Cloze { text, start, end } => {
+                let bytes = text.as_bytes();
+                // Positions are byte positions (see CLAUDE.md). A malformed
+                // range hashes as an empty deletion instead of panicking.
+                let deletion: &[u8] = bytes.get(*start..=*end).unwrap_or(&[]);
+                let occurrence = occurrence_index(bytes, *start, deletion);
+                // The hash input is fully platform-independent: 0xFF never
+                // occurs in UTF-8, so it is an unambiguous field separator,
+                // and the occurrence index is serialized as decimal ASCII —
+                // no fixed-width integers, no endianness, no pointer width.
+                hasher.update(b"ClozeV2");
+                hasher.update(bytes);
+                hasher.update(&[0xFF]);
+                hasher.update(deletion);
+                hasher.update(&[0xFF]);
+                hasher.update(occurrence.to_string().as_bytes());
+            }
+        }
+        hasher.finalize()
+    }
+
+    /// The hash this content had under the legacy (pre-v2) cloze scheme,
+    /// which mixed the deletion's byte offsets into the hash as
+    /// platform-dependent `usize::to_le_bytes()`. Used only to re-link rows
+    /// in databases written by older versions of hashcards — the
+    /// `to_le_bytes` here intentionally reproduces what this machine wrote.
+    /// `None` for basic cards, whose scheme never changed.
+    pub fn legacy_hash(&self) -> Option<CardHash> {
+        match &self {
+            CardContent::Basic { .. } => None,
+            CardContent::Cloze { text, start, end } => {
+                let mut hasher = Hasher::new();
                 hasher.update(b"Cloze");
                 hasher.update(text.as_bytes());
                 hasher.update(&start.to_le_bytes());
                 hasher.update(&end.to_le_bytes());
+                Some(hasher.finalize())
             }
         }
-        hasher.finalize()
     }
 
     /// All cloze cards derived from the same text have the same family hash.
@@ -272,6 +308,20 @@ impl CardContent {
         };
         Ok(html)
     }
+}
+
+/// The number of occurrences of `deletion` that begin before byte position
+/// `start` in `bytes`. Sibling deletions in a card are disjoint, so an
+/// earlier identical deletion always counts as an occurrence — this is what
+/// keeps two identical deletions in the same card hashing differently.
+/// Byte-wise on purpose: cloze positions are byte positions.
+fn occurrence_index(bytes: &[u8], start: usize, deletion: &[u8]) -> usize {
+    if deletion.is_empty() {
+        return 0;
+    }
+    (0..start.min(bytes.len()))
+        .filter(|&p| bytes[p..].starts_with(deletion))
+        .count()
 }
 
 #[cfg(test)]
@@ -420,5 +470,92 @@ mod tests {
             CardContent::new_cloze("Paris is the capital of France", 0, 4),
         );
         assert_eq!(card.preview(), "Paris is the capital of France");
+    }
+
+    /// BUG-27 regression: the cloze hash is a platform-independent function
+    /// of (text, deletion content, occurrence index) — verified against the
+    /// reference formula, which contains no offsets, no usize serialization,
+    /// no endianness.
+    #[test]
+    fn test_cloze_hash_is_content_based() {
+        let content = CardContent::new_cloze("The capital of France is Paris", 25, 29);
+        let mut hasher = Hasher::new();
+        hasher.update(b"ClozeV2");
+        hasher.update(b"The capital of France is Paris");
+        hasher.update(&[0xFF]);
+        hasher.update(b"Paris");
+        hasher.update(&[0xFF]);
+        hasher.update(b"0");
+        assert_eq!(content.hash(), hasher.finalize());
+    }
+
+    /// Same property for multi-byte (non-ASCII) deletions: the deletion is
+    /// the byte slice text[start..=end].
+    #[test]
+    fn test_cloze_hash_is_content_based_non_ascii() {
+        let content = CardContent::new_cloze("je bois du café", 11, 15);
+        let mut hasher = Hasher::new();
+        hasher.update(b"ClozeV2");
+        hasher.update("je bois du café".as_bytes());
+        hasher.update(&[0xFF]);
+        hasher.update("café".as_bytes());
+        hasher.update(&[0xFF]);
+        hasher.update(b"0");
+        assert_eq!(content.hash(), hasher.finalize());
+    }
+
+    /// BUG-27 regression: the old offset-based algorithm is no longer the
+    /// hash, but is still reproducible via legacy_hash() for DB migration.
+    #[test]
+    fn test_cloze_hash_no_longer_uses_offsets() {
+        let content = CardContent::new_cloze("The capital of France is Paris", 25, 29);
+        let mut legacy: Vec<u8> = Vec::new();
+        legacy.extend_from_slice(b"Cloze");
+        legacy.extend_from_slice(b"The capital of France is Paris");
+        legacy.extend_from_slice(&25usize.to_le_bytes());
+        legacy.extend_from_slice(&29usize.to_le_bytes());
+        let legacy = CardHash::hash_bytes(&legacy);
+        assert_ne!(content.hash(), legacy);
+        assert_eq!(content.legacy_hash(), Some(legacy));
+    }
+
+    /// Basic cards have no legacy hash: their scheme never changed.
+    #[test]
+    fn test_basic_card_has_no_legacy_hash() {
+        let content = CardContent::new_basic("Q", "A");
+        assert_eq!(content.legacy_hash(), None);
+        // And the basic hash itself is unchanged from the old scheme.
+        let mut hasher = Hasher::new();
+        hasher.update(b"Basic");
+        hasher.update(b"Q");
+        hasher.update(b"A");
+        assert_eq!(content.hash(), hasher.finalize());
+    }
+
+    /// Two identical deletions in the same card ("C: [a] and [a]") must
+    /// still hash differently — the occurrence index disambiguates them.
+    #[test]
+    fn test_repeated_identical_deletions_hash_differently() {
+        // Clean text "a and a": deletions at bytes (0,0) and (6,6).
+        let first = CardContent::new_cloze("a and a", 0, 0);
+        let second = CardContent::new_cloze("a and a", 6, 6);
+        assert_ne!(first.hash(), second.hash());
+        assert_eq!(first.family_hash(), second.family_hash());
+    }
+
+    /// Two different deletions in the same card hash differently.
+    #[test]
+    fn test_distinct_deletions_hash_differently() {
+        let a = CardContent::new_cloze("The capital of France is Paris", 15, 20);
+        let b = CardContent::new_cloze("The capital of France is Paris", 25, 29);
+        assert_ne!(a.hash(), b.hash());
+    }
+
+    /// Hand-written duplicate cards keep colliding, exactly as today.
+    #[test]
+    fn test_duplicate_cards_still_collide() {
+        let a = CardContent::new_cloze("The capital of France is Paris", 25, 29);
+        let b = CardContent::new_cloze("The capital of France is Paris", 25, 29);
+        assert_eq!(a.hash(), b.hash());
     }
 }
