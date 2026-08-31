@@ -144,7 +144,11 @@ pub fn handle_action(
         Action::Reveal => {
             if !mutable.reveal {
                 mutable.reveal = true;
-                mutable.card_shown_at = Some(Timestamp::now());
+                // Timing normally starts when the card is served (GET path).
+                // This fallback covers a POST arriving without a prior GET.
+                if mutable.card_shown_at.is_none() {
+                    mutable.card_shown_at = Some(Timestamp::now());
+                }
             }
             Ok(ActionResult::Continue)
         }
@@ -636,5 +640,55 @@ mod tests {
             sessions[0].ended_at, sessions[0].started_at,
             "undo of a finished session must reopen the session row"
         );
+    }
+
+    fn sample_card() -> Card {
+        Card::new(
+            "TestDeck".to_string(),
+            PathBuf::from("/tmp/deck.md"),
+            (1, 2),
+            CardContent::new_basic("What is 2+2?", "4"),
+        )
+    }
+
+    fn past_timestamp() -> Timestamp {
+        Timestamp::new(
+            NaiveDateTime::parse_from_str("2026-08-30 10:00:00", "%Y-%m-%d %H:%M:%S").unwrap(),
+        )
+    }
+
+    /// BUG-14: Reveal must not restart the per-card timer that was started
+    /// when the card was first displayed.
+    #[test]
+    fn test_reveal_preserves_card_shown_at() -> Fallible<()> {
+        let mut mutable = make_mutable();
+        mutable.cards.push(sample_card());
+        mutable.card_shown_at = Some(past_timestamp());
+        handle_action(&mut mutable, Action::Reveal, None)?;
+        assert!(mutable.reveal);
+        assert_eq!(mutable.card_shown_at, Some(past_timestamp()));
+        Ok(())
+    }
+
+    /// BUG-14: the GET path starts the timer via mark_card_shown, exactly once.
+    #[test]
+    fn test_mark_card_shown_sets_only_once() {
+        let mut mutable = make_mutable();
+        mutable.cards.push(sample_card());
+        assert!(mutable.card_shown_at.is_none());
+        mutable.mark_card_shown();
+        assert!(mutable.card_shown_at.is_some());
+        // A page refresh (second GET) must not restart the timer.
+        mutable.card_shown_at = Some(past_timestamp());
+        mutable.mark_card_shown();
+        assert_eq!(mutable.card_shown_at, Some(past_timestamp()));
+    }
+
+    /// mark_card_shown is a no-op when there is no current card.
+    #[test]
+    fn test_mark_card_shown_noop_on_empty_queue() {
+        let mut mutable = make_mutable();
+        mutable.mark_card_shown();
+        assert!(mutable.card_shown_at.is_none());
     }
 }

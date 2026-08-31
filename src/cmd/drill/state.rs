@@ -52,7 +52,7 @@ pub struct MutableState {
     pub cards: Vec<Card>,
     pub reviews: Vec<Review>,
     pub finished_at: Option<Timestamp>,
-    /// Timestamp when the current card was revealed (for per-card timing).
+    /// Timestamp when the current card was first shown (for per-card timing).
     pub card_shown_at: Option<Timestamp>,
     /// Fractional random jitter applied to computed intervals (FEAT-05).
     pub jitter: Jitter,
@@ -81,6 +81,18 @@ impl MutableState {
             card_shown_at: None,
             jitter,
             rng,
+        }
+    }
+
+    /// Record that the current card has just been served to the client.
+    ///
+    /// Called from the GET path so per-card durations include recall time
+    /// (measured from display, not from reveal). Idempotent: a page refresh
+    /// does not restart the timer. No-op when the session is finished or the
+    /// queue is empty.
+    pub fn mark_card_shown(&mut self) {
+        if self.card_shown_at.is_none() && self.finished_at.is_none() && !self.cards.is_empty() {
+            self.card_shown_at = Some(Timestamp::now());
         }
     }
 

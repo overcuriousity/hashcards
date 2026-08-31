@@ -179,6 +179,8 @@ fn collection_get_inner(state: &AppState, slug: &str, flash: Option<Flash>) -> F
     let mut session = session.lock();
     // BUG-08: stamp activity so the eviction task only reaps idle sessions.
     session.last_activity_at = Timestamp::now();
+    // BUG-14: start the per-card timer when the card is served.
+    session.mutable.mark_card_shown();
     let form_action = format!("/collection/{slug}");
     let file_url_prefix = format!("/collection/{slug}/file");
     let ctx = RenderContext {

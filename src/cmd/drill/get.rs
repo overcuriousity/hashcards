@@ -79,7 +79,9 @@ pub async fn get_handler(
 }
 
 async fn inner(state: ServerState, flash: Option<Flash>) -> Fallible<Markup> {
-    let mutable = state.mutable.lock();
+    let mut mutable = state.mutable.lock();
+    // BUG-14: start the per-card timer when the card is served.
+    mutable.mark_card_shown();
     let file_url_prefix = format!("http://localhost:{}/file", state.port);
     let ctx = RenderContext {
         directory: &state.directory,

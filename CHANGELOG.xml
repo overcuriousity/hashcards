@@ -1,6 +1,9 @@
 <changelog>
     <unreleased>
         <fixed>
+            <change author="mstoeck3">
+                Per-card review timing now starts when the card is first displayed instead of when the answer is revealed, so recorded durations and pace stats include recall time. (BUG-14)
+            </change>
             <change author="claude">
                 Interrupting a drill with Ctrl+C now exits cleanly: the session is closed, a summary of the saved reviews is printed, and the exit code is 0. Reviews are written to the database as they happen, so an interrupted session loses nothing. Previously the command exited with the error "Session interrupted before completion". (BUG-10)
             </change>
