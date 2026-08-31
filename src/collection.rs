@@ -61,24 +61,20 @@ impl Collection {
         let db: Database = Database::new(db_path)?;
 
         let macros: Vec<(String, String)> = {
-            let mut macros = Vec::new();
             let macros_path = directory.join("macros.tex");
             if macros_path.exists() {
-                let content = read_to_string(macros_path)?;
-                for line in content.lines() {
-                    // Skip lines starting with '%'.
-                    if !line.trim_start().starts_with('%') {
-                        let split = line.split_once(' ');
-                        match split {
-                            Some((name, definition)) => {
-                                macros.push((name.to_string(), definition.to_string()));
-                            }
-                            None => {}
-                        }
-                    }
+                let content = read_to_string(&macros_path)?;
+                let (parsed, malformed) = parse_macros(&content);
+                for line_no in malformed {
+                    log::warn!(
+                        "{}: line {line_no} is not a valid macro definition (expected a name and a definition separated by a space); line ignored.",
+                        macros_path.display()
+                    );
                 }
+                parsed
+            } else {
+                Vec::new()
             }
-            macros
         };
 
         let cards: Vec<Card> = {
@@ -100,5 +96,49 @@ impl Collection {
             cards,
             macros,
         })
+    }
+}
+
+/// Parse the contents of `macros.tex` into `(name, definition)` pairs.
+///
+/// Returns the parsed macros and the 1-based line numbers of malformed
+/// lines: non-comment, non-blank lines without a space separating the
+/// macro name from its definition. Comment lines start with `%`.
+fn parse_macros(content: &str) -> (Vec<(String, String)>, Vec<usize>) {
+    let mut macros = Vec::new();
+    let mut malformed = Vec::new();
+    for (index, line) in content.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('%') {
+            continue;
+        }
+        match line.split_once(' ') {
+            Some((name, definition)) => {
+                macros.push((name.to_string(), definition.to_string()));
+            }
+            None => malformed.push(index + 1),
+        }
+    }
+    (macros, malformed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_macros_reports_malformed_lines() {
+        let content = "\\foo bar\n% comment\n\nnospace\n\\baz qux quux\n";
+        let (macros, malformed) = parse_macros(content);
+        assert_eq!(
+            macros,
+            vec![
+                ("\\foo".to_string(), "bar".to_string()),
+                ("\\baz".to_string(), "qux quux".to_string()),
+            ]
+        );
+        // Line 4 ("nospace") has no space separator; comment and blank
+        // lines are not malformed.
+        assert_eq!(malformed, vec![4]);
     }
 }

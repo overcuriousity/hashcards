@@ -22,6 +22,9 @@
             <change author="claude">
                 Errors in web actions are no longer silently swallowed: failed grades and undos, bookmark removal and note saving, manual git sync, and all HedgeDoc add/delete/sync failures now show an error banner instead of redirecting as if they had succeeded.
             </change>
+            <change author="claude">
+                Malformed lines in `macros.tex` (lines without a space between the macro name and its definition) are now reported as warnings with their line number instead of being silently ignored.
+            </change>
         </fixed>
         <added>
             <change author="claude">
