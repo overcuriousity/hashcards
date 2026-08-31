@@ -51,7 +51,7 @@ The splice itself continues to operate on **byte** offsets (`marker.bytes()`, ne
 - Consumes: `markdown_to_html` / `markdown_to_html_inline` from `src/markdown.rs` (unchanged signatures: `fn(&MarkdownRenderConfig, &str) -> Fallible<String>`).
 - Produces: private `fn cloze_marker(text: &str) -> String` in `src/types/card.rs`; `CardContent::html_front` / `html_back` signatures unchanged. No other task depends on this one.
 
-- [ ] **Step 1: Write the failing regression test**
+- [x] **Step 1: Write the failing regression test**
 
 Add to the existing `mod tests` in `src/types/card.rs` (it starts at line 239). Also add this config helper inside `mod tests` (mirrors `make_test_config` in `src/markdown.rs`):
 
@@ -114,12 +114,12 @@ Add to the existing `mod tests` in `src/types/card.rs` (it starts at line 239). 
 
 Note: `Fallible` and `MarkdownRenderConfig` are already imported at the top of `card.rs`; `PathBuf` likewise. `use super::*;` in the tests mod pulls them in.
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cargo test test_literal_cloze_sentinel_in_card_text_survives_rendering`
 Expected: FAIL — the front asserts fail because `CLOZE_DELETION` in the card text is replaced by a cloze span (two spans, literal text gone).
 
-- [ ] **Step 3: Implement the checked per-render marker**
+- [x] **Step 3: Implement the checked per-render marker**
 
 In `src/types/card.rs`, delete the two constants at lines 30-31:
 
@@ -190,12 +190,12 @@ Replace the `html_back` cloze arm (lines 217-232) with:
 
 Note `marker.bytes()` — byte iterator, consistent with the byte-position rule. The splice ranges are untouched.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test --lib` (the new test plus all existing card/markdown/parser tests must pass — the marker change must not break normal cloze rendering).
 Expected: PASS, zero failures.
 
-- [ ] **Step 5: Update CHANGELOG.xml**
+- [x] **Step 5: Update CHANGELOG.xml**
 
 `CHANGELOG.xml` has an `<unreleased>` element containing `<fixed>` and `<added>` sections (see `CHANGELOG.xsd`: `<change>` elements with an `author` attribute, plain-text content, XML-escaped). Append inside the existing `<unreleased><fixed>` section:
 
@@ -205,7 +205,7 @@ Expected: PASS, zero failures.
             </change>
 ```
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/types/card.rs CHANGELOG.xml
@@ -223,7 +223,7 @@ git commit -m "fix: stop mangling literal CLOZE_DELETION text in cloze cards (BU
 - Consumes: nothing from other tasks.
 - Produces: private `fn escape_attribute(s: &str) -> String` in `src/markdown.rs`. No other task depends on it.
 
-- [ ] **Step 1: Write the failing regression test**
+- [x] **Step 1: Write the failing regression test**
 
 In `src/markdown.rs` tests mod, first make the shared helper create an audio file. In `make_test_config` (currently at lines 159-175), after the `image_path` lines add:
 
@@ -256,12 +256,12 @@ Then add the test:
 
 (pulldown-cmark parses the backslash-escaped quote, handing the rewriter the raw title `a " <b> title`.)
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cargo test test_audio_title_is_attribute_escaped`
 Expected: FAIL — output contains `title="a " <b> title"` (raw quote and angle brackets, broken attribute).
 
-- [ ] **Step 3: Implement attribute escaping**
+- [x] **Step 3: Implement attribute escaping**
 
 In `src/markdown.rs`, add below `is_audio_file`:
 
@@ -293,12 +293,12 @@ Change the audio element construction (lines 74-81) to escape the title:
 
 (`url` needs no escaping here: `modify_url` produces either a percent-encoded path or a re-serialized http(s) `Url`, neither of which can contain `"` or `<`.)
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test --lib`
 Expected: PASS, including all pre-existing markdown tests.
 
-- [ ] **Step 5: Update CHANGELOG.xml**
+- [x] **Step 5: Update CHANGELOG.xml**
 
 Add a `<security>` section inside `<unreleased>` (the XSD's `changesType` is an unbounded choice of `added`/`fixed`/`changed`/`removed`/`deprecated`/`security`/`breaking`, so a new `<security>` sibling next to `<fixed>` is valid). Append inside `<unreleased>`:
 
@@ -312,7 +312,7 @@ Add a `<security>` section inside `<unreleased>` (the XSD's `changesType` is an 
 
 (If Task 4 has already created the `<security>` section, append the `<change>` into it instead of adding a second section.)
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/markdown.rs CHANGELOG.xml
@@ -333,7 +333,7 @@ git commit -m "fix: escape audio element title attribute (BUG-23)"
 
 Background: `hedgedoc_add_handler` (`handlers.rs:527-545`) currently falls back to `Err(_) => trimmed.to_string()` when `Url::parse` fails, persisting a raw arbitrary string that later renders into `href` attributes. Scheme validation exists only at fetch time (`fetch_markdown`, `hedgedoc.rs:121`) and is HTTPS-only.
 
-- [ ] **Step 1: Write the failing regression tests**
+- [x] **Step 1: Write the failing regression tests**
 
 Append to the existing `mod tests` in `src/cmd/serve/hedgedoc.rs` (starts at line 547):
 
@@ -371,12 +371,12 @@ Append to the existing `mod tests` in `src/cmd/serve/hedgedoc.rs` (starts at lin
     }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cargo test normalize_hedgedoc_url`
 Expected: FAIL to compile — `normalize_hedgedoc_url` does not exist yet. (A compile error in the test-only code is the failing state for a not-yet-written function.)
 
-- [ ] **Step 3: Implement `normalize_hedgedoc_url`**
+- [x] **Step 3: Implement `normalize_hedgedoc_url`**
 
 In `src/cmd/serve/hedgedoc.rs`, directly below `validate_hedgedoc_url` (line 64), add:
 
@@ -403,12 +403,12 @@ pub fn normalize_hedgedoc_url(raw: &str) -> Fallible<String> {
 
 If `ErrorReport` is not yet imported in `hedgedoc.rs`, add `use crate::error::ErrorReport;` to the top of the file (the file already imports `Fallible` and `fail`; prefer imports over `crate::error::ErrorReport::new(...)` qualified calls).
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test normalize_hedgedoc_url`
 Expected: PASS (all four tests).
 
-- [ ] **Step 5: Wire the handler to use it**
+- [x] **Step 5: Wire the handler to use it**
 
 In `src/cmd/serve/handlers.rs`, add to the hedgedoc import block (lines 33-40):
 
@@ -436,12 +436,12 @@ Replace the entire `let url = { ... };` normalization block in `hedgedoc_add_han
 
 Also update the now-accurate comment at `handlers.rs:96-99` if needed — after this task, "All URLs were already validated as HTTPS when added" becomes true for newly added URLs (it was previously aspirational; fetch-time validation happened, storage-time did not).
 
-- [ ] **Step 6: Run the full test suite**
+- [x] **Step 6: Run the full test suite**
 
 Run: `cargo test`
 Expected: PASS — in particular the serve integration tests in `src/cmd/serve/mod.rs` must still pass.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add src/cmd/serve/hedgedoc.rs src/cmd/serve/handlers.rs
@@ -465,7 +465,7 @@ git commit -m "fix: validate HedgeDoc URL scheme at storage time (BUG-24)"
 - Consumes: `render_manage_page(sources: &[HedgedocSource], last_synced: Option<Timestamp>, config_available: bool) -> Markup` (`hedgedoc_ui.rs:8`), `render_browse_page(collection_name: &str, slug: &str, tree: &DeckNode, hedge_urls: &HashMap<String, String>, bookmark_count: usize) -> Markup` (`browse.rs:144`), structs `HedgedocSource`/`HedgedocNote` (`state.rs:33-46`), `ResolvedCollection` (`config.rs:149`, all fields pub, `Clone`), `DeckNode` (`browse.rs:16`, all fields pub).
 - Produces: `pub fn safe_href(url: &str) -> Option<&str>` in `src/cmd/serve/href.rs`. Consumed by `hedgedoc_ui.rs` and `browse.rs` in this task only.
 
-- [ ] **Step 1: Write the failing regression tests**
+- [x] **Step 1: Write the failing regression tests**
 
 Add a tests mod at the end of `src/cmd/serve/hedgedoc_ui.rs`:
 
@@ -559,13 +559,13 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cargo test manage_page_never_links_unsafe_url_schemes browse_page_never_links_unsafe_edit_urls` — cargo takes one filter; run them separately:
 `cargo test manage_page_never` and `cargo test browse_page_never`
 Expected: both FAIL — the current templates render `href="javascript:alert(1)"` verbatim (maud escapes the attribute value but the scheme is live). `manage_page_links_https_urls` (run via `cargo test manage_page_links`) should already PASS.
 
-- [ ] **Step 3: Implement `safe_href`**
+- [x] **Step 3: Implement `safe_href`**
 
 Create `src/cmd/serve/href.rs`:
 
@@ -616,7 +616,7 @@ In `src/cmd/serve/mod.rs`, add to the module list (alphabetical, after `mod hedg
 mod href;
 ```
 
-- [ ] **Step 4: Guard the two render sites**
+- [x] **Step 4: Guard the two render sites**
 
 In `src/cmd/serve/hedgedoc_ui.rs`, add the import:
 
@@ -668,12 +668,12 @@ to:
 
 (`edit_url` becomes `Option<&str>` instead of `Option<&String>`; the `@if let Some(url) = edit_url { a.edit-link href=(url) ... }` at line 240 compiles unchanged.)
 
-- [ ] **Step 5: Run tests to verify they pass**
+- [x] **Step 5: Run tests to verify they pass**
 
 Run: `cargo test`
 Expected: PASS — the two new template tests, the `href` unit tests, and the whole existing suite.
 
-- [ ] **Step 6: Update CHANGELOG.xml**
+- [x] **Step 6: Update CHANGELOG.xml**
 
 Append inside `<unreleased><security>` (created in Task 2; create the section as shown there if executing this task first):
 
@@ -683,7 +683,7 @@ Append inside `<unreleased><security>` (created in Task 2; create the section as
             </change>
 ```
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add src/cmd/serve/href.rs src/cmd/serve/mod.rs src/cmd/serve/hedgedoc_ui.rs src/cmd/serve/browse.rs CHANGELOG.xml
@@ -704,7 +704,7 @@ git commit -m "fix: guard href scheme at render time for user-supplied URLs (BUG
 
 There is no JavaScript test infrastructure in this repository (no `package.json`, no node toolchain), so per the global TDD rule the "failing test" is a documented manual verification executed before and after the change.
 
-- [ ] **Step 1: Manual verification — reproduce the bug (the "failing test")**
+- [x] **Step 1: Manual verification — reproduce the bug (the "failing test")**
 
 Important precondition: the bug only triggers when the displayed card contains math — `katex` is referenced inside the `.math-inline`/`.math-display` `forEach` callbacks (`script.js:17-31`), so with no math elements the handler completes and restores opacity even without KaTeX. Use a scratch deck with a math card.
 
@@ -725,7 +725,7 @@ printf 'Q: What is $x^2$ when $x = 2$?\nA: $4$\n' > /tmp/claude-1000/-home-user0
 
 Record: bug reproduced (card invisible, ReferenceError in console).
 
-- [ ] **Step 2: Implement the guard + finally**
+- [x] **Step 2: Implement the guard + finally**
 
 Replace the whole `DOMContentLoaded` handler in `src/cmd/drill/script.js` (lines 15-40) with:
 
@@ -768,7 +768,7 @@ document.addEventListener("DOMContentLoaded", function () {
 
 (Both the `typeof` guard and the `finally` are deliberate: the guard handles a missing script cleanly with no console noise for the known case; the `finally` guarantees visibility against any other failure, e.g. a broken `MACROS` entry or a katex internal error.)
 
-- [ ] **Step 3: Manual verification — confirm the fix (the "passing test")**
+- [x] **Step 3: Manual verification — confirm the fix (the "passing test")**
 
 Repeat Step 1's exact steps 1-4 (same scratch deck, `cargo run -- drill .../katex-repro --port 8123`, block `*katex*`, reload).
 Expected: the card content is visible (math appears as raw TeX source, which is acceptable degraded behavior); no uncaught `ReferenceError` breaks the handler; syntax highlighting still runs. Then unblock `*katex*`, reload, and confirm math renders normally and the card is visible — no regression in the happy path.
@@ -776,7 +776,7 @@ Expected: the card content is visible (math appears as raw TeX source, which is 
 Also run: `cargo test`
 Expected: PASS (script.js is embedded/served by the drill server; the Rust suite must still be green).
 
-- [ ] **Step 4: Update CHANGELOG.xml**
+- [x] **Step 4: Update CHANGELOG.xml**
 
 Append inside the existing `<unreleased><fixed>` section:
 
@@ -786,7 +786,7 @@ Append inside the existing `<unreleased><fixed>` section:
             </change>
 ```
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/cmd/drill/script.js CHANGELOG.xml
@@ -804,24 +804,24 @@ git commit -m "fix: always restore card visibility when KaTeX fails (BUG-25)"
 - Consumes: everything from Tasks 1-5.
 - Produces: a green branch ready for the "Rendering safety" PR.
 
-- [ ] **Step 1: Run the full suite**
+- [x] **Step 1: Run the full suite**
 
 Run: `cargo test`
 Expected: PASS, zero failures.
 
-- [ ] **Step 2: Lint and format**
+- [x] **Step 2: Lint and format**
 
 Run: `cargo clippy --all-targets` and `cargo fmt -- --check`
 Expected: no warnings from the changed files, no formatting diffs. Fix anything reported and amend the relevant commit (or add a `chore:` commit).
 
-- [ ] **Step 3: Grep for leftovers**
+- [x] **Step 3: Grep for leftovers**
 
 Run: `grep -rn "CLOZE_TAG" src/`
 Expected: no matches (the old sentinel constants are gone).
 Run: `grep -rn "unwrap()" src/cmd/serve/href.rs src/markdown.rs src/types/card.rs | grep -v "mod tests" | grep -v "#\[test\]"`
 Expected: no new production `unwrap()` (test-mod hits are fine; verify any hit is inside `#[cfg(test)]`).
 
-- [ ] **Step 4: Validate CHANGELOG.xml against the XSD**
+- [x] **Step 4: Validate CHANGELOG.xml against the XSD**
 
 Run: `xmllint --schema CHANGELOG.xsd CHANGELOG.xml --noout` (if `xmllint` is unavailable, visually check: each new `<change>` sits inside `<fixed>` or `<security>` inside `<unreleased>`, with an `author` attribute and XML-escaped text).
 Expected: `CHANGELOG.xml validates`.
