@@ -153,7 +153,6 @@ pub fn handle_action(
         }
         Action::Bookmark => {
             // Write immediately to DB so bookmarks survive aborted sessions.
-            // This is the one intentional mid-session DB write.
             if !mutable.cards.is_empty() {
                 let hash = mutable.cards[0].hash();
                 let now = Timestamp::now();

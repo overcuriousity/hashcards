@@ -221,7 +221,12 @@ pub async fn start_server(config: ServerConfig) -> Fallible<()> {
         Ok(())
     } else {
         // Mark the session as closed so ended_at reflects the actual stop time.
-        let _ = mutable.db.close_session(mutable.session_id, Timestamp::now());
+        if let Err(e) = mutable.db.close_session(mutable.session_id, Timestamp::now()) {
+            log::error!(
+                "failed to close interrupted session {}: {e}",
+                mutable.session_id
+            );
+        }
         fail("Session interrupted before completion")
     }
 }

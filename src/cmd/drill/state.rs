@@ -50,6 +50,22 @@ pub struct MutableState {
     pub card_shown_at: Option<Timestamp>,
 }
 
+impl MutableState {
+    /// State for a freshly started session: nothing revealed, nothing graded.
+    pub fn new(db: Database, session_id: i64, cache: Cache, cards: Vec<Card>) -> Self {
+        Self {
+            reveal: false,
+            db,
+            session_id,
+            cache,
+            cards,
+            reviews: Vec::new(),
+            finished_at: None,
+            card_shown_at: None,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Review {
     pub card: Card,

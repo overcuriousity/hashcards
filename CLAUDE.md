@@ -25,7 +25,8 @@ hashcards is a plain-text spaced repetition system written in Rust. It parses Ma
 - Keep functions small and focused.
 - Module files should re-export what's needed, hide implementation details.
 - Prefer imports to fully qualified names: e.g. instead of writing `foo::bar()`, add a `use foo::bar;` statement at the top of the module.
-- Don't persist changes to the database during drilling. Use the cache.
+- Each grade is written to the database as it happens, so an interrupted session keeps its progress. Undo marks the review `voided` rather than deleting it; read paths filter on `voided = 0`. Write the review and the card's performance in one transaction.
+- The cache stays the in-memory working state for the session (rendering, undo). It is no longer the sole writer.
 - Don't use timezones: dates are naive for a reason. Due dates etc. are more like the dates in a journal entry than precise points in time.
 - When relevant, update `CHANGELOG.xml`.
 - When updating this file, be terse.
