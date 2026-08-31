@@ -13,6 +13,9 @@
                 Per-card review timing now starts when the card is first displayed instead of when the answer is revealed, so recorded durations and pace stats include recall time. (BUG-14)
             </change>
             <change author="claude">
+                A second Ctrl+C during shutdown now stops hashcards immediately (exit code 130), and both drill and serve modes shut down gracefully on SIGTERM. Previously catching the first Ctrl+C replaced the default signal handling, so if shutdown stalled on an open client connection the process could only be stopped with SIGKILL. (BUG-52)
+            </change>
+            <change author="claude">
                 Interrupting a drill with Ctrl+C now exits cleanly: the session is closed, a summary of the saved reviews is printed, and the exit code is 0. Reviews are written to the database as they happen, so an interrupted session loses nothing. Previously the command exited with the error "Session interrupted before completion". (BUG-10)
             </change>
             <change author="claude">

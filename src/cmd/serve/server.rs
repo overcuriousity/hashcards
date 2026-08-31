@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::future::pending;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -9,7 +8,6 @@ use axum::Router;
 use axum::routing::get;
 use axum::routing::post;
 use tokio::net::TcpListener;
-use tokio::signal;
 use tokio::sync::RwLock;
 
 use crate::cmd::drill::hljs::HLJS_CSS_URL;
@@ -58,6 +56,7 @@ use crate::cmd::serve::state::HedgedocSource;
 use crate::cmd::serve::state::SharedSession;
 use crate::cmd::serve::state::evict_idle_sessions;
 use crate::cmd::serve::stats::collection_stats_handler;
+use crate::cmd::signals::terminate_signal;
 use crate::error::Fallible;
 use crate::types::timestamp::Timestamp;
 
@@ -294,12 +293,7 @@ async fn style_handler() -> (
 }
 
 async fn shutdown_signal() {
-    if let Err(e) = signal::ctrl_c().await {
-        log::error!(
-            "Failed to install Ctrl+C handler; graceful shutdown on Ctrl+C is disabled: {e}"
-        );
-        pending::<()>().await;
-    }
+    terminate_signal().await;
     log::debug!("Received shutdown signal");
 }
 

@@ -17,5 +17,6 @@ pub mod drill;
 pub mod export;
 pub mod orphans;
 pub mod serve;
+pub mod signals;
 pub mod stats;
 pub mod stats_page;

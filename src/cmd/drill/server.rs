@@ -15,7 +15,6 @@
 use std::collections::HashSet;
 use std::fmt::Display;
 use std::fmt::Formatter;
-use std::future::pending;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -36,7 +35,6 @@ use axum::routing::post;
 use clap::ValueEnum;
 use tokio::net::TcpListener;
 use tokio::select;
-use tokio::signal;
 use tokio::sync::oneshot::Receiver;
 use tokio::sync::oneshot::channel;
 
@@ -60,6 +58,7 @@ use crate::cmd::drill::stats::stats_handler;
 use crate::cmd::drill::template::icon_192_handler;
 use crate::cmd::drill::template::icon_512_handler;
 use crate::cmd::drill::template::manifest_handler;
+use crate::cmd::signals::terminate_signal;
 use crate::collection::Collection;
 use crate::db::Database;
 use crate::error::ErrorReport;
@@ -356,22 +355,13 @@ async fn file_handler(
 }
 
 async fn shutdown_signal(shutdown_rx: Receiver<()>) {
-    let ctrl_c = async {
-        if let Err(e) = signal::ctrl_c().await {
-            log::error!(
-                "Failed to install Ctrl+C handler; graceful shutdown on Ctrl+C is disabled: {e}"
-            );
-            pending::<()>().await;
-        }
-    };
-
     let shutdown = async {
         shutdown_rx.await.ok();
     };
 
     select! {
-        _ = ctrl_c => {
-            log::debug!("Received Ctrl+C, shutting down gracefully");
+        _ = terminate_signal() => {
+            log::debug!("Received termination signal, shutting down gracefully");
         },
         _ = shutdown => {
             log::debug!("Received shutdown signal, shutting down gracefully");
