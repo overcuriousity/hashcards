@@ -63,7 +63,7 @@ No new source files. Files modified:
 **Interfaces:**
 - Produces: `impl Action { pub fn grade(&self) -> Option<Grade> }` — returns `Some(Grade)` for `Forgot`/`Hard`/`Good`/`Easy`, `None` for every other action. (This is the only caller-visible signature change in this plan besides the lock types in Task 8.)
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 In `src/cmd/drill/post.rs`, inside the existing `mod tests`, add:
 
@@ -88,12 +88,12 @@ And update the existing `test_action_grade` to the new signature:
     }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cargo test test_non_grade_action_returns_none`
 Expected: FAIL — compile error (`is_none` does not exist on `Grade`; `Some(Grade::Forgot)` does not match return type `Grade`). This is the red stage for a type-signature change; with the old code the call `Action::Reveal.grade()` would panic with "Action does not correspond to a grade".
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 Replace the `grade` method (`src/cmd/drill/post.rs:49-57`):
 
@@ -132,12 +132,12 @@ Add the import at the top of `src/cmd/drill/post.rs` (next to `use crate::error:
 use crate::error::fail;
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test --lib cmd::drill::post`
 Expected: PASS (all tests in the module, including `test_action_grade` and `test_non_grade_action_returns_none`).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/cmd/drill/post.rs
@@ -158,7 +158,7 @@ git commit -m "fix: Action::grade returns Option instead of panicking (BUG-49)"
 
 **Note on reachability:** the `unwrap()` at `post.rs:123` is guarded by `!mutable.reviews.is_empty()`, so the panic is not reachable today; this task removes the `unwrap()` per the no-unwrap rule and adds a behavioral pin. The test below passes both before and after — its job is to pin the no-op semantics while the guard is restructured. Rely on compilation plus the existing suite for the rest.
 
-- [ ] **Step 1: Write the pinning test**
+- [x] **Step 1: Write the pinning test**
 
 In `src/cmd/drill/post.rs`, inside `mod tests`, add:
 
@@ -174,12 +174,12 @@ In `src/cmd/drill/post.rs`, inside `mod tests`, add:
     }
 ```
 
-- [ ] **Step 2: Run test to verify it passes (pin, not red)**
+- [x] **Step 2: Run test to verify it passes (pin, not red)**
 
 Run: `cargo test test_undo_with_no_reviews_is_noop`
 Expected: PASS (documents the guarded no-op; the panic site is not test-reachable, as noted above).
 
-- [ ] **Step 3: Implement the refactor**
+- [x] **Step 3: Implement the refactor**
 
 Replace the `Action::Undo` arm (`src/cmd/drill/post.rs:121-139`). Before:
 
@@ -230,12 +230,12 @@ After:
 
 (The `let last_review: Review = ...` binding moves into the `if let` pattern; everything else is unchanged. Note the DB void + performance restore stays a single atomic call, per the global transaction rule.)
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test --lib cmd::drill::post`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/cmd/drill/post.rs
@@ -254,7 +254,7 @@ git commit -m "fix: undo pops last review with if-let instead of unwrap (BUG-49)
 - Consumes: `RenderContext`, `MutableState::new(db, session_id, cache, cards)` (`src/cmd/drill/state.rs`), `AnswerControls` (`src/cmd/drill/server.rs`), `CompletionAction` (this file).
 - Produces: `render_session_page` keeps its signature `pub fn render_session_page(ctx: &RenderContext, mutable: &MutableState) -> Fallible<Markup>` but now returns `Err` (never panics) on an empty queue. `get_handler` (drill) and `collection_get_inner` (serve, `src/cmd/serve/handlers.rs:140`) already render `Err` as an error page — no caller changes needed.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 `src/cmd/drill/get.rs` has no tests module yet. Add one at the end of the file:
 
@@ -295,12 +295,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cargo test test_render_session_page_with_empty_queue_is_error`
 Expected: FAIL — the test panics with "index out of bounds: the len is 0" (from `mutable.cards[0]` at `get.rs:93`) instead of returning an `Err`.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 In `render_session_page` (`src/cmd/drill/get.rs:93`). Before:
 
@@ -323,12 +323,12 @@ Add the import at the top of `src/cmd/drill/get.rs` (next to `use crate::error::
 use crate::error::fail;
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test --lib cmd::drill::get`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/cmd/drill/get.rs
@@ -347,7 +347,7 @@ git commit -m "fix: empty card queue renders error page instead of panicking (BU
 - Consumes: `make_mutable()` and `make_ctx()` helpers from Task 3's tests module; the `fail` import added in Task 3.
 - Produces: `render_completion_page` keeps its signature `pub fn render_completion_page(ctx: &RenderContext, mutable: &MutableState) -> Fallible<Markup>` but returns `Err` instead of panicking when `mutable.finished_at` is `None`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 In the `mod tests` of `src/cmd/drill/get.rs`, add:
 
@@ -362,12 +362,12 @@ In the `mod tests` of `src/cmd/drill/get.rs`, add:
     }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cargo test test_render_completion_page_without_finished_at_is_error`
 Expected: FAIL — the test panics with "called `Option::unwrap()` on a `None` value" (from `mutable.finished_at.unwrap()` at `get.rs:249`).
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 In `render_completion_page` (`src/cmd/drill/get.rs:249`). Before:
 
@@ -387,12 +387,12 @@ After:
 
 (The `use crate::error::fail;` import already exists from Task 3.)
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test --lib cmd::drill::get`
 Expected: PASS (both new tests).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/cmd/drill/get.rs
@@ -413,7 +413,7 @@ git commit -m "fix: completion page returns error when session is unfinished (BU
 
 **Note on reachability:** `parse()` never feeds a line after `State::End`, so this is a defensive internal error — but `parse_line` is a private method callable from the same-file tests module, so the panic IS test-reachable directly.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 In `src/parser.rs`, inside the existing `mod tests`, add:
 
@@ -427,12 +427,12 @@ In `src/parser.rs`, inside the existing `mod tests`, add:
     }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cargo test test_line_after_end_state_is_error`
 Expected: FAIL — panics with "internal error: entered unreachable code: Parsed a line after the end of the file."
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 In `parse_line` (`src/parser.rs:456`). Before:
 
@@ -452,12 +452,12 @@ After:
 
 (`ParserError` is defined in the same file; no new imports. The message renders through `ParserError`'s `Display`, which appends "Location: file:line" — user-facing and clear.)
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test --lib parser`
 Expected: PASS (all parser tests, including the new one).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/parser.rs
@@ -478,7 +478,7 @@ git commit -m "fix: parser returns error instead of unreachable! after EOF (BUG-
 
 **Note on reachability:** this panic fires only when the system clock is set before the Unix epoch (1970). That cannot be simulated from a test without mocking `SystemTime`, which the codebase does not do. Not test-reachable — rely on compilation and the existing suite (which exercises both code paths with a sane clock).
 
-- [ ] **Step 1: Implement in `src/cmd/drill/server.rs`**
+- [x] **Step 1: Implement in `src/cmd/drill/server.rs`**
 
 Before (`src/cmd/drill/server.rs:149-154`):
 
@@ -504,7 +504,7 @@ Add the import at the top of `src/cmd/drill/server.rs` (next to `use crate::erro
 use crate::error::ErrorReport;
 ```
 
-- [ ] **Step 2: Implement in `src/cmd/serve/handlers.rs`**
+- [x] **Step 2: Implement in `src/cmd/serve/handlers.rs`**
 
 Before (`src/cmd/serve/handlers.rs:294-297`):
 
@@ -530,12 +530,12 @@ Add the import at the top of `src/cmd/serve/handlers.rs` (next to `use crate::er
 use crate::error::ErrorReport;
 ```
 
-- [ ] **Step 3: Verify compilation and run the suite**
+- [x] **Step 3: Verify compilation and run the suite**
 
 Run: `cargo test`
 Expected: PASS (no behavior change with a sane clock; the change is compile-verified).
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add src/cmd/drill/server.rs src/cmd/serve/handlers.rs
@@ -556,7 +556,7 @@ git commit -m "fix: propagate system clock errors instead of unwrapping epoch ti
 
 **Note on reachability and spec deviation:** installing a Ctrl+C handler only fails in exotic environments (no signal infrastructure); it cannot be triggered from a test. Not test-reachable — rely on compilation and the existing suite. Also: the spec says "`.expect` on Ctrl+C handler → `?`", but both `shutdown_signal` functions return `()` (they are futures handed to `axum::serve(...).with_graceful_shutdown(...)`), so `?` is impossible without redesigning the graceful-shutdown plumbing. Instead: log the error and park the future forever (`pending()`), so a failed handler install disables graceful Ctrl+C shutdown without killing the server. In drill mode the Shutdown-button channel branch of the `select!` still works.
 
-- [ ] **Step 1: Implement in `src/cmd/drill/server.rs`**
+- [x] **Step 1: Implement in `src/cmd/drill/server.rs`**
 
 Before (`src/cmd/drill/server.rs:315-319`):
 
@@ -585,7 +585,7 @@ Add the import at the top of `src/cmd/drill/server.rs`:
 use std::future::pending;
 ```
 
-- [ ] **Step 2: Implement in `src/cmd/serve/server.rs`**
+- [x] **Step 2: Implement in `src/cmd/serve/server.rs`**
 
 Before (`src/cmd/serve/server.rs:300-305`):
 
@@ -616,12 +616,12 @@ Add the import at the top of `src/cmd/serve/server.rs`:
 use std::future::pending;
 ```
 
-- [ ] **Step 3: Verify compilation and run the suite**
+- [x] **Step 3: Verify compilation and run the suite**
 
 Run: `cargo test`
 Expected: PASS. Also run: `cargo clippy` — expected: no new warnings.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add src/cmd/drill/server.rs src/cmd/serve/server.rs
@@ -644,7 +644,7 @@ git commit -m "fix: log Ctrl+C handler failure instead of panicking (BUG-49)"
 
 **Why `parking_lot` rather than the `lock_or_fail` helper:** the spec offers both. A `fn lock_or_fail<T>(m: &Mutex<T>) -> Fallible<MutexGuard<'_, T>>` helper needs `?` at every call site, but many sites live in non-`Fallible` contexts: `landing_handler` returns `(StatusCode, Html<String>)`, `find_collection` returns `Option<ResolvedCollection>`, and the git/hedgedoc periodic-sync loops in spawned tasks return nothing — the helper would force signature changes rippling through handlers and background tasks. `parking_lot::Mutex` has no poisoning by design, so the sweep is purely mechanical and the poisoning-cascade failure mode (spec: "in debug, poisoning cascades"; with `panic = "abort"` in release the process dies under any panic regardless of mutex choice) ceases to exist. Dependency policy check: `Cargo.toml` has no dependency restrictions; `deny.toml` allows MIT and Apache-2.0, and `parking_lot` is dual-licensed "MIT OR Apache-2.0".
 
-- [ ] **Step 1: Write the failing regression test**
+- [x] **Step 1: Write the failing regression test**
 
 In `src/cmd/drill/post.rs`, inside `mod tests`, add (this reproduces the poisoning cascade: with `std::sync::Mutex`, a panic while holding the lock poisons it and every later `lock().unwrap()` panics):
 
@@ -669,12 +669,12 @@ In `src/cmd/drill/post.rs`, inside `mod tests`, add (this reproduces the poisoni
     }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cargo test test_lock_usable_after_panicked_holder`
 Expected: FAIL — compile error `unresolved import parking_lot` (the crate is not yet a dependency). This is the red stage: the same scenario written against `std::sync::Mutex` today would panic on the post-poison `lock().unwrap()`.
 
-- [ ] **Step 3: Add the dependency**
+- [x] **Step 3: Add the dependency**
 
 In `Cargo.toml`, in the `[dependencies]` section (alphabetical order, after `open`):
 
@@ -685,7 +685,7 @@ parking_lot = "0.12"
 Run: `cargo build`
 Expected: builds; `parking_lot` appears in `Cargo.lock`.
 
-- [ ] **Step 4: Swap the imports (Pattern 1)**
+- [x] **Step 4: Swap the imports (Pattern 1)**
 
 In each of these six files, change the `Mutex` import. Before:
 
@@ -709,7 +709,7 @@ Files and lines:
 
 (`Mutex::new(...)` construction sites in `drill/server.rs:179,189` and `serve/server.rs:156,170,171,176,177` need no textual change — the import swap retypes them.)
 
-- [ ] **Step 5: Sweep the call sites (Pattern 2)**
+- [x] **Step 5: Sweep the call sites (Pattern 2)**
 
 Mechanical replacement of `.lock().unwrap()` with `.lock()` in every file listed in **Files** above:
 
@@ -781,7 +781,7 @@ After:
 
 Every one of the 48 sites is an instance of patterns (a)-(d); the `sed` sweep covers them all identically.
 
-- [ ] **Step 6: Verify the sweep is complete**
+- [x] **Step 6: Verify the sweep is complete**
 
 Run: `grep -rn '\.lock()\.unwrap()' src/`
 Expected: no output.
@@ -789,7 +789,7 @@ Expected: no output.
 Run: `grep -rn 'std::sync::Mutex' src/`
 Expected: no output (only `parking_lot::Mutex` remains; `std::sync::Arc`, `RwLock` via tokio, etc. are untouched).
 
-- [ ] **Step 7: Run the full suite**
+- [x] **Step 7: Run the full suite**
 
 Run: `cargo test`
 Expected: PASS, including `test_lock_usable_after_panicked_holder` (the spawned thread's panic prints a backtrace in test output — that is expected; the test itself passes).
@@ -797,7 +797,7 @@ Expected: PASS, including `test_lock_usable_after_panicked_holder` (the spawned 
 Run: `cargo clippy`
 Expected: no new warnings.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add Cargo.toml Cargo.lock src/cmd/drill/state.rs src/cmd/serve/state.rs src/cmd/drill/server.rs src/cmd/serve/server.rs src/cmd/drill/get.rs src/cmd/drill/post.rs src/cmd/serve/edit.rs src/cmd/serve/git.rs src/cmd/serve/handlers.rs src/cmd/serve/hedgedoc.rs src/cmd/serve/landing.rs
@@ -815,7 +815,7 @@ git commit -m "fix: switch state mutexes to parking_lot, removing 48 lock().unwr
 - Consumes: the existing `<unreleased><fixed>` element at the top of `CHANGELOG.xml` (format defined by `CHANGELOG.xsd`: `<change>` elements with an optional `author` attribute, free-text body).
 - Produces: nothing consumed by later tasks (this is the last task).
 
-- [ ] **Step 1: Add the changelog entries**
+- [x] **Step 1: Add the changelog entries**
 
 In `CHANGELOG.xml`, inside the existing `<unreleased>` → `<fixed>` element (after the last existing `<change>` in that block), add:
 
@@ -830,12 +830,12 @@ In `CHANGELOG.xml`, inside the existing `<unreleased>` → `<fixed>` element (af
 
 (Indentation: 12 spaces for `<change>`, matching the existing entries. Do not add a new `<fixed>` block — reuse the existing one.)
 
-- [ ] **Step 2: Validate the changelog against the schema**
+- [x] **Step 2: Validate the changelog against the schema**
 
 Run: `xmllint --noout --schema CHANGELOG.xsd CHANGELOG.xml`
 Expected: `CHANGELOG.xml validates`. (If `xmllint` is not installed, run `python3 -c "import xml.etree.ElementTree as ET; ET.parse('CHANGELOG.xml'); print('well-formed')"` as a well-formedness fallback.)
 
-- [ ] **Step 3: Final full verification**
+- [x] **Step 3: Final full verification**
 
 Run: `cargo test`
 Expected: PASS (entire suite).
@@ -846,7 +846,7 @@ Expected: no warnings introduced by this plan.
 Run: `grep -rn 'panic!\|unreachable!\|\.expect(\|\.unwrap()' src/cmd/drill/post.rs src/cmd/drill/get.rs src/parser.rs src/cmd/drill/server.rs src/cmd/serve/handlers.rs src/cmd/serve/server.rs src/cmd/serve/landing.rs src/cmd/serve/edit.rs src/cmd/serve/git.rs src/cmd/serve/hedgedoc.rs`
 Expected: every remaining hit lies inside a `#[cfg(test)] mod tests` block (check each hit's line number against the file). No production-code hits remain among the BUG-49 sites; `edit.rs:52` (`strip_prefix(...).unwrap_or(...)`) is `unwrap_or`, not `unwrap()`, and is fine.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add CHANGELOG.xml
