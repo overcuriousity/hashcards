@@ -363,7 +363,7 @@ pub async fn collection_post_handler(
     Path(slug): Path<String>,
     Form(form): Form<FormData>,
 ) -> Redirect {
-    match collection_post_inner(&state, &slug, form.action) {
+    match collection_post_inner(&state, &slug, form) {
         Ok(redirect) => redirect,
         Err(e) => {
             log::error!("error handling action for collection {slug}: {e}");
@@ -372,7 +372,21 @@ pub async fn collection_post_handler(
     }
 }
 
-fn collection_post_inner(state: &AppState, slug: &str, action: Action) -> Fallible<Redirect> {
+fn collection_post_inner(state: &AppState, slug: &str, form: FormData) -> Fallible<Redirect> {
+    let action = form.action;
+    let submitted_card: Option<CardHash> = match form.card.as_deref() {
+        Some(hex) => match CardHash::from_hex(hex) {
+            Ok(hash) => Some(hash),
+            Err(_) => {
+                log::debug!("ignoring grade with unparseable card hash for collection {slug}");
+                return Ok(Flash::error(
+                    "That grade carried an invalid card reference and was ignored.",
+                )
+                .redirect(&format!("/collection/{slug}")));
+            }
+        },
+        None => None,
+    };
     // Home action: close the session and drop it without needing to hold the
     // global lock during DB work.
     if matches!(action, Action::Home) {
@@ -415,7 +429,12 @@ fn collection_post_inner(state: &AppState, slug: &str, action: Action) -> Fallib
     // `handle_action` yields `ActionResult::Home`. Every action reaching here
     // leaves the session running; the only result needing dispatch is
     // `ContinueWithFlash`, which carries a one-shot message for the user.
-    let result = handle_action(&mut session.mutable, session.session_started_at, action)?;
+    let result = handle_action(
+        &mut session.mutable,
+        session.session_started_at,
+        action,
+        submitted_card,
+    )?;
 
     state
         .sessions

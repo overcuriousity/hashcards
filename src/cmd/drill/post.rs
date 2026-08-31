@@ -61,6 +61,9 @@ impl Action {
 #[derive(Deserialize)]
 pub struct FormData {
     pub action: Action,
+    /// Hex hash of the card the client believes it is grading. Grades whose
+    /// hash does not match the head of the queue are ignored (BUG-06).
+    pub card: Option<String>,
 }
 
 /// Result of handling an action on the drill session.
@@ -95,8 +98,25 @@ pub async fn post_handler(
 }
 
 async fn action_handler(state: ServerState, form: FormData) -> Fallible<Option<Flash>> {
+    let submitted_card: Option<CardHash> = match form.card.as_deref() {
+        Some(hex) => match CardHash::from_hex(hex) {
+            Ok(hash) => Some(hash),
+            Err(_) => {
+                log::debug!("ignoring grade with unparseable card hash");
+                return Ok(Some(Flash::error(
+                    "That grade carried an invalid card reference and was ignored.",
+                )));
+            }
+        },
+        None => None,
+    };
     let mut mutable = state.mutable.lock().unwrap();
-    let result = handle_action(&mut mutable, state.session_started_at, form.action)?;
+    let result = handle_action(
+        &mut mutable,
+        state.session_started_at,
+        form.action,
+        submitted_card,
+    )?;
     match result {
         ActionResult::Shutdown => {
             // Release the lock before sending shutdown signal.
@@ -114,10 +134,16 @@ async fn action_handler(state: ServerState, form: FormData) -> Fallible<Option<F
 }
 
 /// Core action handling logic, reusable by both drill and serve modes.
+///
+/// `submitted_card` is the card hash the client's grade form carried; a
+/// grade for a card that is no longer at the head of the queue (stale page,
+/// double submit, key auto-repeat) is ignored. `None` (e.g. non-grade
+/// actions) skips the check.
 pub fn handle_action(
     mutable: &mut MutableState,
     session_started_at: Timestamp,
     action: Action,
+    submitted_card: Option<CardHash>,
 ) -> Fallible<ActionResult> {
     match action {
         Action::Reveal => {
@@ -189,6 +215,24 @@ pub fn handle_action(
             Ok(ActionResult::Continue)
         }
         Action::Forgot | Action::Hard | Action::Good | Action::Easy => {
+            let head: Card = match mutable.cards.first() {
+                Some(card) => card.clone(),
+                None => return Ok(ActionResult::Continue),
+            };
+            if let Some(submitted) = submitted_card {
+                if submitted != head.hash() {
+                    // Stale grade: the card it refers to is no longer at the
+                    // head of the queue (double submit or key auto-repeat).
+                    log::debug!(
+                        "ignoring stale grade for card {submitted}: current card is {}",
+                        head.hash()
+                    );
+                    return Ok(ActionResult::Ignored(
+                        "That card was already graded, so the repeated grade was ignored."
+                            .to_string(),
+                    ));
+                }
+            }
             if !mutable.reveal {
                 // A grade arrived without a prior reveal: stale page or
                 // duplicate submission. Ignore it (BUG-15).
@@ -197,10 +241,6 @@ pub fn handle_action(
                     "That grade was ignored because no answer was revealed. The current card is shown below.".to_string(),
                 ));
             }
-            let head: Card = match mutable.cards.first() {
-                Some(card) => card.clone(),
-                None => return Ok(ActionResult::Continue),
-            };
             let reviewed_at: Timestamp = Timestamp::now();
             let duration_ms: Option<i64> = mutable.card_shown_at.map(|shown_at| {
                 (reviewed_at.into_inner() - shown_at.into_inner())
@@ -341,7 +381,7 @@ mod tests {
     fn test_home_returns_home() {
         let mut mutable = make_mutable();
         let now = Timestamp::now();
-        let result = handle_action(&mut mutable, now, Action::Home).unwrap();
+        let result = handle_action(&mut mutable, now, Action::Home, None).unwrap();
         assert!(matches!(result, ActionResult::Home));
     }
 
@@ -350,7 +390,7 @@ mod tests {
         let mut mutable = make_mutable();
         assert!(mutable.finished_at.is_none());
         let now = Timestamp::now();
-        let result = handle_action(&mut mutable, now, Action::Shutdown).unwrap();
+        let result = handle_action(&mut mutable, now, Action::Shutdown, None).unwrap();
         match result {
             ActionResult::ContinueWithFlash(flash) => {
                 assert_eq!(flash.kind, FlashKind::Error);
@@ -365,7 +405,7 @@ mod tests {
         let mut mutable = make_mutable();
         let now = Timestamp::now();
         assert!(!mutable.reveal);
-        let result = handle_action(&mut mutable, now, Action::Reveal).unwrap();
+        let result = handle_action(&mut mutable, now, Action::Reveal, None).unwrap();
         assert!(matches!(result, ActionResult::Continue));
         assert!(mutable.reveal);
     }
@@ -374,7 +414,7 @@ mod tests {
     fn test_end_finishes_session() {
         let mut mutable = make_mutable();
         let now = Timestamp::now();
-        let result = handle_action(&mut mutable, now, Action::End).unwrap();
+        let result = handle_action(&mut mutable, now, Action::End, None).unwrap();
         assert!(matches!(result, ActionResult::SessionFinished));
         assert!(mutable.finished_at.is_some());
     }
@@ -399,7 +439,7 @@ mod tests {
             finished_at: None,
             card_shown_at: Some(Timestamp::now()),
         };
-        let result = handle_action(&mut mutable, Timestamp::now(), Action::Good);
+        let result = handle_action(&mut mutable, Timestamp::now(), Action::Good, None);
         assert!(result.is_err(), "the injected DB failure must propagate");
         // On error, in-memory state must be completely unchanged.
         assert_eq!(mutable.cards.len(), 1, "card must still be in the queue");
@@ -440,14 +480,14 @@ mod tests {
         let card_b = make_card("QB");
         let mut mutable = make_state_with_cards(vec![card_a.clone(), card_b.clone()]);
         let started = Timestamp::now();
-        handle_action(&mut mutable, started, Action::Reveal).unwrap();
-        handle_action(&mut mutable, started, Action::Good).unwrap();
+        handle_action(&mut mutable, started, Action::Reveal, None).unwrap();
+        handle_action(&mut mutable, started, Action::Good, None).unwrap();
         assert_eq!(mutable.cards.len(), 1);
         assert_eq!(mutable.reviews.len(), 1);
         // Inject a DB failure into the undo: point the recorded review at a
         // nonexistent row, so the void update matches zero rows and errors.
         mutable.reviews[0].review_id = 999_999;
-        let result = handle_action(&mut mutable, started, Action::Undo);
+        let result = handle_action(&mut mutable, started, Action::Undo, None);
         assert!(result.is_err(), "the injected DB failure must propagate");
         // On error, in-memory state must be completely unchanged: no duplicate
         // card in the queue, undo stack intact.
@@ -466,7 +506,7 @@ mod tests {
         let card = make_card("Q1");
         let mut mutable = make_state_with_cards(vec![card.clone()]);
         // No Reveal has happened; a grade POST (e.g. from a stale page) arrives.
-        let result = handle_action(&mut mutable, Timestamp::now(), Action::Good).unwrap();
+        let result = handle_action(&mut mutable, Timestamp::now(), Action::Good, None).unwrap();
         assert!(
             matches!(result, ActionResult::Ignored(_)),
             "a grade without a prior reveal must be reported as ignored"
@@ -479,6 +519,41 @@ mod tests {
                 .get_reviews_for_session(mutable.session_id)
                 .unwrap()
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn test_double_post_same_card_hash_is_a_no_op() {
+        let card_a = make_card("QA");
+        let card_b = make_card("QB");
+        let mut mutable = make_state_with_cards(vec![card_a.clone(), card_b.clone()]);
+        let started = Timestamp::now();
+        // First grade of card A, carrying its hash: accepted.
+        handle_action(&mut mutable, started, Action::Reveal, None).unwrap();
+        let result =
+            handle_action(&mut mutable, started, Action::Good, Some(card_a.hash())).unwrap();
+        assert!(matches!(result, ActionResult::Continue));
+        assert_eq!(mutable.cards.len(), 1);
+        assert_eq!(mutable.cards[0].hash(), card_b.hash());
+        // Card B is revealed, then the SAME grade POST for card A arrives again
+        // (key auto-repeat / double submit): it must be a no-op.
+        handle_action(&mut mutable, started, Action::Reveal, None).unwrap();
+        let result =
+            handle_action(&mut mutable, started, Action::Good, Some(card_a.hash())).unwrap();
+        assert!(
+            matches!(result, ActionResult::Ignored(_)),
+            "a grade whose card hash does not match the queue head must be ignored"
+        );
+        assert_eq!(mutable.cards.len(), 1, "card B must not have been graded");
+        assert_eq!(mutable.cards[0].hash(), card_b.hash());
+        assert_eq!(
+            mutable
+                .db
+                .get_reviews_for_session(mutable.session_id)
+                .unwrap()
+                .len(),
+            1,
+            "exactly one review row must exist"
         );
     }
 
@@ -505,12 +580,12 @@ mod tests {
             card_shown_at: None,
         };
         // Grade the only card: the session finishes and the DB row is closed.
-        handle_action(&mut mutable, started_at, Action::Reveal).unwrap();
-        let result = handle_action(&mut mutable, started_at, Action::Good).unwrap();
+        handle_action(&mut mutable, started_at, Action::Reveal, None).unwrap();
+        let result = handle_action(&mut mutable, started_at, Action::Good, None).unwrap();
         assert!(matches!(result, ActionResult::SessionFinished));
         assert!(mutable.finished_at.is_some());
         // Undo must reopen the DB session row, not just the in-memory flag.
-        handle_action(&mut mutable, started_at, Action::Undo).unwrap();
+        handle_action(&mut mutable, started_at, Action::Undo, None).unwrap();
         assert!(mutable.finished_at.is_none());
         let sessions = mutable.db.get_all_sessions().unwrap();
         assert_eq!(sessions.len(), 1);
