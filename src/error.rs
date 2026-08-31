@@ -31,12 +31,17 @@ impl ErrorReport {
             message: msg.into(),
         }
     }
+
+    /// The message without the "error: " display prefix.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
 }
 
 impl From<std::io::Error> for ErrorReport {
     fn from(value: std::io::Error) -> Self {
         ErrorReport {
-            message: format!("I/O error: {value:#?}"),
+            message: format!("I/O error: {value}"),
         }
     }
 }
@@ -44,7 +49,7 @@ impl From<std::io::Error> for ErrorReport {
 impl From<StripPrefixError> for ErrorReport {
     fn from(value: StripPrefixError) -> Self {
         ErrorReport {
-            message: format!("Strip prefix error: {value:#?}"),
+            message: format!("Path prefix error: {value}"),
         }
     }
 }
@@ -52,7 +57,7 @@ impl From<StripPrefixError> for ErrorReport {
 impl From<walkdir::Error> for ErrorReport {
     fn from(value: walkdir::Error) -> Self {
         ErrorReport {
-            message: format!("directory traversal error: {value:#?}"),
+            message: format!("Directory traversal error: {value}"),
         }
     }
 }
@@ -60,7 +65,7 @@ impl From<walkdir::Error> for ErrorReport {
 impl From<rusqlite::Error> for ErrorReport {
     fn from(value: rusqlite::Error) -> Self {
         ErrorReport {
-            message: format!("rusqlite: {value:#?}"),
+            message: format!("Database error: {value}"),
         }
     }
 }
@@ -84,7 +89,7 @@ impl From<toml::ser::Error> for ErrorReport {
 impl From<FromUtf8Error> for ErrorReport {
     fn from(value: FromUtf8Error) -> Self {
         ErrorReport {
-            message: format!("UTF-8 conversion error: {value:#?}"),
+            message: format!("UTF-8 conversion error: {value}"),
         }
     }
 }
@@ -92,7 +97,7 @@ impl From<FromUtf8Error> for ErrorReport {
 impl From<serde_json::Error> for ErrorReport {
     fn from(value: serde_json::Error) -> Self {
         ErrorReport {
-            message: format!("JSON error: {value:#?}"),
+            message: format!("JSON error: {value}"),
         }
     }
 }
@@ -100,7 +105,7 @@ impl From<serde_json::Error> for ErrorReport {
 impl From<ParserError> for ErrorReport {
     fn from(value: ParserError) -> Self {
         ErrorReport {
-            message: format!("Parse error: {value}"),
+            message: value.to_string(),
         }
     }
 }
@@ -131,4 +136,37 @@ pub fn fail<T>(msg: impl Into<String>) -> Fallible<T> {
     Err(ErrorReport {
         message: msg.into(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::ErrorKind;
+    use std::path::PathBuf;
+
+    use super::*;
+
+    /// BUG-21: I/O errors must render as human-readable messages, not
+    /// multi-line `{:#?}` debug spew.
+    #[test]
+    fn test_io_error_is_human_readable() {
+        let io_err = std::io::Error::new(ErrorKind::NotFound, "file missing");
+        let report = ErrorReport::from(io_err);
+        assert_eq!(report.to_string(), "error: I/O error: file missing");
+    }
+
+    /// BUG-21: converting a ParserError must not stack a redundant
+    /// "Parse error:" prefix onto the "error:" prefix.
+    #[test]
+    fn test_parser_error_has_no_double_prefix() {
+        let parser_err = ParserError {
+            message: "Cloze deletion is empty.".to_string(),
+            file_path: PathBuf::from("deck.md"),
+            line_num: 4,
+        };
+        let report = ErrorReport::from(parser_err);
+        assert_eq!(
+            report.to_string(),
+            "error: Cloze deletion is empty. Location: deck.md:5"
+        );
+    }
 }

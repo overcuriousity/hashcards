@@ -122,10 +122,14 @@ pub fn parse_deck(directory: &PathBuf) -> Fallible<Vec<Card>> {
         let entry = entry?;
         let path = entry.path();
         if path.is_file() && path.extension().is_some_and(|ext| ext == "md") {
-            let text = read_to_string(path)?;
+            let text = read_to_string(path).map_err(|e| {
+                ErrorReport::new(format!("Failed to read {}: {e}", path.display()))
+            })?;
 
             // Extract frontmatter and get custom deck name if specified
-            let (metadata, content, line_offset) = extract_frontmatter(&text)?;
+            let (metadata, content, line_offset) = extract_frontmatter(&text).map_err(|e| {
+                ErrorReport::new(format!("{} File: {}", e.message(), path.display()))
+            })?;
 
             let deck_name: DeckName = metadata.name.unwrap_or_else(|| {
                 path.strip_prefix(directory)
@@ -1561,6 +1565,27 @@ A: Genetic material."#,
                 answer,
             } if question == "q" && answer == "a\n~~~\nQ: not a card\n~~~"
         ));
+        Ok(())
+    }
+
+    /// BUG-21: frontmatter errors name the file they came from.
+    #[test]
+    fn test_frontmatter_error_carries_file_path() -> Fallible<()> {
+        let directory = temp_dir().join("frontmatter_path_test");
+        create_dir_all(&directory).expect("Failed to create test directory");
+        let file = directory.join("broken.md");
+        std::fs::write(&file, "---\nname = \"X\"\n").expect("Failed to write test file");
+
+        let result = parse_deck(&directory);
+        std::fs::remove_dir_all(&directory).ok();
+
+        assert!(result.is_err());
+        let err = result.err().unwrap();
+        assert!(
+            err.to_string().contains("broken.md"),
+            "expected file path in: {err}"
+        );
+        assert!(err.to_string().contains("no closing '---'"));
         Ok(())
     }
 }
