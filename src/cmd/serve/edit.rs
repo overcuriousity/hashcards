@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::path::PathBuf;
 use std::time::UNIX_EPOCH;
@@ -23,6 +25,7 @@ use crate::parser::Parser;
 use crate::parser::parse_deck;
 use crate::parser::strip_frontmatter_with_offset;
 use crate::types::card::Card;
+use crate::types::card::CardContent;
 use crate::types::card_hash::CardHash;
 use crate::types::timestamp::Timestamp;
 
@@ -331,6 +334,93 @@ fn revert_file(file_path: &Path, original: &str) -> Fallible<()> {
     })
 }
 
+// ── Hash migration ────────────────────────────────────────────────────────────
+
+/// The result of matching a block's pre-edit cards against its re-parsed cards.
+pub struct MigrationPlan {
+    /// `(old, new)` hash pairs that unambiguously refer to the same card.
+    pub renames: Vec<(CardHash, CardHash)>,
+    /// New hashes with no unambiguous old counterpart; inserted fresh.
+    pub fresh: Vec<CardHash>,
+    /// How many fresh cards may have lost history (old history existed but
+    /// could not be matched unambiguously). Reported to the user via flash.
+    pub skipped: usize,
+}
+
+/// The matching key for a card: the cloze deletion's text for cloze cards
+/// (byte positions, sliced as bytes — never chars), `None` for basic cards.
+fn migration_key(card: &Card) -> Option<String> {
+    match card.content() {
+        CardContent::Cloze { text, start, end } => {
+            // start/end are byte positions; end is inclusive.
+            text.get(*start..*end + 1).map(str::to_string)
+        }
+        CardContent::Basic { .. } => None,
+    }
+}
+
+/// Match old cards against new cards by content, not document order.
+///
+/// A pair is unambiguous when exactly one changed old card and exactly one
+/// changed new card share the same key. Everything else is inserted fresh;
+/// if old history went unmatched in the process, the fresh cards are counted
+/// as skipped so the user can be told.
+fn plan_hash_migration(old_cards: &[&Card], new_cards: &[&Card]) -> MigrationPlan {
+    // Hashes present on both sides are unchanged cards: no work needed.
+    let old_set: BTreeSet<CardHash> = old_cards.iter().map(|c| c.hash()).collect();
+    let new_set: BTreeSet<CardHash> = new_cards.iter().map(|c| c.hash()).collect();
+    let changed_old: Vec<&Card> = old_cards
+        .iter()
+        .copied()
+        .filter(|c| !new_set.contains(&c.hash()))
+        .collect();
+    let changed_new: Vec<&Card> = new_cards
+        .iter()
+        .copied()
+        .filter(|c| !old_set.contains(&c.hash()))
+        .collect();
+
+    let mut old_by_key: BTreeMap<Option<String>, Vec<CardHash>> = BTreeMap::new();
+    for c in &changed_old {
+        old_by_key
+            .entry(migration_key(c))
+            .or_default()
+            .push(c.hash());
+    }
+    let mut new_by_key: BTreeMap<Option<String>, Vec<CardHash>> = BTreeMap::new();
+    for c in &changed_new {
+        new_by_key
+            .entry(migration_key(c))
+            .or_default()
+            .push(c.hash());
+    }
+
+    let mut renames: Vec<(CardHash, CardHash)> = Vec::new();
+    let mut fresh: Vec<CardHash> = Vec::new();
+    for (key, new_hashes) in &new_by_key {
+        match old_by_key.get(key) {
+            Some(old_hashes) if old_hashes.len() == 1 && new_hashes.len() == 1 => {
+                renames.push((old_hashes[0], new_hashes[0]));
+            }
+            _ => fresh.extend(new_hashes.iter().copied()),
+        }
+    }
+
+    // If any changed old card found no rename partner, the fresh inserts may
+    // represent lost history; report them.
+    let skipped = if changed_old.len() > renames.len() {
+        fresh.len()
+    } else {
+        0
+    };
+
+    MigrationPlan {
+        renames,
+        fresh,
+        skipped,
+    }
+}
+
 // ── Utilities ─────────────────────────────────────────────────────────────────
 
 fn find_card_by_hash(cards: &[Card], hash: CardHash) -> Fallible<&Card> {
@@ -372,6 +462,93 @@ fn error_page(slug: &str, hash_hex: &str, msg: &str) -> (StatusCode, Html<String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::types::card::CardContent;
+
+    fn cloze(text: &str, start: usize, end: usize) -> Card {
+        Card::new(
+            "Deck".to_string(),
+            PathBuf::from("/tmp/deck.md"),
+            (0, 0),
+            CardContent::new_cloze(text, start, end),
+        )
+    }
+
+    /// Regression test for BUG-35: reordering deletions must pair history by
+    /// deletion content, not document order.
+    #[test]
+    fn test_migration_matches_by_deletion_content_not_order() {
+        // "A x B y": deletion "x" at bytes 2..=2, "y" at 6..=6.
+        let old_x = cloze("A x B y", 2, 2);
+        let old_y = cloze("A x B y", 6, 6);
+        // Edited to "A y B x": deletion order swapped.
+        let new_y = cloze("A y B x", 2, 2);
+        let new_x = cloze("A y B x", 6, 6);
+
+        let plan = plan_hash_migration(&[&old_x, &old_y], &[&new_y, &new_x]);
+
+        assert_eq!(plan.skipped, 0);
+        assert!(plan.fresh.is_empty());
+        assert_eq!(plan.renames.len(), 2);
+        // "x" history follows the "x" deletion, "y" follows "y".
+        assert!(plan.renames.contains(&(old_x.hash(), new_x.hash())));
+        assert!(plan.renames.contains(&(old_y.hash(), new_y.hash())));
+    }
+
+    #[test]
+    fn test_migration_skips_ambiguous_duplicate_deletions() {
+        // Two deletions with identical text "x" — no unambiguous pairing.
+        let old_a = cloze("x and x", 0, 0);
+        let old_b = cloze("x and x", 6, 6);
+        let new_a = cloze("x plus x", 0, 0);
+        let new_b = cloze("x plus x", 7, 7);
+
+        let plan = plan_hash_migration(&[&old_a, &old_b], &[&new_a, &new_b]);
+
+        assert!(plan.renames.is_empty());
+        assert_eq!(plan.fresh.len(), 2);
+        assert_eq!(plan.skipped, 2);
+    }
+
+    #[test]
+    fn test_migration_unchanged_cards_are_untouched() {
+        let old = cloze("A x B", 2, 2);
+        let new = cloze("A x B", 2, 2);
+        let plan = plan_hash_migration(&[&old], &[&new]);
+        assert!(plan.renames.is_empty());
+        assert!(plan.fresh.is_empty());
+        assert_eq!(plan.skipped, 0);
+    }
+
+    #[test]
+    fn test_migration_pairs_single_basic_card() {
+        let old = Card::new(
+            "Deck".to_string(),
+            PathBuf::from("/tmp/deck.md"),
+            (0, 1),
+            CardContent::new_basic("Q old", "A old"),
+        );
+        let new = Card::new(
+            "Deck".to_string(),
+            PathBuf::from("/tmp/deck.md"),
+            (0, 1),
+            CardContent::new_basic("Q new", "A new"),
+        );
+        let plan = plan_hash_migration(&[&old], &[&new]);
+        assert_eq!(plan.renames, vec![(old.hash(), new.hash())]);
+        assert!(plan.fresh.is_empty());
+        assert_eq!(plan.skipped, 0);
+    }
+
+    #[test]
+    fn test_migration_pure_addition_is_not_skipped() {
+        // A brand-new deletion with no old history to lose.
+        let new = cloze("A x B", 2, 2);
+        let plan = plan_hash_migration(&[], &[&new]);
+        assert!(plan.renames.is_empty());
+        assert_eq!(plan.fresh, vec![new.hash()]);
+        assert_eq!(plan.skipped, 0);
+    }
 
     #[test]
     fn test_block_end_terminator() {
