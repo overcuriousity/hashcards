@@ -1277,3 +1277,73 @@ body {
     border-radius: 4px;
     padding: 0.5em 1em;
 }
+
+/* ---- Stats page (FEAT-02) ---- */
+
+.stats-page {
+    max-width: 720px;
+    margin: 0 auto;
+    padding: 1rem;
+}
+
+.stats-header h1 {
+    margin: 0.5rem 0 1.5rem 0;
+}
+
+.stats-section {
+    margin-bottom: 2rem;
+}
+
+.bar-chart {
+    display: flex;
+    align-items: flex-end;
+    gap: 1px;
+    height: 120px;
+    border-bottom: 1px solid #999;
+}
+
+.bar-slot {
+    flex: 1 1 0;
+    display: flex;
+    align-items: flex-end;
+    height: 100%;
+}
+
+.bar-slot .bar {
+    width: 100%;
+    background: #444;
+    min-height: 1px;
+}
+
+.grade-dist {
+    width: 100%;
+    max-width: 480px;
+}
+
+.grade-dist .key {
+    padding-right: 1em;
+}
+
+.grade-dist .val {
+    padding-right: 1em;
+    text-align: right;
+}
+
+.grade-dist .bar-cell {
+    width: 60%;
+}
+
+.grade-dist .hbar {
+    height: 0.8em;
+    background: #444;
+}
+
+.table-scroll {
+    overflow-x: auto;
+}
+
+.deck-stats th,
+.deck-stats td {
+    padding: 0.2em 1.2em 0.2em 0;
+    text-align: left;
+}
