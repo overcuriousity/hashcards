@@ -172,7 +172,7 @@ fn edit_post_inner(state: &AppState, slug: &str, hash_hex: &str, form: EditForm)
     let new_text = form.new_text.trim().to_string();
     let file_content = std::fs::read_to_string(&file_path)?;
 
-    splice_card_block(&file_path, &file_content, range, &new_text)?;
+    splice_card_block(&file_path, &file_content, range, &new_text, submitted_mtime)?;
 
     // Re-parse the modified file; revert on any parse error.
     let new_file_content = std::fs::read_to_string(&file_path)?;
@@ -257,12 +257,17 @@ pub fn extract_card_block(file_content: &str, range: (usize, usize)) -> Fallible
 }
 
 /// Atomically replace a card's block in the source file with `new_text`.
-/// `range` uses absolute 0-based file line numbers.
+///
+/// `range` uses absolute 0-based file line numbers. `expected_mtime_ms` is the
+/// modification time the caller last observed; it is re-checked immediately
+/// before the rename so a concurrent change to the file is never silently
+/// overwritten.
 fn splice_card_block(
     file_path: &Path,
     file_content: &str,
     range: (usize, usize),
     new_text: &str,
+    expected_mtime_ms: u64,
 ) -> Fallible<()> {
     let ends_with_newline = file_content.ends_with('\n');
     let mut lines: Vec<&str> = file_content.lines().collect();
@@ -276,15 +281,34 @@ fn splice_card_block(
         result.push('\n');
     }
 
+    let tmp = tmp_path_for(file_path);
+    std::fs::write(&tmp, &result)?;
+    // TOCTOU guard: the caller checked the mtime long before this point
+    // (a full collection re-parse happens in between). Re-check right
+    // before the rename.
+    if file_mtime_ms(file_path)? != expected_mtime_ms {
+        if let Err(e) = std::fs::remove_file(&tmp) {
+            return fail(format!(
+                "The source file changed on disk since you opened this form, and the temporary file {} could not be removed: {e}. Remove it by hand, then reload and try again.",
+                tmp.display()
+            ));
+        }
+        return fail(
+            "The source file changed on disk since you opened this form. Reload and try again.",
+        );
+    }
+    std::fs::rename(&tmp, file_path)?;
+    Ok(())
+}
+
+/// The temporary-file path used for atomic writes next to `file_path`.
+fn tmp_path_for(file_path: &Path) -> PathBuf {
     let dir = file_path.parent().unwrap_or(Path::new("."));
     let file_name = file_path
         .file_name()
         .unwrap_or(std::ffi::OsStr::new("card"))
         .to_string_lossy();
-    let tmp: PathBuf = dir.join(format!(".{file_name}.hashcards-edit.tmp"));
-    std::fs::write(&tmp, &result)?;
-    std::fs::rename(&tmp, file_path)?;
-    Ok(())
+    dir.join(format!(".{file_name}.hashcards-edit.tmp"))
 }
 
 // ── Utilities ─────────────────────────────────────────────────────────────────
@@ -372,7 +396,15 @@ mod tests {
         let original = "Q: foo\nA: bar\n---\nQ: baz\nA: quux\n";
         std::fs::write(&path, original).unwrap();
 
-        splice_card_block(&path, original, (0, 2), "Q: foo edited\nA: bar edited").unwrap();
+        let mtime = file_mtime_ms(&path).unwrap();
+        splice_card_block(
+            &path,
+            original,
+            (0, 2),
+            "Q: foo edited\nA: bar edited",
+            mtime,
+        )
+        .unwrap();
         let result = std::fs::read_to_string(&path).unwrap();
         assert_eq!(
             result,
@@ -390,9 +422,37 @@ mod tests {
         let original = "Q: foo\nA: bar\n";
         std::fs::write(&path, original).unwrap();
 
-        splice_card_block(&path, original, (0, 1), "Q: foo edited\nA: bar edited").unwrap();
+        let mtime = file_mtime_ms(&path).unwrap();
+        splice_card_block(
+            &path,
+            original,
+            (0, 1),
+            "Q: foo edited\nA: bar edited",
+            mtime,
+        )
+        .unwrap();
         let result = std::fs::read_to_string(&path).unwrap();
         assert_eq!(result, "Q: foo edited\nA: bar edited\n");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_splice_rejects_stale_mtime() {
+        let dir = std::env::temp_dir().join("hashcards_edit_test_stale_mtime");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("test.md");
+        let original = "Q: foo\nA: bar\n";
+        std::fs::write(&path, original).unwrap();
+        let mtime = file_mtime_ms(&path).unwrap();
+
+        // Pretend the form was opened against a different (older) mtime.
+        let result = splice_card_block(&path, original, (0, 1), "Q: x\nA: y", mtime + 1);
+
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("changed on disk"), "unexpected message: {msg}");
+        // The file must be untouched.
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -406,7 +466,15 @@ mod tests {
         let original = "---\nname = \"X\"\n---\nQ: foo\nA: bar\n";
         std::fs::write(&path, original).unwrap();
 
-        splice_card_block(&path, original, (3, 4), "Q: foo edited\nA: bar edited").unwrap();
+        let mtime = file_mtime_ms(&path).unwrap();
+        splice_card_block(
+            &path,
+            original,
+            (3, 4),
+            "Q: foo edited\nA: bar edited",
+            mtime,
+        )
+        .unwrap();
         let result = std::fs::read_to_string(&path).unwrap();
         assert_eq!(
             result,
