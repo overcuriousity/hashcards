@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::SystemTime;
@@ -5,6 +6,7 @@ use std::time::UNIX_EPOCH;
 
 use axum::Form;
 use axum::extract::Path;
+use axum::extract::Query;
 use axum::extract::State;
 use axum::http::HeaderName;
 use axum::http::StatusCode;
@@ -13,12 +15,15 @@ use axum::response::Html;
 use axum::response::Redirect;
 use maud::html;
 
+use crate::flash::Flash;
+
 use crate::cmd::drill::cache::Cache;
 use crate::cmd::drill::get::CompletionAction;
 use crate::cmd::drill::get::RenderContext;
 use crate::cmd::drill::get::render_completion_page;
 use crate::cmd::drill::get::render_session_page;
 use crate::cmd::drill::post::Action;
+use crate::cmd::drill::post::ActionResult;
 use crate::cmd::drill::post::FormData;
 use crate::cmd::drill::post::handle_action;
 use crate::cmd::drill::server::escape_js_string_literal;
@@ -30,18 +35,20 @@ use crate::cmd::serve::browse::render_browse_page;
 use crate::cmd::serve::config::HedgedocEntry;
 use crate::cmd::serve::config::ResolvedCollection;
 use crate::cmd::serve::git::clone_or_pull;
+use crate::cmd::serve::hedgedoc::all_hedgedoc_entries;
 use crate::cmd::serve::hedgedoc::build_combined_infos;
 use crate::cmd::serve::hedgedoc::build_note;
 use crate::cmd::serve::hedgedoc::build_source;
 use crate::cmd::serve::hedgedoc::create_minimal_config;
-use crate::cmd::serve::hedgedoc::all_hedgedoc_entries;
 use crate::cmd::serve::hedgedoc::persist_hedgedoc_entries;
 use crate::cmd::serve::hedgedoc::source_uri_from_url;
 use crate::cmd::serve::hedgedoc::sync_source;
 use crate::cmd::serve::state::AppState;
 use crate::cmd::serve::state::DrillSession;
 use crate::collection::Collection;
+use crate::db::Database;
 use crate::error::Fallible;
+use crate::error::fail;
 use crate::media::load::MediaLoader;
 use crate::rng::TinyRng;
 use crate::rng::shuffle;
@@ -49,17 +56,18 @@ use crate::types::card::Card;
 use crate::types::card_hash::CardHash;
 use crate::types::date::Date;
 use crate::types::timestamp::Timestamp;
-use crate::db::Database;
 
 pub async fn collection_get_handler(
     State(state): State<AppState>,
     Path(slug): Path<String>,
+    Query(query): Query<HashMap<String, String>>,
 ) -> (StatusCode, Html<String>) {
+    let flash = Flash::from_query(&query);
     // Determine whether this slug is known before calling the inner function,
     // so we can return 404 for unknown collections vs. 500 for real errors.
     let known = find_collection(&state, &slug).is_some()
         || state.sessions.lock().unwrap().contains_key(&slug);
-    match collection_get_inner(&state, &slug) {
+    match collection_get_inner(&state, &slug, flash) {
         Ok(html) => (StatusCode::OK, Html(html)),
         Err(e) => {
             let status = if known {
@@ -80,7 +88,7 @@ pub async fn collection_get_handler(
     }
 }
 
-fn collection_get_inner(state: &AppState, slug: &str) -> Fallible<String> {
+fn collection_get_inner(state: &AppState, slug: &str, flash: Option<Flash>) -> Fallible<String> {
     // Take the session out of the map so the lock is not held during rendering.
     let session = state.sessions.lock().unwrap().remove(slug);
 
@@ -119,7 +127,7 @@ fn collection_get_inner(state: &AppState, slug: &str) -> Fallible<String> {
             ))
         })?;
         let bookmark_count = Database::new(db_path)?.count_bookmarks()?;
-        let html = render_browse_page(&rc.name, slug, &tree, &hedge_urls, bookmark_count);
+        let html = render_browse_page(&rc.name, slug, &tree, &hedge_urls, bookmark_count, flash);
         return Ok(html.into_string());
     };
 
@@ -139,10 +147,18 @@ fn collection_get_inner(state: &AppState, slug: &str) -> Fallible<String> {
     } else {
         render_session_page(&ctx, &session.mutable)?
     };
+    let body = html! {
+        @if let Some(f) = &flash { (f.render()) }
+        (body)
+    };
     let script_url = format!("/collection/{slug}/script.js");
     let html = page_template_with_script(&script_url, body);
     // Put the session back now that rendering is done.
-    state.sessions.lock().unwrap().insert(slug.to_owned(), session);
+    state
+        .sessions
+        .lock()
+        .unwrap()
+        .insert(slug.to_owned(), session);
     Ok(html.into_string())
 }
 
@@ -219,7 +235,7 @@ pub async fn collection_start_handler(
         Ok(()) => Redirect::to(&format!("/collection/{slug}")),
         Err(e) => {
             log::error!("error starting drill for collection {slug}: {e}");
-            Redirect::to(&format!("/collection/{slug}"))
+            Flash::error(e.to_string()).redirect(&format!("/collection/{slug}"))
         }
     }
 }
@@ -230,6 +246,9 @@ fn collection_start_inner(
     selected_decks: Vec<String>,
     limit: Option<usize>,
 ) -> Fallible<()> {
+    if selected_decks.is_empty() {
+        return fail("Select at least one deck.");
+    }
     // Remove any existing session before doing DB work.
     state.sessions.lock().unwrap().remove(slug);
 
@@ -348,7 +367,7 @@ pub async fn collection_post_handler(
         Ok(redirect) => redirect,
         Err(e) => {
             log::error!("error handling action for collection {slug}: {e}");
-            Redirect::to(&format!("/collection/{slug}"))
+            Flash::error(e.to_string()).redirect(&format!("/collection/{slug}"))
         }
     }
 }
@@ -360,7 +379,11 @@ fn collection_post_inner(state: &AppState, slug: &str, action: Action) -> Fallib
         let session = state.sessions.lock().unwrap().remove(slug);
         if let Some(s) = session {
             if s.mutable.finished_at.is_none() {
-                if let Err(e) = s.mutable.db.close_session(s.mutable.session_id, Timestamp::now()) {
+                if let Err(e) = s
+                    .mutable
+                    .db
+                    .close_session(s.mutable.session_id, Timestamp::now())
+                {
                     log::error!(
                         "failed to close session {} for collection {slug}: {e}",
                         s.mutable.session_id
@@ -390,13 +413,21 @@ fn collection_post_inner(state: &AppState, slug: &str, action: Action) -> Fallib
 
     // `Action::Home` returned early above, and it is the only action for which
     // `handle_action` yields `ActionResult::Home`. Every action reaching here
-    // therefore leaves the session running, so the result needs no dispatch and
-    // session closing lives solely in that early return, where it cannot drift
-    // out of step with a second copy.
-    handle_action(&mut session.mutable, session.session_started_at, action)?;
+    // leaves the session running; the only result needing dispatch is
+    // `ContinueWithFlash`, which carries a one-shot message for the user.
+    let result = handle_action(&mut session.mutable, session.session_started_at, action)?;
 
-    state.sessions.lock().unwrap().insert(slug.to_owned(), session);
-    Ok(Redirect::to(&format!("/collection/{slug}")))
+    state
+        .sessions
+        .lock()
+        .unwrap()
+        .insert(slug.to_owned(), session);
+    match result {
+        ActionResult::ContinueWithFlash(flash) => {
+            Ok(flash.redirect(&format!("/collection/{slug}")))
+        }
+        _ => Ok(Redirect::to(&format!("/collection/{slug}"))),
+    }
 }
 
 pub async fn collection_file_handler(
@@ -462,7 +493,10 @@ pub async fn collection_script_handler(
         Some(session) => &session.macros,
         None => {
             // No active session; serve script without macros
-            let content = format!("let MACROS = {{}};\n\n{}", include_str!("../drill/script.js"));
+            let content = format!(
+                "let MACROS = {{}};\n\n{}",
+                include_str!("../drill/script.js")
+            );
             return (StatusCode::OK, [(CONTENT_TYPE, "text/javascript")], content);
         }
     };
@@ -481,7 +515,10 @@ pub async fn collection_script_handler(
 pub async fn sync_handler(State(state): State<AppState>) -> Redirect {
     let git = match &state.config.git {
         Some(git) => git,
-        None => return Redirect::to("/"),
+        None => {
+            return Flash::error("Sync is not available: no git repository is configured.")
+                .redirect("/");
+        }
     };
 
     match clone_or_pull(&git.repo_url, &git.branch, &git.repo_dir).await {
@@ -491,12 +528,13 @@ pub async fn sync_handler(State(state): State<AppState>) -> Redirect {
             *state.collections.write().await = combined;
             *state.last_synced.lock().unwrap() = Some(Timestamp::now());
             log::debug!("Manual sync completed successfully");
+            Flash::success("Sync complete.").redirect("/")
         }
         Err(e) => {
             log::error!("Manual sync failed: {e}");
+            Flash::error(format!("Sync failed: {e}")).redirect("/")
         }
     }
-    Redirect::to("/")
 }
 
 // ---- HedgeDoc management handlers ----
@@ -504,12 +542,14 @@ pub async fn sync_handler(State(state): State<AppState>) -> Redirect {
 /// Render the HedgeDoc source management page.
 pub async fn hedgedoc_manage_handler(
     State(state): State<AppState>,
+    Query(query): Query<HashMap<String, String>>,
 ) -> (StatusCode, Html<String>) {
     use crate::cmd::serve::hedgedoc_ui::render_manage_page;
+    let flash = Flash::from_query(&query);
     let sources = state.hedgedoc_sources.lock().unwrap();
     let last_synced = *state.hedgedoc_last_synced.lock().unwrap();
     let config_available = state.config.data_dir.is_some();
-    let html = render_manage_page(&sources, last_synced, config_available);
+    let html = render_manage_page(&sources, last_synced, config_available, flash);
     (StatusCode::OK, Html(html.into_string()))
 }
 
@@ -529,7 +569,7 @@ pub async fn hedgedoc_add_handler(
     let url = {
         let trimmed = form.url.trim();
         if trimmed.is_empty() {
-            return Redirect::to("/hedgedoc");
+            return Flash::error("Enter a HedgeDoc URL.").redirect("/hedgedoc");
         }
         match reqwest::Url::parse(trimmed) {
             Ok(mut parsed) => {
@@ -549,7 +589,10 @@ pub async fn hedgedoc_add_handler(
         Some(d) => d.clone(),
         None => {
             log::error!("Cannot add HedgeDoc source: no data_dir configured");
-            return Redirect::to("/hedgedoc");
+            return Flash::error(
+                "Cannot add HedgeDoc source: no data directory is configured. Start hashcards with --config.",
+            )
+            .redirect("/hedgedoc");
         }
     };
 
@@ -561,7 +604,7 @@ pub async fn hedgedoc_add_handler(
             .flat_map(|s| s.notes.iter())
             .any(|n| n.url == url)
         {
-            return Redirect::to("/hedgedoc");
+            return Flash::error("This note is already added.").redirect("/hedgedoc");
         }
     }
 
@@ -569,7 +612,8 @@ pub async fn hedgedoc_add_handler(
         Some(uri) => uri,
         None => {
             log::error!("Failed to parse HedgeDoc source URI from {url}");
-            return Redirect::to("/hedgedoc");
+            return Flash::error(format!("Could not parse a HedgeDoc note URL from: {url}"))
+                .redirect("/hedgedoc");
         }
     };
 
@@ -589,7 +633,8 @@ pub async fn hedgedoc_add_handler(
             Ok(note) => new_note = Some(note),
             Err(e) => {
                 log::error!("Failed to add HedgeDoc note {url}: {e}");
-                return Redirect::to("/hedgedoc");
+                return Flash::error(format!("Failed to add HedgeDoc note: {e}"))
+                    .redirect("/hedgedoc");
             }
         }
     } else {
@@ -597,7 +642,8 @@ pub async fn hedgedoc_add_handler(
             Ok(source) => new_source = Some(source),
             Err(e) => {
                 log::error!("Failed to add HedgeDoc source {url}: {e}");
-                return Redirect::to("/hedgedoc");
+                return Flash::error(format!("Failed to add HedgeDoc source: {e}"))
+                    .redirect("/hedgedoc");
             }
         }
     }
@@ -612,12 +658,12 @@ pub async fn hedgedoc_add_handler(
                 .flat_map(|s| s.notes.iter())
                 .any(|n| n.url == url)
             {
-                return Redirect::to("/hedgedoc");
+                return Flash::error("This note is already added.").redirect("/hedgedoc");
             }
         } else if new_note.is_some() {
             if let Some(src) = sources.iter().find(|s| s.source_uri == source_uri) {
                 if src.notes.iter().any(|n| n.url == url) {
-                    return Redirect::to("/hedgedoc");
+                    return Flash::error("This note is already added.").redirect("/hedgedoc");
                 }
             }
         }
@@ -639,16 +685,21 @@ pub async fn hedgedoc_add_handler(
         Some(p) => p,
         None => {
             let data_dir_owned = data_dir.clone();
-            let p = match tokio::task::spawn_blocking(move || create_minimal_config(&data_dir_owned))
-                .await
-                .map_err(|e| crate::error::ErrorReport::new(format!("Config creation task panicked: {e}")))
-            {
-                Ok(Ok(p)) => p,
-                Ok(Err(e)) | Err(e) => {
-                    log::error!("Failed to create minimal config file: {e}");
-                    return Redirect::to("/hedgedoc");
-                }
-            };
+            let p =
+                match tokio::task::spawn_blocking(move || create_minimal_config(&data_dir_owned))
+                    .await
+                    .map_err(|e| {
+                        crate::error::ErrorReport::new(format!(
+                            "Config creation task panicked: {e}"
+                        ))
+                    }) {
+                    Ok(Ok(p)) => p,
+                    Ok(Err(e)) | Err(e) => {
+                        log::error!("Failed to create minimal config file: {e}");
+                        return Flash::error(format!("Failed to create config file: {e}"))
+                            .redirect("/hedgedoc");
+                    }
+                };
             *state.config_path.lock().unwrap() = Some(p.clone());
             // The config now references the temp data dir; stop cleanup on exit.
             if let Some(tracker) = state.config._temp_dir.as_ref() {
@@ -661,13 +712,16 @@ pub async fn hedgedoc_add_handler(
     // Persist to TOML via spawn_blocking (atomic write).
     let config_path_owned = config_path.clone();
     let entries_owned = new_entries.clone();
-    if let Err(e) = tokio::task::spawn_blocking(move || persist_hedgedoc_entries(&config_path_owned, &entries_owned))
-        .await
-        .map_err(|e| crate::error::ErrorReport::new(format!("Persist task panicked: {e}")))
-        .and_then(|r| r)
+    if let Err(e) = tokio::task::spawn_blocking(move || {
+        persist_hedgedoc_entries(&config_path_owned, &entries_owned)
+    })
+    .await
+    .map_err(|e| crate::error::ErrorReport::new(format!("Persist task panicked: {e}")))
+    .and_then(|r| r)
     {
         log::error!("Failed to persist HedgeDoc entries to config: {e}");
-        return Redirect::to("/hedgedoc");
+        return Flash::error(format!("Failed to save HedgeDoc sources to config: {e}"))
+            .redirect("/hedgedoc");
     }
 
     // Persist succeeded: now update in-memory state.
@@ -696,7 +750,7 @@ pub async fn hedgedoc_add_handler(
         *state.hedgedoc_last_synced.lock().unwrap() = Some(Timestamp::now());
     }
 
-    Redirect::to("/hedgedoc")
+    Flash::success("HedgeDoc source added.").redirect("/hedgedoc")
 }
 
 #[derive(serde::Deserialize)]
@@ -724,33 +778,46 @@ pub async fn hedgedoc_delete_handler(
     // Phase 2: persist to TOML if config file is available, via spawn_blocking.
     // Extract config path before any await so the MutexGuard is dropped first.
     let maybe_config_path: Option<std::path::PathBuf> = state.config_path.lock().unwrap().clone();
-    let persist_ok = if let Some(config_path) = maybe_config_path {
+    let persist_result: Result<(), String> = if let Some(config_path) = maybe_config_path {
         let remaining_for_persist = remaining.clone();
-        match tokio::task::spawn_blocking(move || persist_hedgedoc_entries(&config_path, &remaining_for_persist))
-            .await
+        match tokio::task::spawn_blocking(move || {
+            persist_hedgedoc_entries(&config_path, &remaining_for_persist)
+        })
+        .await
         {
-            Ok(Ok(())) => true,
-            Ok(Err(e)) => { log::error!("Failed to persist HedgeDoc entries after deletion: {e}"); false }
-            Err(e) => { log::error!("Persist task panicked after deletion: {e}"); false }
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) => {
+                log::error!("Failed to persist HedgeDoc entries after deletion: {e}");
+                Err(e.to_string())
+            }
+            Err(e) => {
+                log::error!("Persist task panicked after deletion: {e}");
+                Err(e.to_string())
+            }
         }
     } else {
-        true // no config file to persist to, treat as success
+        Ok(()) // no config file to persist to, treat as success
     };
 
-    // Phase 3: only update in-memory state if persist succeeded (or was not needed).
-    if persist_ok {
-        *state.hedgedoc_sources.lock().unwrap() = new_sources.clone();
-        let combined = build_combined_infos(&state.config.collections, &new_sources);
-        *state.collections.write().await = combined;
+    // Only update in-memory state if persist succeeded (or was not needed).
+    match persist_result {
+        Ok(()) => {
+            *state.hedgedoc_sources.lock().unwrap() = new_sources.clone();
+            let combined = build_combined_infos(&state.config.collections, &new_sources);
+            *state.collections.write().await = combined;
+            Flash::success("HedgeDoc source removed.").redirect("/hedgedoc")
+        }
+        Err(msg) => {
+            Flash::error(format!("Failed to remove HedgeDoc source: {msg}")).redirect("/hedgedoc")
+        }
     }
-
-    Redirect::to("/hedgedoc")
 }
 
 /// Manually re-sync all HedgeDoc sources.
 pub async fn hedgedoc_sync_now_handler(State(state): State<AppState>) -> Redirect {
     if state.config.data_dir.is_none() {
-        return Redirect::to("/hedgedoc");
+        return Flash::error("HedgeDoc sync is not available: no data directory is configured.")
+            .redirect("/hedgedoc");
     }
 
     // Collect URLs to sync (release lock before awaiting).
@@ -803,5 +870,10 @@ pub async fn hedgedoc_sync_now_handler(State(state): State<AppState>) -> Redirec
         *state.hedgedoc_last_synced.lock().unwrap() = Some(Timestamp::now());
     }
 
-    Redirect::to("/hedgedoc")
+    if any_success || entries.is_empty() {
+        Flash::success("HedgeDoc sync finished.").redirect("/hedgedoc")
+    } else {
+        Flash::error("HedgeDoc sync failed for all notes; see the statuses below.")
+            .redirect("/hedgedoc")
+    }
 }

@@ -129,9 +129,7 @@ pub fn spawn_sync_task(
         loop {
             ticker.tick().await;
             log::debug!("Periodic git sync triggered");
-            if let Err(e) =
-                clone_or_pull(&git.repo_url, &git.branch, &git.repo_dir).await
-            {
+            if let Err(e) = clone_or_pull(&git.repo_url, &git.branch, &git.repo_dir).await {
                 log::error!("Periodic git sync failed: {e}");
                 continue;
             }
@@ -142,12 +140,14 @@ pub fn spawn_sync_task(
                 let sources = hedgedoc_sources.lock().unwrap();
                 sources
                     .iter()
-                    .map(|s| (
-                        s.collection.name.clone(),
-                        s.collection.slug.clone(),
-                        s.collection.coll_dir.clone(),
-                        s.collection.db_path.clone(),
-                    ))
+                    .map(|s| {
+                        (
+                            s.collection.name.clone(),
+                            s.collection.slug.clone(),
+                            s.collection.coll_dir.clone(),
+                            s.collection.db_path.clone(),
+                        )
+                    })
                     .collect()
             };
             let hedgedoc_infos: Vec<CollectionInfo> = match tokio::task::spawn_blocking(move || {

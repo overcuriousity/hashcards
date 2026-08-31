@@ -1,3 +1,6 @@
+use std::collections::HashMap;
+
+use axum::extract::Query;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::Html;
@@ -7,9 +10,14 @@ use maud::html;
 use crate::cmd::drill::template::page_template;
 use crate::cmd::serve::state::AppState;
 use crate::cmd::serve::state::CollectionInfo;
+use crate::flash::Flash;
 use crate::types::timestamp::Timestamp;
 
-pub async fn landing_handler(State(state): State<AppState>) -> (StatusCode, Html<String>) {
+pub async fn landing_handler(
+    State(state): State<AppState>,
+    Query(query): Query<HashMap<String, String>>,
+) -> (StatusCode, Html<String>) {
+    let flash = Flash::from_query(&query);
     let collections = state.collections.read().await;
     let last_synced = *state.last_synced.lock().unwrap();
     let hedgedoc_last_synced = *state.hedgedoc_last_synced.lock().unwrap();
@@ -23,6 +31,7 @@ pub async fn landing_handler(State(state): State<AppState>) -> (StatusCode, Html
         hedgedoc_count,
         hedgedoc_last_synced,
         config_available,
+        flash,
     );
     (StatusCode::OK, Html(html.into_string()))
 }
@@ -34,8 +43,10 @@ fn render_landing_page(
     hedgedoc_count: usize,
     hedgedoc_last_synced: Option<Timestamp>,
     config_available: bool,
+    flash: Option<Flash>,
 ) -> Markup {
     page_template(html! {
+        @if let Some(f) = &flash { (f.render()) }
         div.landing {
             h1 { "hashcards" }
             @if git_enabled {

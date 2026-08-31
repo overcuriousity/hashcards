@@ -52,11 +52,11 @@ use crate::cmd::drill::katex::katex_font_handler;
 use crate::cmd::drill::katex::katex_js_handler;
 use crate::cmd::drill::katex::katex_mhchem_js_handler;
 use crate::cmd::drill::post::post_handler;
+use crate::cmd::drill::state::MutableState;
+use crate::cmd::drill::state::ServerState;
 use crate::cmd::drill::template::icon_192_handler;
 use crate::cmd::drill::template::icon_512_handler;
 use crate::cmd::drill::template::manifest_handler;
-use crate::cmd::drill::state::MutableState;
-use crate::cmd::drill::state::ServerState;
 use crate::collection::Collection;
 use crate::db::Database;
 use crate::error::Fallible;
@@ -221,7 +221,10 @@ pub async fn start_server(config: ServerConfig) -> Fallible<()> {
         Ok(())
     } else {
         // Mark the session as closed so ended_at reflects the actual stop time.
-        if let Err(e) = mutable.db.close_session(mutable.session_id, Timestamp::now()) {
+        if let Err(e) = mutable
+            .db
+            .close_session(mutable.session_id, Timestamp::now())
+        {
             log::error!(
                 "failed to close interrupted session {}: {e}",
                 mutable.session_id

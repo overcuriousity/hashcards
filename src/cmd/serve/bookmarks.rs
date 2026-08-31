@@ -3,6 +3,7 @@ use std::path::Path;
 
 use axum::Form;
 use axum::extract::Path as AxumPath;
+use axum::extract::Query;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::Html;
@@ -18,6 +19,7 @@ use crate::collection::Collection;
 use crate::db::Bookmark;
 use crate::error::ErrorReport;
 use crate::error::Fallible;
+use crate::flash::Flash;
 use crate::types::card::Card;
 use crate::types::card::CardContent;
 use crate::types::card_hash::CardHash;
@@ -27,21 +29,30 @@ use crate::types::card_hash::CardHash;
 pub async fn bookmark_list_handler(
     State(state): State<AppState>,
     AxumPath(slug): AxumPath<String>,
+    Query(query): Query<HashMap<String, String>>,
 ) -> (StatusCode, Html<String>) {
-    match bookmark_list_inner(&state, &slug) {
+    let flash = Flash::from_query(&query);
+    match bookmark_list_inner(&state, &slug, flash) {
         Ok(html) => (StatusCode::OK, Html(html)),
         Err(e) => error_page(&slug, e),
     }
 }
 
-fn bookmark_list_inner(state: &AppState, slug: &str) -> Fallible<String> {
+fn bookmark_list_inner(state: &AppState, slug: &str, flash: Option<Flash>) -> Fallible<String> {
     let rc = find_collection(state, slug)
         .ok_or_else(|| ErrorReport::new(format!("Unknown collection: {slug}")))?;
     let collection = Collection::with_db_path(rc.coll_dir.clone(), rc.db_path.clone())?;
     let bookmarks = collection.db.list_bookmarks()?;
     let cards_by_hash: HashMap<CardHash, &Card> =
         collection.cards.iter().map(|c| (c.hash(), c)).collect();
-    let html = render_bookmark_list(&rc.name, slug, &rc.coll_dir, &bookmarks, &cards_by_hash);
+    let html = render_bookmark_list(
+        &rc.name,
+        slug,
+        &rc.coll_dir,
+        &bookmarks,
+        &cards_by_hash,
+        flash,
+    );
     Ok(html.into_string())
 }
 
@@ -69,6 +80,7 @@ fn render_bookmark_list(
     coll_dir: &Path,
     bookmarks: &[Bookmark],
     cards: &HashMap<CardHash, &Card>,
+    flash: Option<Flash>,
 ) -> Markup {
     let active: Vec<(&Bookmark, &Card)> = bookmarks
         .iter()
@@ -80,6 +92,7 @@ fn render_bookmark_list(
         .collect();
 
     page_template(html! {
+        @if let Some(f) = &flash { (f.render()) }
         div.bookmarks {
             div.browse-header {
                 a.back-link href=(format!("/collection/{slug}")) { "\u{2190} " (collection_name) }
@@ -110,12 +123,7 @@ fn render_bookmark_list(
     })
 }
 
-fn render_bookmark_row(
-    slug: &str,
-    coll_dir: &Path,
-    bm: &Bookmark,
-    card: &Card,
-) -> Markup {
+fn render_bookmark_row(slug: &str, coll_dir: &Path, bm: &Bookmark, card: &Card) -> Markup {
     let hash_hex = bm.card_hash.to_hex();
     let preview = card_preview(card.content());
     let rel_path = card
@@ -186,8 +194,11 @@ pub async fn bookmark_delete_handler(
     State(state): State<AppState>,
     AxumPath((slug, hash_hex)): AxumPath<(String, String)>,
 ) -> Redirect {
-    let _ = bookmark_delete_inner(&state, &slug, &hash_hex);
-    Redirect::to(&format!("/collection/{slug}/bookmarks"))
+    let to = format!("/collection/{slug}/bookmarks");
+    match bookmark_delete_inner(&state, &slug, &hash_hex) {
+        Ok(()) => Flash::success("Bookmark removed.").redirect(&to),
+        Err(e) => Flash::error(format!("Failed to remove bookmark: {e}")).redirect(&to),
+    }
 }
 
 fn bookmark_delete_inner(state: &AppState, slug: &str, hash_hex: &str) -> Fallible<()> {
@@ -211,16 +222,14 @@ pub async fn bookmark_note_handler(
     AxumPath((slug, hash_hex)): AxumPath<(String, String)>,
     Form(form): Form<NoteForm>,
 ) -> Redirect {
-    let _ = bookmark_note_inner(&state, &slug, &hash_hex, form.note);
-    Redirect::to(&format!("/collection/{slug}/bookmarks"))
+    let to = format!("/collection/{slug}/bookmarks");
+    match bookmark_note_inner(&state, &slug, &hash_hex, form.note) {
+        Ok(()) => Flash::success("Note saved.").redirect(&to),
+        Err(e) => Flash::error(format!("Failed to save note: {e}")).redirect(&to),
+    }
 }
 
-fn bookmark_note_inner(
-    state: &AppState,
-    slug: &str,
-    hash_hex: &str,
-    note: String,
-) -> Fallible<()> {
+fn bookmark_note_inner(state: &AppState, slug: &str, hash_hex: &str, note: String) -> Fallible<()> {
     let rc = find_collection(state, slug)
         .ok_or_else(|| ErrorReport::new(format!("Unknown collection: {slug}")))?;
     let collection = Collection::with_db_path(rc.coll_dir, rc.db_path)?;

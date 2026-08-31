@@ -20,6 +20,7 @@ use serde::Serialize;
 
 use crate::collection::Collection;
 use crate::error::Fallible;
+use crate::error::fail;
 use crate::types::date::Date;
 
 #[derive(ValueEnum, Clone)]
@@ -44,7 +45,7 @@ pub fn print_stats(directory: Option<String>, format: StatsFormat) -> Fallible<(
     // Print.
     match format {
         StatsFormat::Html => {
-            eprintln!("HTML output is not implemented yet.");
+            return fail("HTML output is not implemented yet. Use --format json.");
         }
         StatsFormat::Json => {
             let stats_json = serde_json::to_string_pretty(&stats)?;
@@ -108,6 +109,14 @@ mod tests {
         assert_eq!(cards_in_db_count, 0);
         assert_eq!(tex_macro_count, 1);
         assert_eq!(cards_reviewed_today_count, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn test_print_stats_html_is_an_error() -> Fallible<()> {
+        let directory = create_tmp_copy_of_test_directory()?;
+        let result = print_stats(Some(directory), StatsFormat::Html);
+        assert!(result.is_err());
         Ok(())
     }
 }

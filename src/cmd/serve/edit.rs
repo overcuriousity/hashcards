@@ -136,12 +136,7 @@ pub async fn edit_post_handler(
     }
 }
 
-fn edit_post_inner(
-    state: &AppState,
-    slug: &str,
-    hash_hex: &str,
-    form: EditForm,
-) -> Fallible<()> {
+fn edit_post_inner(state: &AppState, slug: &str, hash_hex: &str, form: EditForm) -> Fallible<()> {
     let rc = find_collection(state, slug)
         .ok_or_else(|| ErrorReport::new(format!("Unknown collection: {slug}")))?;
 
@@ -182,8 +177,7 @@ fn edit_post_inner(
     // Re-parse the modified file; revert on any parse error.
     let new_file_content = std::fs::read_to_string(&file_path)?;
     let after_fm = strip_frontmatter(&new_file_content)?;
-    let new_cards_result =
-        Parser::new(card.deck_name().clone(), file_path.clone()).parse(after_fm);
+    let new_cards_result = Parser::new(card.deck_name().clone(), file_path.clone()).parse(after_fm);
 
     let new_cards = match new_cards_result {
         Ok(c) => c,
@@ -299,10 +293,9 @@ fn splice_card_block(
 // ── Utilities ─────────────────────────────────────────────────────────────────
 
 fn find_card_by_hash(cards: &[Card], hash: CardHash) -> Fallible<&Card> {
-    cards
-        .iter()
-        .find(|c| c.hash() == hash)
-        .ok_or_else(|| ErrorReport::new("Card not found in collection (may have been edited or deleted)"))
+    cards.iter().find(|c| c.hash() == hash).ok_or_else(|| {
+        ErrorReport::new("Card not found in collection (may have been edited or deleted)")
+    })
 }
 
 fn file_mtime_ms(path: &Path) -> Fallible<u64> {
@@ -384,7 +377,10 @@ mod tests {
 
         splice_card_block(&path, original, (0, 2), "Q: foo edited\nA: bar edited").unwrap();
         let result = std::fs::read_to_string(&path).unwrap();
-        assert_eq!(result, "Q: foo edited\nA: bar edited\n---\nQ: baz\nA: quux\n");
+        assert_eq!(
+            result,
+            "Q: foo edited\nA: bar edited\n---\nQ: baz\nA: quux\n"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }

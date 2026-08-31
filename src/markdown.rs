@@ -15,13 +15,13 @@
 use percent_encoding::AsciiSet;
 use percent_encoding::CONTROLS;
 use percent_encoding::utf8_percent_encode;
-use reqwest::Url;
 use pulldown_cmark::CowStr;
 use pulldown_cmark::Event;
 use pulldown_cmark::Options;
 use pulldown_cmark::Parser;
 use pulldown_cmark::Tag;
 use pulldown_cmark::html::push_html;
+use reqwest::Url;
 
 use crate::error::ErrorReport;
 use crate::error::Fallible;
@@ -29,12 +29,7 @@ use crate::media::resolve::MediaResolver;
 
 /// Characters that must be percent-encoded in a URL path segment.
 /// Encodes control characters plus space, #, ?, %, and / (RFC 3986).
-const PATH_SEGMENT: &AsciiSet = &CONTROLS
-    .add(b' ')
-    .add(b'#')
-    .add(b'?')
-    .add(b'%')
-    .add(b'/');
+const PATH_SEGMENT: &AsciiSet = &CONTROLS.add(b' ').add(b'#').add(b'?').add(b'%').add(b'/');
 
 const AUDIO_EXTENSIONS: [&str; 4] = ["mp3", "wav", "ogg", "m4a"];
 
@@ -118,7 +113,10 @@ fn modify_url(url: &str, config: &MarkdownRenderConfig) -> Fallible<String> {
         // and produces a canonicalized string that is safe to embed in HTML.
         Err(ResolveError::ExternalUrl) => {
             let parsed = Url::parse(url).map_err(|err| {
-                ErrorReport::new(format!("External media URL is invalid ('{}'): {}", url, err))
+                ErrorReport::new(format!(
+                    "External media URL is invalid ('{}'): {}",
+                    url, err
+                ))
             })?;
             if parsed.scheme() != "http" && parsed.scheme() != "https" {
                 return Err(ErrorReport::new(format!(

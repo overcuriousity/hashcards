@@ -77,7 +77,7 @@ enum Command {
         /// Path to the collection directory. By default, the current working directory is used.
         directory: Option<String>,
         /// Which output format to use.
-        #[arg(long, default_value_t = StatsFormat::Html)]
+        #[arg(long, default_value_t = StatsFormat::Json)]
         format: StatsFormat,
     },
     /// Commands relating to orphan cards.
@@ -208,8 +208,9 @@ fn resolve_serve_config(
 ) -> Fallible<ResolvedServeConfig> {
     // Explicit --config: load that file
     if let Some(path) = config_path {
-        let canonical = std::fs::canonicalize(&path)
-            .map_err(|_| crate::error::ErrorReport::new(format!("Config file not found: {path}")))?;
+        let canonical = std::fs::canonicalize(&path).map_err(|_| {
+            crate::error::ErrorReport::new(format!("Config file not found: {path}"))
+        })?;
         let config = load_config(Path::new(&path))?;
         return Ok(ResolvedServeConfig::from_toml(config)?.with_config_path(canonical));
     }
@@ -250,4 +251,20 @@ fn resolve_serve_config(
         hedgedoc_entries: Vec::new(),
         _temp_dir: Some(std::sync::Arc::new(temp_tracker)),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_stats_default_format_is_json() {
+        let cmd = Command::try_parse_from(["hashcards", "stats"]).unwrap();
+        match cmd {
+            Command::Stats { format, .. } => {
+                assert!(matches!(format, StatsFormat::Json));
+            }
+            _ => panic!("expected the stats command"),
+        }
     }
+}

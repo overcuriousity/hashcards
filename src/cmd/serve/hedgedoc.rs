@@ -55,8 +55,9 @@ pub fn slug_for_source_uri(source_uri: &str) -> String {
 
 /// Validate that a HedgeDoc URL is safe to fetch (HTTPS only).
 fn validate_hedgedoc_url(url: &str) -> Fallible<()> {
-    let parsed = reqwest::Url::parse(url)
-        .map_err(|e| crate::error::ErrorReport::new(format!("Invalid HedgeDoc URL `{}`: {}", url, e)))?;
+    let parsed = reqwest::Url::parse(url).map_err(|e| {
+        crate::error::ErrorReport::new(format!("Invalid HedgeDoc URL `{}`: {}", url, e))
+    })?;
     if parsed.scheme() != "https" {
         return fail(format!("HedgeDoc URLs must use HTTPS (got: {})", url));
     }
@@ -70,8 +71,9 @@ fn validate_hedgedoc_url(url: &str) -> Fallible<()> {
 /// prefix is stripped here because the `/download` endpoint lives at
 /// `/<noteId>/download`, not `/s/<noteId>/download`.
 fn build_download_url(url: &str) -> Fallible<reqwest::Url> {
-    let mut parsed = reqwest::Url::parse(url)
-        .map_err(|e| crate::error::ErrorReport::new(format!("Invalid HedgeDoc URL `{}`: {}", url, e)))?;
+    let mut parsed = reqwest::Url::parse(url).map_err(|e| {
+        crate::error::ErrorReport::new(format!("Invalid HedgeDoc URL `{}`: {}", url, e))
+    })?;
     parsed.set_query(None);
     parsed.set_fragment(None);
     // Strip /s/<noteId> → /<noteId> for shared/published note URLs.
@@ -88,9 +90,9 @@ fn build_download_url(url: &str) -> Fallible<reqwest::Url> {
         }
     }
     {
-        let mut segments = parsed
-            .path_segments_mut()
-            .map_err(|_| crate::error::ErrorReport::new(format!("Cannot modify path for HedgeDoc URL `{}`", url)))?;
+        let mut segments = parsed.path_segments_mut().map_err(|_| {
+            crate::error::ErrorReport::new(format!("Cannot modify path for HedgeDoc URL `{}`", url))
+        })?;
         segments.pop_if_empty();
         segments.push("download");
     }
@@ -191,15 +193,15 @@ fn split_yaml_frontmatter(markdown: &str) -> Option<(&str, &str)> {
 
     let after_start = if content.starts_with("---\r\n") { 5 } else { 4 };
     let after = &content[after_start..];
-    
+
     let mut current = 0;
     while let Some(idx) = after[current..].find("\n---") {
         let abs_idx = current + idx;
         let next_char_idx = abs_idx + 4;
-        let is_end = next_char_idx == after.len() 
-            || after[next_char_idx..].starts_with('\n') 
+        let is_end = next_char_idx == after.len()
+            || after[next_char_idx..].starts_with('\n')
             || after[next_char_idx..].starts_with("\r\n");
-            
+
         if is_end {
             let mut fm_end = abs_idx;
             if fm_end > 0 && after.as_bytes()[fm_end - 1] == b'\r' {
@@ -229,7 +231,10 @@ fn strip_leading_yaml_frontmatter(markdown: &str) -> &str {
 
 fn wrap_with_deck_frontmatter(markdown: &str, deck_name: &str) -> Fallible<String> {
     let mut table = toml::map::Map::new();
-    table.insert("name".to_string(), toml::Value::String(deck_name.to_string()));
+    table.insert(
+        "name".to_string(),
+        toml::Value::String(deck_name.to_string()),
+    );
     let mut frontmatter_toml = toml::to_string(&toml::Value::Table(table))?;
     // Ensure the TOML block ends with a newline so the closing `---` stays on
     // its own line and the frontmatter parser can find it.
@@ -354,8 +359,9 @@ pub async fn build_note(url: &str, collection: &ResolvedCollection) -> Fallible<
 
 /// Re-derive a `HedgedocSource` from a URL, performing an initial sync for the note.
 pub async fn build_source(url: &str, data_dir: &Path) -> Fallible<HedgedocSource> {
-    let source_uri = source_uri_from_url(url)
-        .ok_or_else(|| crate::error::ErrorReport::new(format!("Cannot derive source URI from URL: {url}")))?;
+    let source_uri = source_uri_from_url(url).ok_or_else(|| {
+        crate::error::ErrorReport::new(format!("Cannot derive source URI from URL: {url}"))
+    })?;
 
     let rc = resolved_collection(&source_uri, data_dir);
     tokio::fs::create_dir_all(&rc.coll_dir).await?;
@@ -413,9 +419,7 @@ pub fn spawn_hedgedoc_sync_task(
                     Ok((deck_name, file_name)) => {
                         any_success = true;
                         let mut sources = hedgedoc_sources.lock().unwrap();
-                        if let Some(src) = sources
-                            .iter_mut()
-                            .find(|s| s.collection.slug == rc.slug)
+                        if let Some(src) = sources.iter_mut().find(|s| s.collection.slug == rc.slug)
                         {
                             if let Some(note) = src.notes.iter_mut().find(|n| &n.url == url) {
                                 note.deck_name = deck_name;
@@ -493,10 +497,7 @@ pub fn create_minimal_config(data_dir: &Path) -> Fallible<PathBuf> {
 /// Write the current set of HedgeDoc URLs back to the TOML config file.
 /// Other config keys are preserved by value, but comments and key ordering
 /// in the file are not guaranteed to survive the round-trip.
-pub fn persist_hedgedoc_entries(
-    config_path: &Path,
-    entries: &[HedgedocEntry],
-) -> Fallible<()> {
+pub fn persist_hedgedoc_entries(config_path: &Path, entries: &[HedgedocEntry]) -> Fallible<()> {
     let content = std::fs::read_to_string(config_path)?;
     let mut doc: toml::Value = toml::from_str(&content)?;
 
@@ -524,7 +525,11 @@ pub fn persist_hedgedoc_entries(
     static WRITE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = WRITE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let dir = config_path.parent().unwrap_or(Path::new("."));
-    let tmp_path = dir.join(format!(".hashcards-config-{}-{}.tmp", std::process::id(), n));
+    let tmp_path = dir.join(format!(
+        ".hashcards-config-{}-{}.tmp",
+        std::process::id(),
+        n
+    ));
     std::fs::write(&tmp_path, serialized)?;
     // On Unix, rename over an existing file is atomic.
     // On Windows, rename fails if the destination exists, so remove it first
@@ -591,13 +596,19 @@ mod tests {
         // Published/shared notes at /s/<noteId> use the same note ID as the
         // primary note. Strip /s/ so we fetch /<noteId>/download directly.
         let url = build_download_url("https://notes.example.com/s/NNOBZSN2Yi").unwrap();
-        assert_eq!(url.as_str(), "https://notes.example.com/NNOBZSN2Yi/download");
+        assert_eq!(
+            url.as_str(),
+            "https://notes.example.com/NNOBZSN2Yi/download"
+        );
     }
 
     #[test]
     fn build_download_url_shared_note_trailing_slash() {
         let url = build_download_url("https://notes.example.com/s/NNOBZSN2Yi/").unwrap();
-        assert_eq!(url.as_str(), "https://notes.example.com/NNOBZSN2Yi/download");
+        assert_eq!(
+            url.as_str(),
+            "https://notes.example.com/NNOBZSN2Yi/download"
+        );
     }
 
     #[test]
@@ -622,8 +633,12 @@ mod tests {
         write_toml(&config_path, "[server]\ndata_dir = \"/tmp\"\n");
 
         let entries = vec![
-            HedgedocEntry { url: "https://notes.example.com/doc1".to_string() },
-            HedgedocEntry { url: "https://notes.example.com/doc2".to_string() },
+            HedgedocEntry {
+                url: "https://notes.example.com/doc1".to_string(),
+            },
+            HedgedocEntry {
+                url: "https://notes.example.com/doc2".to_string(),
+            },
         ];
         persist_hedgedoc_entries(&config_path, &entries).unwrap();
 
@@ -636,30 +651,47 @@ mod tests {
             .iter()
             .map(|v| v.as_table().unwrap()["url"].as_str().unwrap())
             .collect();
-        assert_eq!(urls, vec!["https://notes.example.com/doc1", "https://notes.example.com/doc2"]);
+        assert_eq!(
+            urls,
+            vec![
+                "https://notes.example.com/doc1",
+                "https://notes.example.com/doc2"
+            ]
+        );
     }
 
     #[test]
     fn persist_replaces_existing_array() {
         let dir = tempfile::tempdir().unwrap();
         let config_path = dir.path().join("hashcards.toml");
-        write_toml(&config_path, "[[hedgedoc]]\nurl = \"https://old.example.com/old\"\n[server]\ndata_dir = \"/tmp\"\n");
+        write_toml(
+            &config_path,
+            "[[hedgedoc]]\nurl = \"https://old.example.com/old\"\n[server]\ndata_dir = \"/tmp\"\n",
+        );
 
-        let entries = vec![HedgedocEntry { url: "https://new.example.com/new".to_string() }];
+        let entries = vec![HedgedocEntry {
+            url: "https://new.example.com/new".to_string(),
+        }];
         persist_hedgedoc_entries(&config_path, &entries).unwrap();
 
         let content = std::fs::read_to_string(&config_path).unwrap();
         let value: toml::Value = toml::from_str(&content).unwrap();
         let arr = value.as_table().unwrap()["hedgedoc"].as_array().unwrap();
         assert_eq!(arr.len(), 1);
-        assert_eq!(arr[0].as_table().unwrap()["url"].as_str().unwrap(), "https://new.example.com/new");
+        assert_eq!(
+            arr[0].as_table().unwrap()["url"].as_str().unwrap(),
+            "https://new.example.com/new"
+        );
     }
 
     #[test]
     fn persist_removes_array_when_empty() {
         let dir = tempfile::tempdir().unwrap();
         let config_path = dir.path().join("hashcards.toml");
-        write_toml(&config_path, "[[hedgedoc]]\nurl = \"https://example.com/doc\"\n[server]\ndata_dir = \"/tmp\"\n");
+        write_toml(
+            &config_path,
+            "[[hedgedoc]]\nurl = \"https://example.com/doc\"\n[server]\ndata_dir = \"/tmp\"\n",
+        );
 
         persist_hedgedoc_entries(&config_path, &[]).unwrap();
 

@@ -12,8 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::path::Path;
 
+use axum::extract::Query;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::Html;
@@ -24,7 +26,9 @@ use crate::cmd::drill::server::AnswerControls;
 use crate::cmd::drill::state::MutableState;
 use crate::cmd::drill::state::ServerState;
 use crate::cmd::drill::template::page_template;
+use crate::error::ErrorReport;
 use crate::error::Fallible;
+use crate::flash::Flash;
 use crate::markdown::MarkdownRenderConfig;
 use crate::media::resolve::MediaResolverBuilder;
 use crate::types::card::Card;
@@ -50,20 +54,30 @@ pub struct RenderContext<'a> {
     pub completion_action: CompletionAction,
 }
 
-pub async fn get_handler(State(state): State<ServerState>) -> (StatusCode, Html<String>) {
-    let html = match inner(state).await {
-        Ok(html) => html,
-        Err(e) => page_template(html! {
-            div.error {
-                h1 { "Error" }
-                p { (e) }
-            }
-        }),
-    };
-    (StatusCode::OK, Html(html.into_string()))
+/// A styled error page with a 500 status and a link back to the session.
+pub(crate) fn error_response(e: &ErrorReport) -> (StatusCode, Html<String>) {
+    let html = page_template(html! {
+        div.error {
+            h1 { "Error" }
+            p { (e) }
+            p { a href="/" { "\u{2190} Back to session" } }
+        }
+    });
+    (StatusCode::INTERNAL_SERVER_ERROR, Html(html.into_string()))
 }
 
-async fn inner(state: ServerState) -> Fallible<Markup> {
+pub async fn get_handler(
+    State(state): State<ServerState>,
+    Query(query): Query<HashMap<String, String>>,
+) -> (StatusCode, Html<String>) {
+    let flash = Flash::from_query(&query);
+    match inner(state, flash).await {
+        Ok(html) => (StatusCode::OK, Html(html.into_string())),
+        Err(e) => error_response(&e),
+    }
+}
+
+async fn inner(state: ServerState, flash: Option<Flash>) -> Fallible<Markup> {
     let mutable = state.mutable.lock().unwrap();
     let file_url_prefix = format!("http://localhost:{}/file", state.port);
     let ctx = RenderContext {
@@ -79,6 +93,10 @@ async fn inner(state: ServerState) -> Fallible<Markup> {
         render_completion_page(&ctx, &mutable)?
     } else {
         render_session_page(&ctx, &mutable)?
+    };
+    let body = html! {
+        @if let Some(f) = &flash { (f.render()) }
+        (body)
     };
     let html = page_template(body);
     Ok(html)
@@ -243,6 +261,9 @@ const REDIRECT_SCRIPT: &str = r#"
 "#;
 
 pub fn render_completion_page(ctx: &RenderContext, mutable: &MutableState) -> Fallible<Markup> {
+    if mutable.reviews.is_empty() {
+        return Ok(render_empty_completion_page(ctx));
+    }
     let total_cards = ctx.total_cards;
     let cards_reviewed = ctx.total_cards - mutable.cards.len();
     let start = ctx.session_started_at.into_inner();
@@ -276,9 +297,15 @@ pub fn render_completion_page(ctx: &RenderContext, mutable: &MutableState) -> Fa
         .max_by_key(|&(_, ms)| ms)
         .map(|(name, ms)| (name, ms as f64 / 1000.0));
 
-    let pace_rounded = median_pace_s.unwrap_or_else(|| {
-        if cards_reviewed == 0 { 0.0 } else { duration_s as f64 / cards_reviewed as f64 }
-    }).round() as i64;
+    let pace_rounded = median_pace_s
+        .unwrap_or_else(|| {
+            if cards_reviewed == 0 {
+                0.0
+            } else {
+                duration_s as f64 / cards_reviewed as f64
+            }
+        })
+        .round() as i64;
 
     let start_ts = start.format(TS_FORMAT).to_string();
     let end_ts = end.format(TS_FORMAT).to_string();
@@ -293,37 +320,7 @@ pub fn render_completion_page(ctx: &RenderContext, mutable: &MutableState) -> Fa
         if cards_reviewed == 1 { "" } else { "s" }
     );
 
-    let (action_button, redirect_notice) = match &ctx.completion_action {
-        CompletionAction::Shutdown => (
-            html! {
-                div.shutdown-container {
-                    form action=(ctx.form_action) method="post" {
-                        input #shutdown .shutdown-button.btn.btn-danger type="submit" name="action" value="Shutdown" title="Shut down the server";
-                    }
-                }
-            },
-            html! {},
-        ),
-        CompletionAction::BackToCollections => (
-            html! {
-                div.shutdown-container {
-                    form #home-form action=(ctx.form_action) method="post" style="display:inline" {
-                        input type="hidden" name="action" value="Home";
-                        button #home .home-button.btn.btn-primary type="submit" { "Home" }
-                    }
-                }
-            },
-            html! {
-                p.redirect-notice {
-                    "Returning to collections in "
-                    span #countdown { "5" }
-                    "s. "
-                    a #cancel-redirect href="#" { "Cancel" }
-                }
-                script { (maud::PreEscaped(REDIRECT_SCRIPT)) }
-            },
-        ),
-    };
+    let (action_button, redirect_notice) = completion_actions(ctx);
 
     let html = html! {
         div.finished {
@@ -377,6 +374,56 @@ pub fn render_completion_page(ctx: &RenderContext, mutable: &MutableState) -> Fa
     Ok(html)
 }
 
+/// The action button (Shutdown or Home) and the auto-redirect notice for the
+/// completion page, depending on drill vs. serve mode.
+fn completion_actions(ctx: &RenderContext) -> (Markup, Markup) {
+    match &ctx.completion_action {
+        CompletionAction::Shutdown => (
+            html! {
+                div.shutdown-container {
+                    form action=(ctx.form_action) method="post" {
+                        input #shutdown .shutdown-button.btn.btn-danger type="submit" name="action" value="Shutdown" title="Shut down the server";
+                    }
+                }
+            },
+            html! {},
+        ),
+        CompletionAction::BackToCollections => (
+            html! {
+                div.shutdown-container {
+                    form #home-form action=(ctx.form_action) method="post" style="display:inline" {
+                        input type="hidden" name="action" value="Home";
+                        button #home .home-button.btn.btn-primary type="submit" { "Home" }
+                    }
+                }
+            },
+            html! {
+                p.redirect-notice {
+                    "Returning to collections in "
+                    span #countdown { "5" }
+                    "s. "
+                    a #cancel-redirect href="#" { "Cancel" }
+                }
+                script { (maud::PreEscaped(REDIRECT_SCRIPT)) }
+            },
+        ),
+    }
+}
+
+/// Completion page for a session that ended before any card was graded:
+/// no stats block, since there is nothing meaningful to report.
+fn render_empty_completion_page(ctx: &RenderContext) -> Markup {
+    let (action_button, redirect_notice) = completion_actions(ctx);
+    html! {
+        div.finished {
+            h1 { "Session Ended" }
+            div.summary { "No cards were reviewed." }
+            (redirect_notice)
+            (action_button)
+        }
+    }
+}
+
 fn undo_button(disabled: bool) -> Markup {
     if disabled {
         html! {
@@ -410,5 +457,54 @@ fn bookmark_button(is_bookmarked: bool) -> Markup {
                 "\u{2606} Bookmark"
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::*;
+    use crate::cmd::drill::cache::Cache;
+    use crate::db::Database;
+    use crate::error::ErrorReport;
+
+    #[test]
+    fn test_completion_page_without_reviews_skips_stats() -> Fallible<()> {
+        let db = Database::new(":memory:").unwrap();
+        let session_id = db.create_session(Timestamp::now()).unwrap();
+        let mutable = MutableState {
+            reveal: false,
+            session_id,
+            db,
+            cache: Cache::new(),
+            cards: Vec::new(),
+            reviews: Vec::new(),
+            finished_at: Some(Timestamp::now()),
+            card_shown_at: None,
+        };
+        let ctx = RenderContext {
+            directory: Path::new("."),
+            total_cards: 0,
+            session_started_at: Timestamp::now(),
+            answer_controls: AnswerControls::Full,
+            form_action: "/",
+            file_url_prefix: "/file",
+            completion_action: CompletionAction::Shutdown,
+        };
+        let html = render_completion_page(&ctx, &mutable)?.into_string();
+        assert!(html.contains("No cards were reviewed."), "html: {html}");
+        assert!(!html.contains("Session Stats"));
+        assert!(!html.contains("s/card"));
+        Ok(())
+    }
+
+    #[test]
+    fn test_error_response_is_styled_500_with_home_link() {
+        let (status, Html(body)) = error_response(&ErrorReport::new("kaboom"));
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(body.contains("class=\"error\""));
+        assert!(body.contains("kaboom"));
+        assert!(body.contains("href=\"/\""), "body: {body}");
     }
 }

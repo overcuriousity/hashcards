@@ -2,6 +2,9 @@
     <unreleased>
         <fixed>
             <change author="claude">
+                Pressing Shutdown before the drill session is finished now shows a message explaining that the session is still in progress, instead of silently doing nothing.
+            </change>
+            <change author="claude">
                 The collection browse page now reports database errors instead of silently displaying a bookmark count of zero.
             </change>
             <change author="claude">
@@ -10,8 +13,26 @@
             <change author="claude">
                 HedgeDoc notes whose permission level prevents anonymous download (e.g. "Locked" or "Protected") now show an "Error" status with a descriptive message instead of silently reporting "OK" while storing an HTML page as markdown (yielding zero cards).
             </change>
+            <change author="claude">
+                Ending a session before revealing or grading any card no longer shows nonsense statistics (0 cards reviewed over the whole server uptime); the completion page now simply reports that no cards were reviewed.
+            </change>
+            <change author="claude">
+                The drill-mode error page now returns HTTP 500 instead of 200, is styled, and has a link back to the session.
+            </change>
+            <change author="claude">
+                Starting a drill with no decks selected no longer silently drills the entire collection; it now shows "Select at least one deck."
+            </change>
+            <change author="claude">
+                Errors in web actions are no longer silently swallowed: failed grades and undos, bookmark removal and note saving, manual git sync, and all HedgeDoc add/delete/sync failures now show an error banner instead of redirecting as if they had succeeded.
+            </change>
+            <change author="claude">
+                Malformed lines in `macros.tex` (lines without a space between the macro name and its definition) are now reported as warnings with their line number instead of being silently ignored.
+            </change>
         </fixed>
         <added>
+            <change author="claude">
+                Flash messages: actions in the drill and serve web interfaces now show one-shot success/error banners (dismissible) instead of failing or succeeding silently. The message travels as query parameters across the post-redirect.
+            </change>
             <change author="mstoeck3">
                 Each grade is now written to the database as it happens, so a session interrupted by a dropped connection or a closed tab keeps the progress made up to that point. Previously an interrupted session was lost entirely.
             </change>
@@ -61,6 +82,9 @@
             </change>
             <change author="overcuriousity">
                 The `serve` subcommand no longer requires a TOML config file. Collection directories can be passed as arguments for local use without git syncing. Added `hashcards.example.toml` documenting the config format.
+            </change>
+            <change author="claude">
+                `hashcards stats` now defaults to JSON output. Requesting `--format html` is an error (it was never implemented and previously printed a note to stderr while exiting successfully).
             </change>
         </changed>
     </unreleased>

@@ -8,6 +8,7 @@ use maud::html;
 use crate::cmd::drill::template::page_template;
 use crate::collection::Collection;
 use crate::error::Fallible;
+use crate::flash::Flash;
 use crate::types::card_hash::CardHash;
 use crate::types::date::Date;
 use crate::types::timestamp::Timestamp;
@@ -29,12 +30,22 @@ pub struct DeckNode {
 impl DeckNode {
     /// Total cards in this node and all descendants.
     pub fn total_cards_recursive(&self) -> usize {
-        self.total_cards + self.children.iter().map(|c| c.total_cards_recursive()).sum::<usize>()
+        self.total_cards
+            + self
+                .children
+                .iter()
+                .map(|c| c.total_cards_recursive())
+                .sum::<usize>()
     }
 
     /// Due cards in this node and all descendants.
     pub fn due_today_recursive(&self) -> usize {
-        self.due_today + self.children.iter().map(|c| c.due_today_recursive()).sum::<usize>()
+        self.due_today
+            + self
+                .children
+                .iter()
+                .map(|c| c.due_today_recursive())
+                .sum::<usize>()
     }
 }
 
@@ -135,7 +146,13 @@ fn insert_into_tree(
         }
     };
 
-    insert_into_tree(&mut node.children[child_idx], segments, depth + 1, full_path, counts);
+    insert_into_tree(
+        &mut node.children[child_idx],
+        segments,
+        depth + 1,
+        full_path,
+        counts,
+    );
 }
 
 /// Render the deck browser page for a collection.
@@ -147,9 +164,11 @@ pub fn render_browse_page(
     tree: &DeckNode,
     hedge_urls: &HashMap<String, String>,
     bookmark_count: usize,
+    flash: Option<Flash>,
 ) -> Markup {
     let total_due = tree.due_today_recursive();
     page_template(html! {
+        @if let Some(f) = &flash { (f.render()) }
         div.browse {
             div.browse-header {
                 a.back-link href="/" { "\u{2190} Collections" }
@@ -204,7 +223,11 @@ fn render_deck_node(node: &DeckNode, depth: usize, hedge_urls: &HashMap<String, 
     let total = node.total_cards_recursive();
     let due = node.due_today_recursive();
     let has_children = !node.children.is_empty();
-    let edit_url = if !has_children { hedge_urls.get(&node.path) } else { None };
+    let edit_url = if !has_children {
+        hedge_urls.get(&node.path)
+    } else {
+        None
+    };
 
     html! {
         div.deck-node {
