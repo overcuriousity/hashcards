@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::error::Error;
 use std::fmt::Display;
 use std::fmt::Formatter;
@@ -27,6 +27,7 @@ use crate::error::Fallible;
 use crate::types::aliases::DeckName;
 use crate::types::card::Card;
 use crate::types::card::CardContent;
+use crate::types::card_hash::CardHash;
 
 /// Metadata that can be specified at the top of a deck file.
 #[derive(Debug, Deserialize)]
@@ -115,9 +116,20 @@ pub fn strip_frontmatter_with_offset(text: &str) -> Fallible<(&str, usize)> {
     Ok((content, offset))
 }
 
+/// The result of parsing every deck file in a collection directory.
+pub struct ParsedDeck {
+    pub cards: Vec<Card>,
+    pub duplicates: Vec<DuplicateCard>,
+}
+
 /// Parses all Markdown files in the given directory.
-pub fn parse_deck(directory: &PathBuf) -> Fallible<Vec<Card>> {
+///
+/// Byte-identical cards (same hash) are deduplicated: the first copy
+/// encountered is kept, and every dropped copy is reported in
+/// `ParsedDeck::duplicates` with both locations.
+pub fn parse_deck(directory: &PathBuf) -> Fallible<ParsedDeck> {
     let mut all_cards = Vec::new();
+    let mut duplicates = Vec::new();
     for entry in WalkDir::new(directory) {
         let entry = entry?;
         let path = entry.path();
@@ -150,19 +162,33 @@ pub fn parse_deck(directory: &PathBuf) -> Fallible<Vec<Card>> {
             });
 
             let parser = Parser::new(deck_name, path.to_path_buf(), line_offset);
-            let cards = parser.parse(content)?;
-            all_cards.extend(cards);
+            let parsed = parser.parse_with_duplicates(content)?;
+            all_cards.extend(parsed.cards);
+            duplicates.extend(parsed.duplicates);
         }
     }
 
     // Cards are sorted by their hash to make subsequent code more
-    // deterministic.
+    // deterministic. The sort is stable, so among byte-identical cards the
+    // first one encountered on disk stays first and is the copy we keep.
     all_cards.sort_by_key(|c| c.hash());
 
-    // Remove duplicates.
-    all_cards.dedup_by_key(|c| c.hash());
+    // Remove cross-file duplicates, recording both locations.
+    let mut cards: Vec<Card> = Vec::new();
+    for card in all_cards {
+        match cards.last() {
+            Some(kept) if kept.hash() == card.hash() => {
+                duplicates.push(DuplicateCard::new(
+                    card.hash(),
+                    CardLocation::of(kept),
+                    CardLocation::of(&card),
+                ));
+            }
+            _ => cards.push(card),
+        }
+    }
 
-    Ok(all_cards)
+    Ok(ParsedDeck { cards, duplicates })
 }
 
 pub struct Parser {
@@ -205,6 +231,68 @@ impl Display for ParserError {
 
 impl Error for ParserError {}
 
+/// The location of a card in the collection: file path and 1-based line
+/// number of the card's first line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CardLocation {
+    file_path: PathBuf,
+    line: usize,
+}
+
+impl CardLocation {
+    pub fn of(card: &Card) -> Self {
+        Self {
+            file_path: card.file_path().clone(),
+            line: card.range().0 + 1,
+        }
+    }
+}
+
+impl Display for CardLocation {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:{}", self.file_path.display(), self.line)
+    }
+}
+
+/// Two byte-identical cards found while loading a collection. The `kept`
+/// copy stays in the deck; the `ignored` copy is dropped.
+#[derive(Debug, Clone)]
+pub struct DuplicateCard {
+    hash: CardHash,
+    kept: CardLocation,
+    ignored: CardLocation,
+}
+
+impl DuplicateCard {
+    pub fn new(hash: CardHash, kept: CardLocation, ignored: CardLocation) -> Self {
+        Self { hash, kept, ignored }
+    }
+
+    pub fn kept(&self) -> &CardLocation {
+        &self.kept
+    }
+
+    pub fn ignored(&self) -> &CardLocation {
+        &self.ignored
+    }
+}
+
+impl Display for DuplicateCard {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "duplicate card {}: kept {}, ignored {}",
+            self.hash, self.kept(), self.ignored()
+        )
+    }
+}
+
+/// The result of parsing a single deck file.
+pub struct ParsedFile {
+    pub cards: Vec<Card>,
+    pub duplicates: Vec<DuplicateCard>,
+}
+
 enum State {
     /// Start state.
     Start,
@@ -218,6 +306,14 @@ enum State {
     },
     /// Reading a cloze card (C:)
     ReadingCloze { text: String, start_line: usize },
+    /// Reading a term (T:), waiting for its definition.
+    ReadingTerm { term: String, start_line: usize },
+    /// Reading a definition (D:) for a term.
+    ReadingDefinition {
+        term: String,
+        definition: String,
+        start_line: usize,
+    },
     /// End state.
     End,
 }
@@ -229,6 +325,10 @@ enum Line {
     StartAnswer(String),
     /// A line like `C: <text>`.
     StartCloze(String),
+    /// A line like `T: <text>` (term-definition shorthand).
+    StartTerm(String),
+    /// A line like `D: <text>` (term-definition shorthand).
+    StartDefinition(String),
     /// A line that's just `---` (flashcard separator).
     Separator,
     /// Any other line.
@@ -289,6 +389,10 @@ impl LineReader {
             Line::StartAnswer(trim(line))
         } else if is_cloze(line) {
             Line::StartCloze(trim(line))
+        } else if is_term(line) {
+            Line::StartTerm(trim(line))
+        } else if is_definition(line) {
+            Line::StartDefinition(trim(line))
         } else if is_separator(line) {
             Line::Separator
         } else {
@@ -307,6 +411,14 @@ fn is_answer(line: &str) -> bool {
 
 fn is_cloze(line: &str) -> bool {
     line.starts_with("C:")
+}
+
+fn is_term(line: &str) -> bool {
+    line.starts_with("T:")
+}
+
+fn is_definition(line: &str) -> bool {
+    line.starts_with("D:")
 }
 
 fn is_separator(line: &str) -> bool {
@@ -343,8 +455,20 @@ impl Parser {
         }
     }
 
-    /// Parse all the cards in the given text.
+    /// Parse all the cards in the given text, silently dropping duplicates.
+    ///
+    /// This is the historical API; serve-mode edit relies on its exact
+    /// dedup behavior. Prefer `parse_with_duplicates` where duplicate
+    /// reporting matters.
     pub fn parse(&self, text: &str) -> Result<Vec<Card>, ParserError> {
+        Ok(self.parse_with_duplicates(text)?.cards)
+    }
+
+    /// Parse all the cards in the given text, reporting duplicates.
+    ///
+    /// Byte-identical cards share a hash; the first occurrence is kept and
+    /// each further occurrence is recorded as a `DuplicateCard`.
+    pub fn parse_with_duplicates(&self, text: &str) -> Result<ParsedFile, ParserError> {
         let mut cards = Vec::new();
         let mut state = State::Start;
         let mut reader = LineReader::new();
@@ -356,14 +480,29 @@ impl Parser {
         }
         self.parse_line(state, Line::Eof, last_line + self.line_offset, &mut cards)?;
 
-        let mut seen = HashSet::new();
-        let mut unique_cards = Vec::new();
+        let mut index_of: HashMap<CardHash, usize> = HashMap::new();
+        let mut unique_cards: Vec<Card> = Vec::new();
+        let mut duplicates: Vec<DuplicateCard> = Vec::new();
         for card in cards {
-            if seen.insert(card.hash()) {
-                unique_cards.push(card);
+            match index_of.get(&card.hash()) {
+                Some(&kept_index) => {
+                    // `kept_index` always points into `unique_cards`.
+                    duplicates.push(DuplicateCard::new(
+                        card.hash(),
+                        CardLocation::of(&unique_cards[kept_index]),
+                        CardLocation::of(&card),
+                    ));
+                }
+                None => {
+                    index_of.insert(card.hash(), unique_cards.len());
+                    unique_cards.push(card);
+                }
             }
         }
-        Ok(unique_cards)
+        Ok(ParsedFile {
+            cards: unique_cards,
+            duplicates,
+        })
     }
 
     fn parse_line(
@@ -388,6 +527,15 @@ impl Parser {
                     text,
                     start_line: line_num,
                 }),
+                Line::StartTerm(text) => Ok(State::ReadingTerm {
+                    term: text,
+                    start_line: line_num,
+                }),
+                Line::StartDefinition(_) => Err(ParserError::new(
+                    "Found definition tag without a term.",
+                    self.file_path.clone(),
+                    line_num,
+                )),
                 Line::Separator => Ok(State::Start),
                 Line::Text(_) => Ok(State::Start),
                 Line::Eof => Ok(State::End),
@@ -408,6 +556,16 @@ impl Parser {
                 }),
                 Line::StartCloze(_) => Err(ParserError::new(
                     "Found cloze tag while reading a question.",
+                    self.file_path.clone(),
+                    line_num,
+                )),
+                Line::StartTerm(_) => Err(ParserError::new(
+                    "Found term tag while reading a question.",
+                    self.file_path.clone(),
+                    line_num,
+                )),
+                Line::StartDefinition(_) => Err(ParserError::new(
+                    "Found definition tag while reading a question.",
                     self.file_path.clone(),
                     line_num,
                 )),
@@ -467,6 +625,26 @@ impl Parser {
                             start_line: line_num,
                         })
                     }
+                    Line::StartTerm(text) => {
+                        // Finalize the previous card.
+                        let card = Card::new(
+                            self.deck_name.clone(),
+                            self.file_path.clone(),
+                            (start_line, line_num),
+                            CardContent::new_basic(question, answer),
+                        );
+                        cards.push(card);
+                        // Start reading a term.
+                        Ok(State::ReadingTerm {
+                            term: text,
+                            start_line: line_num,
+                        })
+                    }
+                    Line::StartDefinition(_) => Err(ParserError::new(
+                        "Found definition tag without a term.",
+                        self.file_path.clone(),
+                        line_num,
+                    )),
                     Line::Separator => {
                         // Finalize the current card.
                         let card = Card::new(
@@ -522,6 +700,20 @@ impl Parser {
                             start_line: line_num,
                         })
                     }
+                    Line::StartTerm(new_text) => {
+                        // Finalize the previous cloze card.
+                        cards.extend(self.parse_cloze_cards(text, start_line, line_num)?);
+                        // Start reading a term.
+                        Ok(State::ReadingTerm {
+                            term: new_text,
+                            start_line: line_num,
+                        })
+                    }
+                    Line::StartDefinition(_) => Err(ParserError::new(
+                        "Found definition tag without a term.",
+                        self.file_path.clone(),
+                        line_num,
+                    )),
                     Line::Separator => {
                         // Finalize the current cloze card.
                         cards.extend(self.parse_cloze_cards(text, start_line, line_num)?);
@@ -539,12 +731,132 @@ impl Parser {
                     }
                 }
             }
+            State::ReadingTerm { term, start_line } => match line {
+                Line::StartQuestion(_) => Err(ParserError::new(
+                    "Found question tag while reading a term without a definition.",
+                    self.file_path.clone(),
+                    line_num,
+                )),
+                Line::StartAnswer(_) => Err(ParserError::new(
+                    "Found answer tag while reading a term. Terms take a definition (D:), not an answer.",
+                    self.file_path.clone(),
+                    line_num,
+                )),
+                Line::StartCloze(_) => Err(ParserError::new(
+                    "Found cloze tag while reading a term without a definition.",
+                    self.file_path.clone(),
+                    line_num,
+                )),
+                Line::StartTerm(_) => Err(ParserError::new(
+                    "New term without a definition.",
+                    self.file_path.clone(),
+                    line_num,
+                )),
+                Line::StartDefinition(text) => Ok(State::ReadingDefinition {
+                    term,
+                    definition: text,
+                    start_line,
+                }),
+                Line::Separator => Err(ParserError::new(
+                    "Found flashcard separator while reading a term without a definition.",
+                    self.file_path.clone(),
+                    line_num,
+                )),
+                Line::Text(text) => Ok(State::ReadingTerm {
+                    term: format!("{term}\n{text}"),
+                    start_line,
+                }),
+                Line::Eof => Err(ParserError::new(
+                    "File ended while reading a term without a definition.",
+                    self.file_path.clone(),
+                    line_num,
+                )),
+            },
+            State::ReadingDefinition {
+                term,
+                definition,
+                start_line,
+            } => match line {
+                Line::StartQuestion(text) => {
+                    self.push_term_cards(term, definition, start_line, line_num, cards);
+                    Ok(State::ReadingQuestion {
+                        question: text,
+                        start_line: line_num,
+                    })
+                }
+                Line::StartAnswer(_) => Err(ParserError::new(
+                    "Found answer tag while reading a definition.",
+                    self.file_path.clone(),
+                    line_num,
+                )),
+                Line::StartCloze(text) => {
+                    self.push_term_cards(term, definition, start_line, line_num, cards);
+                    Ok(State::ReadingCloze {
+                        text,
+                        start_line: line_num,
+                    })
+                }
+                Line::StartTerm(text) => {
+                    self.push_term_cards(term, definition, start_line, line_num, cards);
+                    Ok(State::ReadingTerm {
+                        term: text,
+                        start_line: line_num,
+                    })
+                }
+                Line::StartDefinition(_) => Err(ParserError::new(
+                    "Found definition tag while already reading a definition.",
+                    self.file_path.clone(),
+                    line_num,
+                )),
+                Line::Separator => {
+                    self.push_term_cards(term, definition, start_line, line_num, cards);
+                    Ok(State::Start)
+                }
+                Line::Text(text) => Ok(State::ReadingDefinition {
+                    term,
+                    definition: format!("{definition}\n{text}"),
+                    start_line,
+                }),
+                Line::Eof => {
+                    self.push_term_cards(term, definition, start_line, line_num, cards);
+                    Ok(State::End)
+                }
+            },
             State::End => Err(ParserError::new(
                 "Internal parser error: a line was parsed after the end of the file.",
                 self.file_path.clone(),
                 line_num,
             )),
         }
+    }
+
+    /// Expand a term-definition pair into its two reciprocal basic cards.
+    ///
+    /// The generated cards are ordinary basic cards, so their hashes are
+    /// identical to hand-written `Q: Define: ...` / `Q: Term for: ...`
+    /// equivalents.
+    fn push_term_cards(
+        &self,
+        term: String,
+        definition: String,
+        start_line: usize,
+        end_line: usize,
+        cards: &mut Vec<Card>,
+    ) {
+        let term = term.trim();
+        let definition = definition.trim();
+        cards.push(Card::new(
+            self.deck_name.clone(),
+            self.file_path.clone(),
+            (start_line, end_line),
+            CardContent::new_basic(format!("Define: {term}"), definition),
+        ));
+        cards.push(Card::new(
+            self.deck_name.clone(),
+            self.file_path.clone(),
+            (start_line, end_line),
+            CardContent::new_basic(format!("Term for: {definition}"), term),
+        ));
     }
 
     fn parse_cloze_cards(
@@ -761,6 +1073,7 @@ impl Parser {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
     use std::env::temp_dir;
     use std::fs::create_dir_all;
 
@@ -1104,7 +1417,7 @@ mod tests {
         let deck = parse_deck(&directory);
 
         assert!(deck.is_ok());
-        let cards = deck?;
+        let cards = deck?.cards;
         assert_eq!(cards.len(), 2);
         Ok(())
     }
@@ -1140,12 +1453,48 @@ mod tests {
         std::fs::write(&file2, "Q: foo\nA: bar").expect("Failed to write test file");
         let deck = parse_deck(&directory)?;
 
-        assert_eq!(deck.len(), 1);
+        assert_eq!(deck.cards.len(), 1);
         Ok(())
     }
 
     fn make_test_parser() -> Parser {
         Parser::new("test_deck".to_string(), PathBuf::from("test.md"), 0)
+    }
+
+    #[test]
+    fn test_duplicate_cards_within_file_reported() -> Result<(), ParserError> {
+        let input = "Q: a\nA: b\n\n---\n\nQ: a\nA: b";
+        let parser = make_test_parser();
+        let parsed = parser.parse_with_duplicates(input)?;
+        assert_eq!(parsed.cards.len(), 1);
+        assert_eq!(parsed.duplicates.len(), 1);
+        let dup = &parsed.duplicates[0];
+        assert_eq!(dup.kept().to_string(), "test.md:1");
+        assert_eq!(dup.ignored().to_string(), "test.md:6");
+        Ok(())
+    }
+
+    #[test]
+    fn test_duplicate_card_display_names_both_locations() -> Result<(), ParserError> {
+        let input = "Q: a\nA: b\n\n---\n\nQ: a\nA: b";
+        let parser = make_test_parser();
+        let parsed = parser.parse_with_duplicates(input)?;
+        let message = parsed.duplicates[0].to_string();
+        assert!(message.contains("test.md:1"), "message was: {message}");
+        assert!(message.contains("test.md:6"), "message was: {message}");
+        assert!(message.contains("duplicate card"), "message was: {message}");
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_still_dedups_silently() -> Result<(), ParserError> {
+        // The plain `parse` API (used by serve-mode edit) must keep returning
+        // the deduplicated card list with no behavior change.
+        let input = "Q: a\nA: b\n\n---\n\nQ: a\nA: b";
+        let parser = make_test_parser();
+        let cards = parser.parse(input)?;
+        assert_eq!(cards.len(), 1);
+        Ok(())
     }
 
     fn assert_cloze(cards: &[Card], clean_text: &str, deletions: &[(usize, usize)]) {
@@ -1366,8 +1715,8 @@ A: Genetic material."#,
         let deck = parse_deck(&directory)?;
 
         // Both cards should have the custom deck name "Cell Biology"
-        assert_eq!(deck.len(), 2);
-        for card in &deck {
+        assert_eq!(deck.cards.len(), 2);
+        for card in &deck.cards {
             assert_eq!(card.deck_name(), "Cell Biology");
         }
 
@@ -1419,7 +1768,7 @@ A: Genetic material."#,
         let deck = parse_deck(&directory);
         std::fs::remove_dir_all(&directory).ok();
 
-        let cards = deck?;
+        let cards = deck?.cards;
         assert_eq!(cards.len(), 1);
         assert_eq!(cards[0].range(), (4, 5));
         Ok(())
@@ -1612,5 +1961,146 @@ A: Genetic material."#,
 
         assert_cloze(&cards, "Größe: 10 µm", &[(9, 14)]);
         Ok(())
+    }
+
+    /// FEAT-06: `T:`/`D:` shorthand expands into two reciprocal cards.
+    #[test]
+    fn test_term_definition_expands_to_two_cards() -> Result<(), ParserError> {
+        let input = "T: Monoid\nD: A semigroup with an identity element.";
+        let parser = make_test_parser();
+        let cards = parser.parse(input)?;
+        assert_eq!(cards.len(), 2);
+        assert!(matches!(
+            &cards[0].content(),
+            CardContent::Basic { question, answer }
+                if question == "Define: Monoid"
+                && answer == "A semigroup with an identity element."
+        ));
+        assert!(matches!(
+            &cards[1].content(),
+            CardContent::Basic { question, answer }
+                if question == "Term for: A semigroup with an identity element."
+                && answer == "Monoid"
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn test_term_definition_hashes_match_handwritten_cards() -> Result<(), ParserError> {
+        let shorthand = "T: Monoid\nD: A semigroup with an identity element.";
+        let handwritten = "Q: Define: Monoid\n\
+                           A: A semigroup with an identity element.\n\
+                           \n\
+                           ---\n\
+                           \n\
+                           Q: Term for: A semigroup with an identity element.\n\
+                           A: Monoid";
+        let parser = make_test_parser();
+        let from_shorthand: HashSet<_> = parser.parse(shorthand)?.iter().map(|c| c.hash()).collect();
+        let from_handwritten: HashSet<_> = parser.parse(handwritten)?.iter().map(|c| c.hash()).collect();
+        assert_eq!(from_shorthand.len(), 2);
+        assert_eq!(from_shorthand, from_handwritten);
+        Ok(())
+    }
+
+    #[test]
+    fn test_two_term_pairs_separated() -> Result<(), ParserError> {
+        let input = "T: Monoid\nD: A semigroup with an identity element.\n\n---\n\nT: Magma\nD: A set with a binary operation.";
+        let parser = make_test_parser();
+        let cards = parser.parse(input)?;
+        assert_eq!(cards.len(), 4);
+        Ok(())
+    }
+
+    #[test]
+    fn test_term_pair_followed_directly_by_term_pair() -> Result<(), ParserError> {
+        // A new T: finalizes the previous pair, like Q: after an answer.
+        let input = "T: Monoid\nD: A semigroup with an identity element.\nT: Magma\nD: A set with a binary operation.";
+        let parser = make_test_parser();
+        let cards = parser.parse(input)?;
+        assert_eq!(cards.len(), 4);
+        Ok(())
+    }
+
+    #[test]
+    fn test_definition_without_term_errors() {
+        let input = "D: A semigroup with an identity element.";
+        let parser = make_test_parser();
+        let result = parser.parse(input);
+        assert!(result.is_err());
+        let message = result.err().map(|e| e.to_string()).unwrap_or_default();
+        assert!(message.contains("definition tag without a term"), "message was: {message}");
+    }
+
+    #[test]
+    fn test_term_without_definition_at_eof_errors() {
+        let input = "T: Monoid";
+        let parser = make_test_parser();
+        let result = parser.parse(input);
+        assert!(result.is_err());
+        let message = result.err().map(|e| e.to_string()).unwrap_or_default();
+        assert!(message.contains("without a definition"), "message was: {message}");
+    }
+
+    #[test]
+    fn test_term_then_question_errors() {
+        let input = "T: Monoid\nQ: What is a monoid?";
+        let parser = make_test_parser();
+        assert!(parser.parse(input).is_err());
+    }
+
+    #[test]
+    fn test_term_then_separator_errors() {
+        let input = "T: Monoid\n---";
+        let parser = make_test_parser();
+        assert!(parser.parse(input).is_err());
+    }
+
+    #[test]
+    fn test_multiline_term_and_definition() -> Result<(), ParserError> {
+        let input = "T: Monoid\nhomomorphism\nD: A map between monoids\nthat preserves the operation and identity.";
+        let parser = make_test_parser();
+        let cards = parser.parse(input)?;
+        assert_eq!(cards.len(), 2);
+        assert!(matches!(
+            &cards[0].content(),
+            CardContent::Basic { question, .. }
+                if question == "Define: Monoid\nhomomorphism"
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn test_term_pair_after_basic_card() -> Result<(), ParserError> {
+        let input = "Q: What is Rust?\nA: A systems programming language.\nT: Monoid\nD: A semigroup with an identity element.";
+        let parser = make_test_parser();
+        let cards = parser.parse(input)?;
+        assert_eq!(cards.len(), 3);
+        Ok(())
+    }
+
+    #[test]
+    fn test_term_pair_after_cloze_card() -> Result<(), ParserError> {
+        let input = "C: An [agonist] activates a receptor.\nT: Monoid\nD: A semigroup with an identity element.";
+        let parser = make_test_parser();
+        let cards = parser.parse(input)?;
+        assert_eq!(cards.len(), 3);
+        Ok(())
+    }
+
+    #[test]
+    fn test_term_pair_followed_by_question() -> Result<(), ParserError> {
+        let input = "T: Monoid\nD: A semigroup with an identity element.\nQ: What is Rust?\nA: A language.";
+        let parser = make_test_parser();
+        let cards = parser.parse(input)?;
+        assert_eq!(cards.len(), 3);
+        Ok(())
+    }
+
+    #[test]
+    fn test_definition_inside_definition_errors() {
+        let input = "T: Monoid\nD: first\nD: second";
+        let parser = make_test_parser();
+        assert!(parser.parse(input).is_err());
     }
 }

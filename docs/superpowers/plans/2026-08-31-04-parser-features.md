@@ -78,7 +78,7 @@ Verified facts about the current code that this plan builds on (line numbers che
   - `pub fn Parser::parse_with_duplicates(&self, text: &str) -> Result<ParsedFile, ParserError>`.
   - `Parser::parse` keeps its exact current signature and observable behavior (returns deduped `Vec<Card>`).
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Add to the `tests` module in `src/parser.rs` (alongside the existing tests; `use super::*;` is already in scope there):
 
@@ -120,12 +120,12 @@ fn test_parse_still_dedups_silently() -> Result<(), ParserError> {
 }
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `cargo test test_duplicate_card`
 Expected: compile error — `parse_with_duplicates` does not exist. (A compile failure of the test target counts as the failing state.)
 
-- [ ] **Step 3: Implement the types and `parse_with_duplicates`**
+- [x] **Step 3: Implement the types and `parse_with_duplicates`**
 
 In `src/parser.rs`, add to the imports at the top (keeping the existing ones):
 
@@ -256,12 +256,12 @@ Replace the body of `Parser::parse` (currently `:262-281`) and add `parse_with_d
 
 The old `HashSet`-based dedup block inside `parse` is deleted. `HashSet` is no longer used by production code in this file, so move the import: delete `use std::collections::HashSet;` from the top of `src/parser.rs` and add `use std::collections::HashSet;` inside the `#[cfg(test)] mod tests` block (Task 4's hash-equivalence test uses it from there).
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [x] **Step 4: Run the tests to verify they pass**
 
 Run: `cargo test test_duplicate_card test_parse_still_dedups_silently`
 Expected: 3 passed. Then run `cargo test` — the whole suite must pass (no existing caller of `parse` changes behavior).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/parser.rs
@@ -286,7 +286,7 @@ git commit -m "feat: report within-file duplicate cards from the parser (BUG-12 
   - `pub fn parse_deck(directory: &PathBuf) -> Fallible<ParsedDeck>` (signature change).
   - `Collection` gains `pub duplicates: Vec<DuplicateCard>` (Task 3 reads it).
 
-- [ ] **Step 1: Write the failing regression test**
+- [x] **Step 1: Write the failing regression test**
 
 BUG-12's spec text says duplicates abort drill startup via `Cache::insert` (`cache.rs:45-53`) propagated at `server.rs:164`. On current master that abort is actually unreachable, because `parse_deck` already dedups silently (`parser.rs:141-144`) — see "Spec discrepancies" below. The regression test therefore pins the full required behavior: two byte-identical cards load without error (guarding the no-abort property against any future removal of the dedup), drilling material contains exactly one copy, and — the part that fails today — the duplicate is *reported* with both locations instead of vanishing.
 
@@ -339,12 +339,12 @@ mod tests {
 
 Note: walkdir order is not guaranteed, so the test asserts on the *pair* of locations, not on which copy was kept.
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run: `cargo test test_duplicate_cards_across_files`
 Expected: compile error — `Collection` has no field `duplicates`.
 
-- [ ] **Step 3: Implement `ParsedDeck` and thread duplicates through**
+- [x] **Step 3: Implement `ParsedDeck` and thread duplicates through**
 
 In `src/parser.rs`, add next to `ParsedFile`:
 
@@ -502,12 +502,12 @@ In `src/cmd/export.rs` test `test_full_export`, change the `parse_deck` call (`:
 
 (only the `parse_deck` line's binding usage changes: iterate `deck.cards` instead of `deck`).
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [x] **Step 4: Run the tests to verify they pass**
 
 Run: `cargo test test_duplicate_cards_across_files test_collection_without_duplicates`
 Expected: 2 passed. Then `cargo test` — full suite green (compiler will point out any missed `parse_deck` caller; fix by using `.cards`).
 
-- [ ] **Step 5: Update CHANGELOG.xml for BUG-12**
+- [x] **Step 5: Update CHANGELOG.xml for BUG-12**
 
 In `CHANGELOG.xml`, inside `<unreleased><fixed>`, add as the first `<change>` (format matches the existing entries; validate the shape against `CHANGELOG.xsd`: `<change>` has text content and an optional `author` attribute):
 
@@ -517,7 +517,7 @@ In `CHANGELOG.xml`, inside `<unreleased><fixed>`, add as the first `<change>` (f
             </change>
 ```
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/parser.rs src/collection.rs src/cmd/drill/server.rs src/cmd/export.rs CHANGELOG.xml
@@ -537,7 +537,7 @@ git commit -m "fix: warn (with both locations) instead of silently dropping dupl
 - Consumes: `Collection::duplicates` (Task 2), `DuplicateCard: Display` (Task 1).
 - Produces: `check_collection` keeps its signature `pub fn check_collection(directory: Option<String>) -> Fallible<()>`; new helper `fn duplicate_report(duplicates: &[DuplicateCard]) -> Vec<String>` (module-private, unit-testable).
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Add to the `tests` module in `src/cmd/check.rs`:
 
@@ -574,12 +574,12 @@ Add to the `tests` module in `src/cmd/check.rs`:
     }
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `cargo test test_check_reports_duplicates test_duplicate_report_empty`
 Expected: compile error — `duplicate_report` does not exist.
 
-- [ ] **Step 3: Implement the duplicate report in `check`**
+- [x] **Step 3: Implement the duplicate report in `check`**
 
 Replace the production part of `src/cmd/check.rs` with:
 
@@ -608,12 +608,12 @@ fn duplicate_report(duplicates: &[DuplicateCard]) -> Vec<String> {
 
 (The existing `test_non_existent_directory` and `test_directory` tests stay unchanged.)
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [x] **Step 4: Run the tests to verify they pass**
 
 Run: `cargo test --lib check`
 Expected: all `check` tests pass, including the two pre-existing ones. Then `cargo test` — full suite green.
 
-- [ ] **Step 5: Update CHANGELOG.xml for FEAT-07**
+- [x] **Step 5: Update CHANGELOG.xml for FEAT-07**
 
 In `CHANGELOG.xml`, inside `<unreleased><added>`, add as the first `<change>`:
 
@@ -630,7 +630,7 @@ If the collection contains byte-identical duplicate cards, `check` prints a
 warning for each one, naming both file:line locations.
 ```
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/cmd/check.rs CHANGELOG.xml README.md
@@ -651,7 +651,7 @@ git commit -m "feat: list duplicate cards with both locations in hashcards check
   - `State::ReadingTerm { term: String, start_line: usize }` and `State::ReadingDefinition { term: String, definition: String, start_line: usize }` variants.
   - `fn Parser::push_term_cards(&self, term: String, definition: String, start_line: usize, end_line: usize, cards: &mut Vec<Card>)` — pushes the "Define:" card then the "Term for:" card.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Add to the `tests` module in `src/parser.rs`:
 
@@ -717,12 +717,12 @@ fn test_term_pair_followed_directly_by_term_pair() -> Result<(), ParserError> {
 
 (`HashSet` is available in the tests module via the `use std::collections::HashSet;` import that Task 1 moved there.)
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `cargo test test_term_definition test_two_term_pairs test_term_pair_followed`
 Expected: FAIL — `T:`/`D:` lines are treated as plain `Text`, so `parse` returns 0 cards (`assert_eq!(cards.len(), 2)` fails) or errors.
 
-- [ ] **Step 3: Implement the shorthand**
+- [x] **Step 3: Implement the shorthand**
 
 In `src/parser.rs`:
 
@@ -975,12 +975,12 @@ Add the two new state arms before `State::End`:
             },
 ```
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [x] **Step 4: Run the tests to verify they pass**
 
 Run: `cargo test test_term_definition test_two_term_pairs test_term_pair_followed`
 Expected: 4 passed. Then `cargo test` — full suite green (the compiler enforces that every `match` on `Line` covers the new variants).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/parser.rs
@@ -1000,7 +1000,7 @@ git commit -m "feat: T:/D: term-definition shorthand expands into two reciprocal
 - Consumes: everything from Task 4 (`Line::StartTerm`, `State::ReadingTerm`, `push_term_cards`, and the error messages exactly as written there).
 - Produces: nothing new — this task pins error behavior with tests and ships the user-facing docs.
 
-- [ ] **Step 1: Write the failing (or newly pinning) tests**
+- [x] **Step 1: Write the failing (or newly pinning) tests**
 
 Add to the `tests` module in `src/parser.rs`. These test the error arms written in Task 4; if any fail, the Task 4 arms are wrong — fix the arms, not the tests.
 
@@ -1090,12 +1090,12 @@ fn test_definition_inside_definition_errors() {
 
 (Tests may use `unwrap_or_default`/`unwrap` freely; the no-`unwrap()` rule binds production code only.)
 
-- [ ] **Step 2: Run the tests**
+- [x] **Step 2: Run the tests**
 
 Run: `cargo test test_definition test_term_`
 Expected: all pass if Task 4's arms are correct; any failure means a Task 4 arm diverges from this pinned behavior — fix the arm in `parse_line` and re-run until green.
 
-- [ ] **Step 3: Document the syntax in README.md**
+- [x] **Step 3: Document the syntax in README.md**
 
 Insert between the end of the "Cloze Cards" section (after the multi-line cloze example, currently ending around line 264) and `### Separators` (line 266). (The block below is fenced with four backticks because the inserted README text itself contains three-backtick fences.)
 
@@ -1132,7 +1132,7 @@ just like `Q:` and `A:`; to use such text literally inside a card, don't
 start a line with it.
 ````
 
-- [ ] **Step 4: Update CHANGELOG.xml for FEAT-06**
+- [x] **Step 4: Update CHANGELOG.xml for FEAT-06**
 
 In `CHANGELOG.xml`, inside `<unreleased><added>`, add:
 
@@ -1142,12 +1142,12 @@ In `CHANGELOG.xml`, inside `<unreleased><added>`, add:
             </change>
 ```
 
-- [ ] **Step 5: Run the full suite**
+- [x] **Step 5: Run the full suite**
 
 Run: `cargo test`
 Expected: all tests pass.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/parser.rs README.md CHANGELOG.xml

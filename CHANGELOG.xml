@@ -20,6 +20,9 @@
                 Pressing Shutdown before the drill session is finished now shows a message explaining that the session is still in progress, instead of silently doing nothing.
             </change>
             <change author="claude">
+                Byte-identical duplicate cards no longer disappear silently: collection loading keeps one copy and prints a warning naming both file locations, and drilling proceeds normally. Duplicates can no longer abort drill startup.
+            </change>
+            <change author="claude">
                 The collection browse page now reports database errors instead of silently displaying a bookmark count of zero.
             </change>
             <change author="claude">
@@ -75,6 +78,9 @@
             <change author="claude">
                 Flash messages: actions in the drill and serve web interfaces now show one-shot success/error banners (dismissible) instead of failing or succeeding silently. The message travels as query parameters across the post-redirect.
             </change>
+            <change author="claude">
+                `hashcards check` now lists byte-identical duplicate cards, naming both file:line locations for each duplicate.
+            </change>
             <change author="mstoeck3">
                 Each grade is now written to the database as it happens, so a session interrupted by a dropped connection or a closed tab keeps the progress made up to that point. Previously an interrupted session was lost entirely.
             </change>
@@ -116,6 +122,9 @@
             </change>
             <change author="mstoeck3">
                 Added HedgeDoc source support in serve mode: publicly accessible HedgeDoc notes can be used as collections. Sources are managed via a web interface at `/hedgedoc` and persisted to the TOML config file. Syncing follows the same polling interval as git.
+            </change>
+            <change author="claude">
+                Term-definition shorthand: a `T:`/`D:` line pair expands at parse time into two reciprocal front-back cards ("Define: X" and "Term for: Y"). The generated cards hash identically to hand-written equivalents, so review history is preserved when converting. Note: lines beginning with `T:` or `D:` are now card tags, like `Q:` and `A:`.
             </change>
         </added>
         <changed>

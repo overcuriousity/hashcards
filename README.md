@@ -160,6 +160,9 @@ Check the integrity of a collection.
 $ hashcards check [DIRECTORY]
 ```
 
+If the collection contains byte-identical duplicate cards, `check` prints a
+warning for each one, naming both file:line locations.
+
 ### `orphans`
 
 Manage orphan cards (cards that exist in the database, but not in the
@@ -275,6 +278,37 @@ exact rules:
   deletion.
 - Nested brackets (`[[a]]`) and deletions left open at the end of a line
   are parse errors.
+
+### Term-Definition Cards
+
+Term-definition pairs start with the `T:` and `D:` tags:
+
+```
+T: Monoid
+D: A semigroup with an identity element.
+```
+
+This is shorthand: at parse time, the pair expands into two ordinary
+front-back cards, one in each direction:
+
+```
+Q: Define: Monoid
+A: A semigroup with an identity element.
+
+---
+
+Q: Term for: A semigroup with an identity element.
+A: Monoid
+```
+
+The generated cards are indistinguishable from hand-written ones — same
+content, same hashes — so converting between the shorthand and the explicit
+form preserves review history. Like questions and answers, terms and
+definitions can span multiple lines.
+
+Note that lines starting with `T:` or `D:` are now card tags everywhere,
+just like `Q:` and `A:`; to use such text literally inside a card, don't
+start a line with it.
 
 ### Separators
 

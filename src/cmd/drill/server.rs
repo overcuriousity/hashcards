@@ -109,7 +109,14 @@ pub async fn start_server(config: ServerConfig) -> Fallible<()> {
         db,
         cards,
         macros,
+        duplicates,
     } = Collection::new(config.directory)?;
+
+    // BUG-12: byte-identical cards are deduplicated at load time. Warn so
+    // the user can clean them up; drilling proceeds with one copy.
+    for duplicate in &duplicates {
+        eprintln!("Warning: {duplicate}. Drilling with one copy.");
+    }
 
     let today: Date = config.session_started_at.date();
 

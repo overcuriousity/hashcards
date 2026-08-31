@@ -44,7 +44,7 @@ fn edit_get_inner(state: &AppState, slug: &str, hash_hex: &str) -> Fallible<Stri
 
     let hash = CardHash::from_hex(hash_hex)?;
     let coll_dir = rc.coll_dir.canonicalize()?;
-    let cards = parse_deck(&coll_dir)?;
+    let cards = parse_deck(&coll_dir)?.cards;
     let card = find_card_by_hash(&cards, hash)?;
 
     let file_path = card.file_path().clone();
@@ -146,7 +146,7 @@ fn edit_post_inner(state: &AppState, slug: &str, hash_hex: &str, form: EditForm)
 
     let hash = CardHash::from_hex(hash_hex)?;
     let coll_dir = rc.coll_dir.canonicalize()?;
-    let cards = parse_deck(&coll_dir)?;
+    let cards = parse_deck(&coll_dir)?.cards;
     let card = find_card_by_hash(&cards, hash)?;
 
     let file_path = card.file_path().clone();
