@@ -81,8 +81,8 @@ enum Command {
     Stats {
         /// Path to the collection directory. By default, the current working directory is used.
         directory: Option<String>,
-        /// Which output format to use.
-        #[arg(long, default_value_t = StatsFormat::Json)]
+        /// Which output format to use. "html" opens the stats page in the browser.
+        #[arg(long, default_value_t = StatsFormat::Html)]
         format: StatsFormat,
     },
     /// Commands relating to orphan cards.
@@ -268,11 +268,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_stats_default_format_is_json() {
+    fn test_stats_default_format_is_html() {
         let cmd = Command::try_parse_from(["hashcards", "stats"]).unwrap();
         match cmd {
             Command::Stats { format, .. } => {
-                assert!(matches!(format, StatsFormat::Json));
+                assert!(matches!(format, StatsFormat::Html));
             }
             _ => panic!("expected the stats command"),
         }

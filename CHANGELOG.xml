@@ -152,6 +152,9 @@
             </change>
         </security>
         <added>
+            <change author="mstoeck3">
+                Stats page: due forecast for the next 30 days, reviews per day over the last 90 days, grade distribution, retention estimate, and per-deck due/total counts. Available at `/collection/{slug}/stats` in serve mode and `/stats` while drilling; `hashcards stats` now renders the page to a file and opens it in the browser, replacing the unimplemented `--format html` stub. (FEAT-02)
+            </change>
             <change author="claude">
                 The drill progress bar now has a numeric counter: "7 of 20 (+3 repeats)". The bar advances when a card is graded for the first time; cards re-queued by Forgot/Hard are tallied in the repeats counter instead of silently stalling the bar. Undo rolls the counter back. (FEAT-08)
             </change>

@@ -12,15 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::env::temp_dir;
 use std::fmt::Display;
 use std::fmt::Formatter;
+use std::fs::write;
 
 use clap::ValueEnum;
 use serde::Serialize;
 
+use crate::cmd::stats_page::gather_stats;
+use crate::cmd::stats_page::render_stats_page;
 use crate::collection::Collection;
 use crate::error::Fallible;
-use crate::error::fail;
 use crate::types::date::Date;
 
 #[derive(ValueEnum, Clone)]
@@ -41,18 +44,42 @@ impl Display for StatsFormat {
 }
 
 pub fn print_stats(directory: Option<String>, format: StatsFormat) -> Fallible<()> {
-    let stats = get_stats(directory)?;
-    // Print.
     match format {
         StatsFormat::Html => {
-            return fail("HTML output is not implemented yet. Use --format json.");
+            let html = stats_html(directory)?;
+            let path = temp_dir().join("hashcards-stats.html");
+            write(&path, html)?;
+            println!("Stats page written to {}", path.display());
+            if let Err(e) = open::that(&path) {
+                eprintln!("Could not open the browser automatically: {e}");
+            }
         }
         StatsFormat::Json => {
+            let stats = get_stats(directory)?;
             let stats_json = serde_json::to_string_pretty(&stats)?;
             println!("{}", stats_json);
         }
     }
     Ok(())
+}
+
+/// Render the stats page as a standalone HTML document. The stylesheet is
+/// inlined so the file works when opened directly from disk.
+fn stats_html(directory: Option<String>) -> Fallible<String> {
+    let coll = Collection::new(directory)?;
+    let name = coll
+        .directory
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("Collection")
+        .to_string();
+    let stats = gather_stats(&coll.db, &coll.cards, Date::today())?;
+    let body = render_stats_page(&name, &stats, None);
+    Ok(format!(
+        "<!DOCTYPE html>\n<html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>{name} \u{2014} Stats</title><style>{css}</style></head><body>{body}</body></html>",
+        css = include_str!("drill/style.css"),
+        body = body.into_string(),
+    ))
 }
 
 #[derive(Serialize)]
@@ -112,11 +139,17 @@ mod tests {
         Ok(())
     }
 
+    /// FEAT-02: the html format renders a standalone stats page.
     #[test]
-    fn test_print_stats_html_is_an_error() -> Fallible<()> {
+    fn test_stats_html_is_standalone_page() -> Fallible<()> {
         let directory = create_tmp_copy_of_test_directory()?;
-        let result = print_stats(Some(directory), StatsFormat::Html);
-        assert!(result.is_err());
+        let html = stats_html(Some(directory))?;
+        assert!(html.starts_with("<!DOCTYPE html>"));
+        assert!(html.contains("<style>"), "stylesheet must be inlined");
+        assert!(html.contains("Due forecast"));
+        assert!(html.contains("Reviews per day"));
+        assert!(html.contains("Grade distribution"));
+        assert!(html.contains("Retention"));
         Ok(())
     }
 }
