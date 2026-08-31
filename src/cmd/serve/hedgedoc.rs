@@ -296,10 +296,49 @@ pub fn resolved_collection(source_uri: &str, data_dir: &Path) -> ResolvedCollect
     }
 }
 
+/// Short, stable disambiguator derived from the exact note ID (blake3, the
+/// same hash the rest of the codebase uses for content addressing). Two note
+/// IDs that slugify identically (e.g. `abc+1` and `abc-1`) stay distinct.
+fn note_id_disambiguator(note_id: &str) -> String {
+    blake3::hash(note_id.as_bytes()).to_hex()[..8].to_string()
+}
+
 fn note_file_name(url: &str) -> String {
+    let note_id = note_id_from_url(url).unwrap_or_else(|| url.to_string());
+    let stem = slugify(&note_id);
+    let stem = if stem.is_empty() {
+        "note"
+    } else {
+        stem.as_str()
+    };
+    format!("{}-{}.md", stem, note_id_disambiguator(&note_id))
+}
+
+/// Delete the old note file layout (`{slug}.md`, without the hash suffix) if
+/// it differs from the current file name, so servers upgraded across the
+/// BUG-41 filename change don't parse the same note twice. Best-effort:
+/// failure is logged, never fatal.
+fn remove_legacy_note_file(coll_dir: &Path, url: &str, current_file_name: &str) {
     let note_id = note_id_from_url(url).unwrap_or_else(|| "note".to_string());
     let stem = slugify(&note_id);
-    format!("{}.md", if stem.is_empty() { "note" } else { &stem })
+    let stem = if stem.is_empty() {
+        "note"
+    } else {
+        stem.as_str()
+    };
+    let legacy = format!("{stem}.md");
+    if legacy == current_file_name {
+        return;
+    }
+    let legacy_path = coll_dir.join(&legacy);
+    if legacy_path.exists() {
+        if let Err(e) = std::fs::remove_file(&legacy_path) {
+            log::warn!(
+                "Failed to remove legacy HedgeDoc note file {}: {e}",
+                legacy_path.display()
+            );
+        }
+    }
 }
 
 /// Fetch a HedgeDoc document, write it to `{rc.coll_dir}/{note}.md`, and
@@ -331,6 +370,7 @@ pub async fn sync_source(url: &str, rc: &ResolvedCollection) -> Fallible<(String
         let _ = tokio::fs::remove_file(&tmp_path).await;
         return Err(e.into());
     }
+    remove_legacy_note_file(&rc.coll_dir, url, &file_name);
     Ok((deck_name, file_name))
 }
 
@@ -753,5 +793,38 @@ mod tests {
             "https://notes.example.com/abc"
         );
         Ok(())
+    }
+
+    /// Regression test (BUG-41): `abc+1` and `abc-1` both slugify to `abc-1`,
+    /// so without a disambiguating hash their note files collide.
+    #[test]
+    fn note_file_name_distinguishes_colliding_note_ids() {
+        let a = note_file_name("https://notes.example.com/abc+1");
+        let b = note_file_name("https://notes.example.com/abc-1");
+        assert_ne!(a, b);
+        assert!(a.ends_with(".md"));
+        assert!(b.ends_with(".md"));
+    }
+
+    #[test]
+    fn note_file_name_is_stable_for_the_same_url() {
+        assert_eq!(
+            note_file_name("https://notes.example.com/abc123"),
+            note_file_name("https://notes.example.com/abc123"),
+        );
+    }
+
+    /// After the filename change, the pre-existing un-hashed file must be
+    /// removed on sync or the collection parses the same note twice.
+    #[test]
+    fn remove_legacy_note_file_deletes_old_unhashed_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let url = "https://notes.example.com/abc123";
+        let current = note_file_name(url);
+        std::fs::write(dir.path().join("abc123.md"), "old").unwrap();
+        std::fs::write(dir.path().join(&current), "new").unwrap();
+        remove_legacy_note_file(dir.path(), url, &current);
+        assert!(!dir.path().join("abc123.md").exists());
+        assert!(dir.path().join(&current).exists());
     }
 }
