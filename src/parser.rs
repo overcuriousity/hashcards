@@ -2009,4 +2009,86 @@ A: Genetic material."#,
         assert_eq!(cards.len(), 4);
         Ok(())
     }
+
+    #[test]
+    fn test_definition_without_term_errors() {
+        let input = "D: A semigroup with an identity element.";
+        let parser = make_test_parser();
+        let result = parser.parse(input);
+        assert!(result.is_err());
+        let message = result.err().map(|e| e.to_string()).unwrap_or_default();
+        assert!(message.contains("definition tag without a term"), "message was: {message}");
+    }
+
+    #[test]
+    fn test_term_without_definition_at_eof_errors() {
+        let input = "T: Monoid";
+        let parser = make_test_parser();
+        let result = parser.parse(input);
+        assert!(result.is_err());
+        let message = result.err().map(|e| e.to_string()).unwrap_or_default();
+        assert!(message.contains("without a definition"), "message was: {message}");
+    }
+
+    #[test]
+    fn test_term_then_question_errors() {
+        let input = "T: Monoid\nQ: What is a monoid?";
+        let parser = make_test_parser();
+        assert!(parser.parse(input).is_err());
+    }
+
+    #[test]
+    fn test_term_then_separator_errors() {
+        let input = "T: Monoid\n---";
+        let parser = make_test_parser();
+        assert!(parser.parse(input).is_err());
+    }
+
+    #[test]
+    fn test_multiline_term_and_definition() -> Result<(), ParserError> {
+        let input = "T: Monoid\nhomomorphism\nD: A map between monoids\nthat preserves the operation and identity.";
+        let parser = make_test_parser();
+        let cards = parser.parse(input)?;
+        assert_eq!(cards.len(), 2);
+        assert!(matches!(
+            &cards[0].content(),
+            CardContent::Basic { question, .. }
+                if question == "Define: Monoid\nhomomorphism"
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn test_term_pair_after_basic_card() -> Result<(), ParserError> {
+        let input = "Q: What is Rust?\nA: A systems programming language.\nT: Monoid\nD: A semigroup with an identity element.";
+        let parser = make_test_parser();
+        let cards = parser.parse(input)?;
+        assert_eq!(cards.len(), 3);
+        Ok(())
+    }
+
+    #[test]
+    fn test_term_pair_after_cloze_card() -> Result<(), ParserError> {
+        let input = "C: An [agonist] activates a receptor.\nT: Monoid\nD: A semigroup with an identity element.";
+        let parser = make_test_parser();
+        let cards = parser.parse(input)?;
+        assert_eq!(cards.len(), 3);
+        Ok(())
+    }
+
+    #[test]
+    fn test_term_pair_followed_by_question() -> Result<(), ParserError> {
+        let input = "T: Monoid\nD: A semigroup with an identity element.\nQ: What is Rust?\nA: A language.";
+        let parser = make_test_parser();
+        let cards = parser.parse(input)?;
+        assert_eq!(cards.len(), 3);
+        Ok(())
+    }
+
+    #[test]
+    fn test_definition_inside_definition_errors() {
+        let input = "T: Monoid\nD: first\nD: second";
+        let parser = make_test_parser();
+        assert!(parser.parse(input).is_err());
+    }
 }

@@ -81,6 +81,9 @@
             <change author="mstoeck3">
                 Added HedgeDoc source support in serve mode: publicly accessible HedgeDoc notes can be used as collections. Sources are managed via a web interface at `/hedgedoc` and persisted to the TOML config file. Syncing follows the same polling interval as git.
             </change>
+            <change author="claude">
+                Term-definition shorthand: a `T:`/`D:` line pair expands at parse time into two reciprocal front-back cards ("Define: X" and "Term for: Y"). The generated cards hash identically to hand-written equivalents, so review history is preserved when converting. Note: lines beginning with `T:` or `D:` are now card tags, like `Q:` and `A:`.
+            </change>
         </added>
         <changed>
             <change author="eudoxia0">
