@@ -1,7 +1,8 @@
 use std::path::Path;
 use std::sync::Arc;
-use parking_lot::Mutex;
 use std::time::Duration;
+
+use parking_lot::Mutex;
 
 use tokio::process::Command;
 use tokio::sync::RwLock;
