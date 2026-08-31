@@ -426,6 +426,9 @@ fn collection_post_inner(state: &AppState, slug: &str, action: Action) -> Fallib
         ActionResult::ContinueWithFlash(flash) => {
             Ok(flash.redirect(&format!("/collection/{slug}")))
         }
+        ActionResult::Ignored(reason) => {
+            Ok(Flash::error(reason).redirect(&format!("/collection/{slug}")))
+        }
         _ => Ok(Redirect::to(&format!("/collection/{slug}"))),
     }
 }

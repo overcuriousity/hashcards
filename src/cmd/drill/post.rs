@@ -75,13 +75,16 @@ pub enum ActionResult {
     Shutdown,
     /// The user requested to go back to the collection list (serve mode).
     Home,
+    /// The action was a harmless no-op (stale page, double submit); the
+    /// message is shown to the user as a flash.
+    Ignored(String),
 }
 
 pub async fn post_handler(
     State(state): State<ServerState>,
     Form(form): Form<FormData>,
 ) -> Redirect {
-    match action_handler(state, form.action).await {
+    match action_handler(state, form).await {
         Ok(Some(flash)) => flash.redirect("/"),
         Ok(None) => Redirect::to("/"),
         Err(e) => {
@@ -91,9 +94,9 @@ pub async fn post_handler(
     }
 }
 
-async fn action_handler(state: ServerState, action: Action) -> Fallible<Option<Flash>> {
+async fn action_handler(state: ServerState, form: FormData) -> Fallible<Option<Flash>> {
     let mut mutable = state.mutable.lock().unwrap();
-    let result = handle_action(&mut mutable, state.session_started_at, action)?;
+    let result = handle_action(&mut mutable, state.session_started_at, form.action)?;
     match result {
         ActionResult::Shutdown => {
             // Release the lock before sending shutdown signal.
@@ -105,7 +108,8 @@ async fn action_handler(state: ServerState, action: Action) -> Fallible<Option<F
             Ok(None)
         }
         ActionResult::ContinueWithFlash(flash) => Ok(Some(flash)),
-        _ => Ok(None),
+        ActionResult::Ignored(reason) => Ok(Some(Flash::error(reason))),
+        ActionResult::Continue | ActionResult::SessionFinished | ActionResult::Home => Ok(None),
     }
 }
 
@@ -185,65 +189,71 @@ pub fn handle_action(
             Ok(ActionResult::Continue)
         }
         Action::Forgot | Action::Hard | Action::Good | Action::Easy => {
-            if mutable.reveal {
-                let head: Card = match mutable.cards.first() {
-                    Some(card) => card.clone(),
-                    None => return Ok(ActionResult::Continue),
-                };
-                let reviewed_at: Timestamp = Timestamp::now();
-                let duration_ms: Option<i64> = mutable.card_shown_at.map(|shown_at| {
-                    (reviewed_at.into_inner() - shown_at.into_inner())
-                        .num_milliseconds()
-                        .max(0)
-                });
-                let hash: CardHash = head.hash();
-                let grade: Grade = action.grade();
-                let prev_performance: Performance = mutable.cache.get(hash)?;
-                let performance: ReviewedPerformance =
-                    update_performance(prev_performance, grade, reviewed_at);
-                let record = ReviewRecord {
-                    card_hash: hash,
-                    reviewed_at,
-                    grade,
-                    stability: performance.stability,
-                    difficulty: performance.difficulty,
-                    interval_raw: performance.interval_raw,
-                    interval_days: performance.interval_days,
-                    due_date: performance.due_date,
-                    duration_ms,
-                };
-                let new_performance = Performance::Reviewed(performance);
-                // Write review and card performance atomically, and commit
-                // BEFORE mutating any in-memory state. If this fails, the
-                // queue, cache, undo stack, and reveal state are untouched
-                // and the grade can simply be retried.
-                let review_id = mutable.db.insert_review_and_update_performance(
-                    mutable.session_id,
-                    &record,
-                    new_performance,
-                )?;
-                // The transaction committed; it is now safe to mutate memory.
-                mutable.cache.update(hash, new_performance)?;
-                mutable.card_shown_at = None;
-                let card: Card = mutable.cards.remove(0);
-                let review = Review {
-                    card: card.clone(),
-                    review_id,
-                    grade: record.grade,
-                    duration_ms: record.duration_ms,
-                    prev_performance,
-                };
-                if review.should_repeat() {
-                    mutable.cards.push(card);
-                }
-                mutable.reviews.push(review);
-                mutable.reveal = false;
+            if !mutable.reveal {
+                // A grade arrived without a prior reveal: stale page or
+                // duplicate submission. Ignore it (BUG-15).
+                log::debug!("ignoring grade action: no card is revealed");
+                return Ok(ActionResult::Ignored(
+                    "That grade was ignored because no answer was revealed. The current card is shown below.".to_string(),
+                ));
+            }
+            let head: Card = match mutable.cards.first() {
+                Some(card) => card.clone(),
+                None => return Ok(ActionResult::Continue),
+            };
+            let reviewed_at: Timestamp = Timestamp::now();
+            let duration_ms: Option<i64> = mutable.card_shown_at.map(|shown_at| {
+                (reviewed_at.into_inner() - shown_at.into_inner())
+                    .num_milliseconds()
+                    .max(0)
+            });
+            let hash: CardHash = head.hash();
+            let grade: Grade = action.grade();
+            let prev_performance: Performance = mutable.cache.get(hash)?;
+            let performance: ReviewedPerformance =
+                update_performance(prev_performance, grade, reviewed_at);
+            let record = ReviewRecord {
+                card_hash: hash,
+                reviewed_at,
+                grade,
+                stability: performance.stability,
+                difficulty: performance.difficulty,
+                interval_raw: performance.interval_raw,
+                interval_days: performance.interval_days,
+                due_date: performance.due_date,
+                duration_ms,
+            };
+            let new_performance = Performance::Reviewed(performance);
+            // Write review and card performance atomically, and commit
+            // BEFORE mutating any in-memory state. If this fails, the
+            // queue, cache, undo stack, and reveal state are untouched
+            // and the grade can simply be retried.
+            let review_id = mutable.db.insert_review_and_update_performance(
+                mutable.session_id,
+                &record,
+                new_performance,
+            )?;
+            // The transaction committed; it is now safe to mutate memory.
+            mutable.cache.update(hash, new_performance)?;
+            mutable.card_shown_at = None;
+            let card: Card = mutable.cards.remove(0);
+            let review = Review {
+                card: card.clone(),
+                review_id,
+                grade: record.grade,
+                duration_ms: record.duration_ms,
+                prev_performance,
+            };
+            if review.should_repeat() {
+                mutable.cards.push(card);
+            }
+            mutable.reviews.push(review);
+            mutable.reveal = false;
 
-                // Was this the last card?
-                if mutable.cards.is_empty() {
-                    finish_session(mutable, session_started_at)?;
-                    return Ok(ActionResult::SessionFinished);
-                }
+            // Was this the last card?
+            if mutable.cards.is_empty() {
+                finish_session(mutable, session_started_at)?;
+                return Ok(ActionResult::SessionFinished);
             }
             Ok(ActionResult::Continue)
         }
@@ -449,6 +459,27 @@ mod tests {
         );
         assert_eq!(mutable.reviews.len(), 1, "undo stack must be unchanged");
         assert!(mutable.finished_at.is_none());
+    }
+
+    #[test]
+    fn test_grade_without_reveal_is_ignored_with_flash() {
+        let card = make_card("Q1");
+        let mut mutable = make_state_with_cards(vec![card.clone()]);
+        // No Reveal has happened; a grade POST (e.g. from a stale page) arrives.
+        let result = handle_action(&mut mutable, Timestamp::now(), Action::Good).unwrap();
+        assert!(
+            matches!(result, ActionResult::Ignored(_)),
+            "a grade without a prior reveal must be reported as ignored"
+        );
+        assert_eq!(mutable.cards.len(), 1);
+        assert_eq!(mutable.cards[0].hash(), card.hash());
+        assert!(
+            mutable
+                .db
+                .get_reviews_for_session(mutable.session_id)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
