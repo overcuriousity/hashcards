@@ -40,6 +40,11 @@ document.addEventListener("DOMContentLoaded", function () {
 });
 
 document.addEventListener("keydown", function (event) {
+  // A held-down key fires repeated keydown events; only the first physical
+  // press should act (BUG-06).
+  if (event.repeat) {
+    return;
+  }
   // Skip during text input or textarea.
   if (
     (event.target.tagName === "INPUT" && event.target.type === "text") ||

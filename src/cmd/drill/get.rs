@@ -136,6 +136,7 @@ pub fn render_session_page(ctx: &RenderContext, mutable: &MutableState) -> Falli
         };
         html! {
             form action=(form_action) method="post" {
+                input type="hidden" name="card" value=(card.hash().to_hex());
                 (undo_button(undo_disabled))
                 (bookmark_button(is_bookmarked))
                 div.spacer {}

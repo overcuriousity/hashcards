@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
@@ -45,6 +47,7 @@ use crate::cmd::serve::hedgedoc::source_uri_from_url;
 use crate::cmd::serve::hedgedoc::sync_source;
 use crate::cmd::serve::state::AppState;
 use crate::cmd::serve::state::DrillSession;
+use crate::cmd::serve::state::SharedSession;
 use crate::collection::Collection;
 use crate::db::Database;
 use crate::error::Fallible;
@@ -89,8 +92,9 @@ pub async fn collection_get_handler(
 }
 
 fn collection_get_inner(state: &AppState, slug: &str, flash: Option<Flash>) -> Fallible<String> {
-    // Take the session out of the map so the lock is not held during rendering.
-    let session = state.sessions.lock().unwrap().remove(slug);
+    // Clone the Arc out of the map so the map lock is not held during
+    // rendering; the session itself stays in the map even if rendering fails.
+    let session: Option<SharedSession> = state.sessions.lock().unwrap().get(slug).cloned();
 
     let Some(session) = session else {
         // No active session: show the deck browser.
@@ -131,6 +135,7 @@ fn collection_get_inner(state: &AppState, slug: &str, flash: Option<Flash>) -> F
         return Ok(html.into_string());
     };
 
+    let session = session.lock().unwrap();
     let form_action = format!("/collection/{slug}");
     let file_url_prefix = format!("/collection/{slug}/file");
     let ctx = RenderContext {
@@ -153,12 +158,6 @@ fn collection_get_inner(state: &AppState, slug: &str, flash: Option<Flash>) -> F
     };
     let script_url = format!("/collection/{slug}/script.js");
     let html = page_template_with_script(&script_url, body);
-    // Put the session back now that rendering is done.
-    state
-        .sessions
-        .lock()
-        .unwrap()
-        .insert(slug.to_owned(), session);
     Ok(html.into_string())
 }
 
@@ -255,7 +254,11 @@ fn collection_start_inner(
     // Create the session outside the lock (may do filesystem/DB work).
     let session = create_session(state, slug, &selected_decks, limit)?;
     if let Some(s) = session {
-        state.sessions.lock().unwrap().insert(slug.to_string(), s);
+        state
+            .sessions
+            .lock()
+            .unwrap()
+            .insert(slug.to_string(), Arc::new(Mutex::new(s)));
     }
     Ok(())
 }
@@ -363,7 +366,7 @@ pub async fn collection_post_handler(
     Path(slug): Path<String>,
     Form(form): Form<FormData>,
 ) -> Redirect {
-    match collection_post_inner(&state, &slug, form.action) {
+    match collection_post_inner(&state, &slug, form) {
         Ok(redirect) => redirect,
         Err(e) => {
             log::error!("error handling action for collection {slug}: {e}");
@@ -372,12 +375,27 @@ pub async fn collection_post_handler(
     }
 }
 
-fn collection_post_inner(state: &AppState, slug: &str, action: Action) -> Fallible<Redirect> {
+fn collection_post_inner(state: &AppState, slug: &str, form: FormData) -> Fallible<Redirect> {
+    let action = form.action;
+    let submitted_card: Option<CardHash> = match form.card.as_deref() {
+        Some(hex) => match CardHash::from_hex(hex) {
+            Ok(hash) => Some(hash),
+            Err(_) => {
+                log::debug!("ignoring grade with unparseable card hash for collection {slug}");
+                return Ok(Flash::error(
+                    "That grade carried an invalid card reference and was ignored.",
+                )
+                .redirect(&format!("/collection/{slug}")));
+            }
+        },
+        None => None,
+    };
     // Home action: close the session and drop it without needing to hold the
     // global lock during DB work.
     if matches!(action, Action::Home) {
         let session = state.sessions.lock().unwrap().remove(slug);
         if let Some(s) = session {
+            let s = s.lock().unwrap();
             if s.mutable.finished_at.is_none() {
                 if let Err(e) = s
                     .mutable
@@ -404,27 +422,52 @@ fn collection_post_inner(state: &AppState, slug: &str, action: Action) -> Fallib
         return Ok(Redirect::to("/"));
     }
 
-    // Take ownership of the session so we can release the global lock before
-    // handle_action does any DB work.
-    let mut session = match state.sessions.lock().unwrap().remove(slug) {
+    // Lock the session in place: the map lock is released immediately, the
+    // per-slug lock is held for the DB work, and an error leaves the session
+    // in the map untouched.
+    let session: SharedSession = match state.sessions.lock().unwrap().get(slug).cloned() {
         Some(s) => s,
         None => return Ok(Redirect::to(&format!("/collection/{slug}"))),
     };
+    let mut guard = session.lock().unwrap();
+
+    // Re-check that this is still the session the map holds for `slug`: a
+    // concurrent Home request may have removed it (and closed its DB row)
+    // while we were waiting for the session lock, or a concurrent start may
+    // have replaced it with a new drill. Take the map lock in its own scoped
+    // block so it is never held while the session lock is held for longer
+    // than this check (Home never holds the two locks together either, so
+    // this ordering can't deadlock against it).
+    let still_current = {
+        let map = state.sessions.lock().unwrap();
+        matches!(map.get(slug), Some(current) if Arc::ptr_eq(&session, current))
+    };
+    if !still_current {
+        return Ok(
+            Flash::error("The session has ended, so that action was ignored.")
+                .redirect(&format!("/collection/{slug}")),
+        );
+    }
+
+    let session = &mut *guard;
 
     // `Action::Home` returned early above, and it is the only action for which
     // `handle_action` yields `ActionResult::Home`. Every action reaching here
     // leaves the session running; the only result needing dispatch is
     // `ContinueWithFlash`, which carries a one-shot message for the user.
-    let result = handle_action(&mut session.mutable, session.session_started_at, action)?;
+    let result = handle_action(
+        &mut session.mutable,
+        session.session_started_at,
+        action,
+        submitted_card,
+    )?;
 
-    state
-        .sessions
-        .lock()
-        .unwrap()
-        .insert(slug.to_owned(), session);
     match result {
         ActionResult::ContinueWithFlash(flash) => {
             Ok(flash.redirect(&format!("/collection/{slug}")))
+        }
+        ActionResult::Ignored(reason) => {
+            Ok(Flash::error(reason).redirect(&format!("/collection/{slug}")))
         }
         _ => Ok(Redirect::to(&format!("/collection/{slug}"))),
     }
@@ -488,9 +531,9 @@ pub async fn collection_script_handler(
     State(state): State<AppState>,
     Path(slug): Path<String>,
 ) -> (StatusCode, [(HeaderName, &'static str); 1], String) {
-    let sessions = state.sessions.lock().unwrap();
-    let macros = match sessions.get(&slug) {
-        Some(session) => &session.macros,
+    let session: Option<SharedSession> = state.sessions.lock().unwrap().get(&slug).cloned();
+    let macros: Vec<(String, String)> = match session {
+        Some(session) => session.lock().unwrap().macros.clone(),
         None => {
             // No active session; serve script without macros
             let content = format!(
@@ -502,7 +545,7 @@ pub async fn collection_script_handler(
     };
     let mut content = String::new();
     content.push_str("let MACROS = {};\n");
-    for (name, definition) in macros {
+    for (name, definition) in &macros {
         let name = escape_js_string_literal(name);
         let definition = escape_js_string_literal(definition);
         content.push_str(&format!("MACROS['{name}'] = '{definition}';\n"));

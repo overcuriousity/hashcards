@@ -1,6 +1,21 @@
 <changelog>
     <unreleased>
         <fixed>
+            <change author="mstoeck3">
+                In serve mode, an error while rendering a card or handling an action no longer destroys the running drill session. The session now stays in place behind a per-collection lock, so after a transient error the same card is shown again and progress is kept.
+            </change>
+            <change author="mstoeck3">
+                Holding down a grading key or double-submitting a grade no longer grades several cards in a row: key auto-repeat is ignored in the browser, and the server ignores a grade for a card that is no longer current, showing a notice instead.
+            </change>
+            <change author="mstoeck3">
+                A grade submitted without a revealed answer (for example from a stale browser page) is no longer silently ignored: the page now shows a notice explaining that the grade was not counted.
+            </change>
+            <change author="mstoeck3">
+                Undoing after a session has finished now reopens the session's database row, so reviews made after the undo are attached to an open session instead of one that still claims to be closed.
+            </change>
+            <change author="mstoeck3">
+                Grading and undoing now commit to the database before changing the in-memory session. Previously a failed database write during a grade silently discarded the card (unrecorded and not undoable), and a failed write during undo could duplicate the card in the queue.
+            </change>
             <change author="claude">
                 Pressing Shutdown before the drill session is finished now shows a message explaining that the session is still in progress, instead of silently doing nothing.
             </change>

@@ -71,7 +71,7 @@ Execute tasks strictly in order: Task 5 introduces `ActionResult::Ignored` used 
 - Consumes: `src/flash.rs` from plan 01 (flash-messages).
 - Produces: confidence that `crate::flash::Flash::{error, redirect}` exist for Tasks 5–7.
 
-- [ ] **Step 1: Verify plan 01 landed**
+- [x] **Step 1: Verify plan 01 landed**
 
 Run:
 ```bash
@@ -81,12 +81,12 @@ Expected: all three greps print matches.
 
 **If any of these fail, STOP.** This plan depends on plan 01 (`docs/superpowers/plans/` flash-messages plan). Report the missing dependency to the person driving execution; do not write a substitute `flash.rs`.
 
-- [ ] **Step 2: Verify a clean baseline**
+- [x] **Step 2: Verify a clean baseline**
 
 Run: `cargo test`
 Expected: all existing tests PASS. If the baseline is broken, stop and report.
 
-- [ ] **Step 3: Create the working branch**
+- [x] **Step 3: Create the working branch**
 
 ```bash
 git checkout -b fix/data-integrity
@@ -106,7 +106,7 @@ The grade arm of `handle_action` (`src/cmd/drill/post.rs:171-222`) currently doe
 - Consumes: `Database::insert_review_and_update_performance(&mut self, session_id: i64, review: &ReviewRecord, performance: Performance) -> Fallible<i64>` (already transactional, `src/db.rs:259`).
 - Produces: test helpers `make_card(question: &str) -> Card` and `make_state_with_cards(cards: Vec<Card>) -> MutableState` in `post.rs`'s `tests` module, reused by Tasks 3–6. `handle_action` signature is unchanged in this task: `pub fn handle_action(mutable: &mut MutableState, session_started_at: Timestamp, action: Action) -> Fallible<ActionResult>`.
 
-- [ ] **Step 1: Add test helpers and the failing regression test**
+- [x] **Step 1: Add test helpers and the failing regression test**
 
 In the `tests` module of `src/cmd/drill/post.rs`, extend the imports and add helpers plus the test. The injection technique: the card is in the queue and cache but *not* in the `cards` DB table, so the review insert violates its foreign key (`Database::new` enables FK enforcement) — a deterministic in-transaction DB failure.
 
@@ -183,12 +183,12 @@ fn test_grade_db_failure_leaves_state_unchanged() {
 }
 ```
 
-- [ ] **Step 2: Run the test and see it fail**
+- [x] **Step 2: Run the test and see it fail**
 
 Run: `cargo test test_grade_db_failure_leaves_state_unchanged`
 Expected: FAIL on `assert_eq!(mutable.cards.len(), 1)` — pre-fix code removed the card before the DB write.
 
-- [ ] **Step 3: Reorder the grade arm — DB first, memory second**
+- [x] **Step 3: Reorder the grade arm — DB first, memory second**
 
 Replace the entire `Action::Forgot | Action::Hard | Action::Good | Action::Easy` arm in `handle_action` (`src/cmd/drill/post.rs:171-222`) with:
 
@@ -256,12 +256,12 @@ Replace the entire `Action::Forgot | Action::Hard | Action::Good | Action::Easy`
 
 Note: `mutable.cards.remove(0)` after the head clone is safe (the queue was verified non-empty via `first()`), and the pre-existing `card.clone()` for the review is kept because the card may also be pushed to the back of the queue.
 
-- [ ] **Step 4: Run the tests and see them pass**
+- [x] **Step 4: Run the tests and see them pass**
 
 Run: `cargo test`
 Expected: `test_grade_db_failure_leaves_state_unchanged` PASSES and all pre-existing tests still pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/cmd/drill/post.rs
@@ -282,7 +282,7 @@ The `Action::Undo` arm (`src/cmd/drill/post.rs:121-139`) pops the review and re-
 - Consumes: helpers `make_card` / `make_state_with_cards` from Task 2; `Database::void_review_and_restore_performance(&mut self, review_id: i64, card_hash: CardHash, prev_performance: Performance) -> Fallible<()>` (`src/db.rs:294`, three-argument form — Task 4 extends it).
 - Produces: undo arm shape that Task 4 builds on.
 
-- [ ] **Step 1: Write the failing regression test**
+- [x] **Step 1: Write the failing regression test**
 
 Add to the `tests` module of `src/cmd/drill/post.rs`:
 
@@ -311,12 +311,12 @@ fn test_undo_db_failure_leaves_state_unchanged() {
 }
 ```
 
-- [ ] **Step 2: Run the test and see it fail**
+- [x] **Step 2: Run the test and see it fail**
 
 Run: `cargo test test_undo_db_failure_leaves_state_unchanged`
 Expected: FAIL on `assert_eq!(mutable.cards.len(), 1)` — pre-fix code re-inserted the card before the DB call, leaving two cards in the queue.
 
-- [ ] **Step 3: Reorder the undo arm — DB first, memory second**
+- [x] **Step 3: Reorder the undo arm — DB first, memory second**
 
 Replace the entire `Action::Undo` arm in `handle_action` (`src/cmd/drill/post.rs:121-139`) with:
 
@@ -347,12 +347,12 @@ Replace the entire `Action::Undo` arm in `handle_action` (`src/cmd/drill/post.rs
 
 This also removes the `mutable.reviews.pop().unwrap()` at `post.rs:123` (a BUG-49 item, resolved here for free by the `let ... else` on `last().cloned()`).
 
-- [ ] **Step 4: Run the tests and see them pass**
+- [x] **Step 4: Run the tests and see them pass**
 
 Run: `cargo test`
 Expected: `test_undo_db_failure_leaves_state_unchanged` PASSES; `test_grade_db_failure_leaves_state_unchanged` and all pre-existing tests still pass.
 
-- [ ] **Step 5: Update CHANGELOG.xml (BUG-02)**
+- [x] **Step 5: Update CHANGELOG.xml (BUG-02)**
 
 Insert directly after the `<fixed>` line inside `<unreleased>` in `CHANGELOG.xml`:
 
@@ -362,7 +362,7 @@ Insert directly after the `<fixed>` line inside `<unreleased>` in `CHANGELOG.xml
             </change>
 ```
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/cmd/drill/post.rs CHANGELOG.xml
@@ -386,7 +386,7 @@ Note on "null `ended_at`": the spec says to null the column, but `sessions.ended
 - Consumes: Task 3's undo arm.
 - Produces: `Database::void_review_and_restore_performance(&mut self, review_id: i64, card_hash: CardHash, prev_performance: Performance, reopen_session: Option<i64>) -> Fallible<()>` — the four-argument form used from here on.
 
-- [ ] **Step 1: Write the failing regression test**
+- [x] **Step 1: Write the failing regression test**
 
 Add to the `tests` module of `src/cmd/drill/post.rs`. The session is created with a fixed past `started_at` so the close time provably differs from it:
 
@@ -433,12 +433,12 @@ fn test_undo_after_finish_reopens_session_row() {
 }
 ```
 
-- [ ] **Step 2: Run the test and see it fail**
+- [x] **Step 2: Run the test and see it fail**
 
 Run: `cargo test test_undo_after_finish_reopens_session_row`
 Expected: FAIL on the `ended_at == started_at` assertion — pre-fix, `ended_at` keeps the (2026) close time while `started_at` is the fixed 2020 value.
 
-- [ ] **Step 3: Extend the void transaction to optionally reopen the session**
+- [x] **Step 3: Extend the void transaction to optionally reopen the session**
 
 Replace `void_review_and_restore_performance` in `src/db.rs` (lines 290-310, keeping its doc comment style) with:
 
@@ -482,7 +482,7 @@ Replace `void_review_and_restore_performance` in `src/db.rs` (lines 290-310, kee
 
 Update the two existing test call sites in `src/db.rs`'s `tests` module (in `test_void_review_and_restore_performance` and `test_void_review_wrong_card_is_rejected`) to pass `None` as the new fourth argument.
 
-- [ ] **Step 4: Reopen from the undo arm**
+- [x] **Step 4: Reopen from the undo arm**
 
 In the `Action::Undo` arm of `handle_action` (as written in Task 3), replace the two lines
 
@@ -503,12 +503,12 @@ with
 
 (`finish_session` already sets `ended_at` again on the next End/last-grade via `close_session`, so re-finishing works unchanged.)
 
-- [ ] **Step 5: Run the tests and see them pass**
+- [x] **Step 5: Run the tests and see them pass**
 
 Run: `cargo test`
 Expected: `test_undo_after_finish_reopens_session_row` PASSES; the updated `src/db.rs` tests and all others still pass.
 
-- [ ] **Step 6: Update CHANGELOG.xml (BUG-04)**
+- [x] **Step 6: Update CHANGELOG.xml (BUG-04)**
 
 Insert directly after the `<fixed>` line inside `<unreleased>` in `CHANGELOG.xml`:
 
@@ -518,7 +518,7 @@ Insert directly after the `<fixed>` line inside `<unreleased>` in `CHANGELOG.xml
             </change>
 ```
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add src/db.rs src/cmd/drill/post.rs CHANGELOG.xml
@@ -540,7 +540,7 @@ git commit -m "fix: reopen session row when undoing past a finished session (BUG
 - Consumes: `crate::flash::Flash` (plan 01); Task 2's grade arm.
 - Produces: `ActionResult::Ignored(String)` — "the action was a harmless no-op; show `String` to the user as an error flash". Task 6 returns it for stale-hash grades. Drill-mode `action_handler(state: ServerState, form: FormData) -> Fallible<Option<Flash>>`.
 
-- [ ] **Step 1: Write the failing regression test**
+- [x] **Step 1: Write the failing regression test**
 
 Add to the `tests` module of `src/cmd/drill/post.rs`:
 
@@ -561,12 +561,12 @@ fn test_grade_without_reveal_is_ignored_with_flash() {
 }
 ```
 
-- [ ] **Step 2: Run the test and see it fail**
+- [x] **Step 2: Run the test and see it fail**
 
 Run: `cargo test test_grade_without_reveal_is_ignored_with_flash`
 Expected: FAIL — pre-fix `handle_action` returns `ActionResult::Continue` (and `ActionResult::Ignored` does not exist yet, so this step may fail at compile time instead; either counts as the failing state).
 
-- [ ] **Step 3: Add the `Ignored` variant and the else branch**
+- [x] **Step 3: Add the `Ignored` variant and the else branch**
 
 In `src/cmd/drill/post.rs`, extend `ActionResult`:
 
@@ -615,7 +615,7 @@ In the grade arm (Task 2's version), convert the `if mutable.reveal { ... } Ok(A
 
 (Only the guard shape changes; do not alter any statement in the DB-first body committed in Task 2.)
 
-- [ ] **Step 4: Surface `Ignored` as a flash in the drill server**
+- [x] **Step 4: Surface `Ignored` as a flash in the drill server**
 
 In `src/cmd/drill/post.rs`, add `use crate::flash::Flash;` to the imports and replace `post_handler` and `action_handler` (lines 77-105) with:
 
@@ -655,7 +655,7 @@ async fn action_handler(state: ServerState, form: FormData) -> Fallible<Option<F
 
 (The `Err` branch still only logs and redirects — surfacing handler *errors* is BUG-03, owned by plan 01's group.)
 
-- [ ] **Step 5: Surface `Ignored` as a flash in the serve server**
+- [x] **Step 5: Surface `Ignored` as a flash in the serve server**
 
 In `src/cmd/serve/handlers.rs`, add `use crate::flash::Flash;` to the imports and change the tail of `collection_post_inner` (lines 386-399) to capture the result and re-insert the session before the `?`:
 
@@ -680,12 +680,12 @@ In `src/cmd/serve/handlers.rs`, add `use crate::flash::Flash;` to the imports an
 
 Also add `use crate::cmd::drill::post::ActionResult;` to the imports. (Re-inserting before `?` already narrows BUG-01's POST-side session loss; Task 7 removes take-out/put-back entirely.)
 
-- [ ] **Step 6: Run the tests and see them pass**
+- [x] **Step 6: Run the tests and see them pass**
 
 Run: `cargo test`
 Expected: `test_grade_without_reveal_is_ignored_with_flash` PASSES; all other tests pass.
 
-- [ ] **Step 7: Update CHANGELOG.xml (BUG-15)**
+- [x] **Step 7: Update CHANGELOG.xml (BUG-15)**
 
 Insert directly after the `<fixed>` line inside `<unreleased>` in `CHANGELOG.xml`:
 
@@ -695,7 +695,7 @@ Insert directly after the `<fixed>` line inside `<unreleased>` in `CHANGELOG.xml
             </change>
 ```
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add src/cmd/drill/post.rs src/cmd/serve/handlers.rs CHANGELOG.xml
@@ -719,7 +719,7 @@ git commit -m "fix: report ignored grade-without-reveal via flash message (BUG-1
 - Consumes: `ActionResult::Ignored(String)` from Task 5; `CardHash::{to_hex, from_hex}` (`src/types/card_hash.rs`).
 - Produces: `pub fn handle_action(mutable: &mut MutableState, session_started_at: Timestamp, action: Action, submitted_card: Option<CardHash>) -> Fallible<ActionResult>` — the four-argument form every later task and caller uses. `FormData { pub action: Action, pub card: Option<String> }`.
 
-- [ ] **Step 1: Write the failing regression test**
+- [x] **Step 1: Write the failing regression test**
 
 Add to the `tests` module of `src/cmd/drill/post.rs` (written against the new four-argument signature; it will not compile until Step 3, which is this test's failing state):
 
@@ -754,12 +754,12 @@ fn test_double_post_same_card_hash_is_a_no_op() {
 }
 ```
 
-- [ ] **Step 2: Run the test and see it fail**
+- [x] **Step 2: Run the test and see it fail**
 
 Run: `cargo test test_double_post_same_card_hash_is_a_no_op`
 Expected: FAIL to compile — `handle_action` does not yet take a fourth argument. A compile error in the test is the failing state here.
 
-- [ ] **Step 3: Add the `submitted_card` parameter and the stale-hash guard**
+- [x] **Step 3: Add the `submitted_card` parameter and the stale-hash guard**
 
 In `src/cmd/drill/post.rs`:
 
@@ -864,7 +864,7 @@ async fn action_handler(state: ServerState, form: FormData) -> Fallible<Option<F
 
 5. Update every existing test call of `handle_action` in `post.rs`'s `tests` module to pass `None` as the fourth argument: `test_home_returns_home`, `test_shutdown_returns_continue_when_unfinished`, `test_reveal_sets_flag`, `test_end_finishes_session`, `test_grade_db_failure_leaves_state_unchanged`, `test_undo_db_failure_leaves_state_unchanged`, `test_undo_after_finish_reopens_session_row`, `test_grade_without_reveal_is_ignored_with_flash`.
 
-- [ ] **Step 4: Pass the submitted hash through the serve handler**
+- [x] **Step 4: Pass the submitted hash through the serve handler**
 
 In `src/cmd/serve/handlers.rs`, add `use crate::types::card_hash::CardHash;` (already imported — verify) and change `collection_post_handler` / `collection_post_inner` to carry the form's card field:
 
@@ -915,7 +915,7 @@ fn collection_post_inner(state: &AppState, slug: &str, form: FormData) -> Fallib
 }
 ```
 
-- [ ] **Step 5: Carry the card hash in the grade form**
+- [x] **Step 5: Carry the card hash in the grade form**
 
 In `src/cmd/drill/get.rs`, in `render_session_page`'s revealed branch (the form at lines 119-130), add a hidden input as the first child of the form:
 
@@ -937,7 +937,7 @@ In `src/cmd/drill/get.rs`, in `render_session_page`'s revealed branch (the form 
 
 (`card` is already in scope from line 93. The unrevealed form does not need the field — Reveal/Undo/End/Bookmark ignore `submitted_card`.)
 
-- [ ] **Step 6: Ignore key auto-repeat on the client**
+- [x] **Step 6: Ignore key auto-repeat on the client**
 
 In `src/cmd/drill/script.js`, at the very top of the keydown listener body (line 43, before the input/textarea check), add:
 
@@ -951,12 +951,12 @@ document.addEventListener("keydown", function (event) {
   // Skip during text input or textarea.
 ```
 
-- [ ] **Step 7: Run the tests and see them pass**
+- [x] **Step 7: Run the tests and see them pass**
 
 Run: `cargo test`
 Expected: `test_double_post_same_card_hash_is_a_no_op` PASSES; all updated tests compile and pass.
 
-- [ ] **Step 8: Update CHANGELOG.xml (BUG-06)**
+- [x] **Step 8: Update CHANGELOG.xml (BUG-06)**
 
 Insert directly after the `<fixed>` line inside `<unreleased>` in `CHANGELOG.xml`:
 
@@ -966,7 +966,7 @@ Insert directly after the `<fixed>` line inside `<unreleased>` in `CHANGELOG.xml
             </change>
 ```
 
-- [ ] **Step 9: Commit**
+- [x] **Step 9: Commit**
 
 ```bash
 git add src/cmd/drill/post.rs src/cmd/drill/get.rs src/cmd/drill/script.js src/cmd/serve/handlers.rs CHANGELOG.xml
@@ -989,7 +989,7 @@ git commit -m "fix: make grade submissions idempotent against auto-repeat and do
 - Consumes: Task 6's `handle_action(&mut MutableState, Timestamp, Action, Option<CardHash>)` and Task 5/6's `collection_post_inner(state, slug, form: FormData)` shape.
 - Produces: `pub type SharedSession = std::sync::Arc<std::sync::Mutex<DrillSession>>;` in `src/cmd/serve/state.rs`; `AppState.sessions: Arc<Mutex<HashMap<String, SharedSession>>>`. `src/cmd/serve/edit.rs` uses only `contains_key` on the map (lines 60, 148) and needs no change; `src/cmd/serve/server.rs:176` initializes with `HashMap::new()`, which infers the new type unchanged.
 
-- [ ] **Step 1: Write the failing HTTP regression test**
+- [x] **Step 1: Write the failing HTTP regression test**
 
 Add to the existing `tests` module in `src/cmd/serve/mod.rs` (reusing its config-building pattern; the render error is forced by deleting the card's source file, which makes `Card::relative_file_path`'s canonicalize fail during `render_session_page`):
 
@@ -1069,12 +1069,12 @@ Add to the existing `tests` module in `src/cmd/serve/mod.rs` (reusing its config
     }
 ```
 
-- [ ] **Step 2: Run the test and see it fail**
+- [x] **Step 2: Run the test and see it fail**
 
 Run: `cargo test test_session_survives_render_error`
 Expected: FAIL on the final `progress-bar` assertion — pre-fix, the erroring GET removed the session, so the last GET renders the deck browser (`deck-tree`).
 
-- [ ] **Step 3: Change the session map to hold `Arc<Mutex<DrillSession>>`**
+- [x] **Step 3: Change the session map to hold `Arc<Mutex<DrillSession>>`**
 
 In `src/cmd/serve/state.rs`:
 
@@ -1092,7 +1092,7 @@ and change the field in `AppState`:
     pub sessions: Arc<Mutex<HashMap<String, SharedSession>>>,
 ```
 
-- [ ] **Step 4: Rework the handlers to per-slug locking**
+- [x] **Step 4: Rework the handlers to per-slug locking**
 
 In `src/cmd/serve/handlers.rs` (add `use crate::cmd::serve::state::SharedSession;` and `use std::sync::Arc; use std::sync::Mutex;` to the imports):
 
@@ -1219,12 +1219,12 @@ pub async fn collection_script_handler(
 
 The `known` check in `collection_get_handler` (line 61) and the `contains_key` calls in `src/cmd/serve/edit.rs:60` and `:148` compile unchanged against the new value type.
 
-- [ ] **Step 5: Run the tests and see them pass**
+- [x] **Step 5: Run the tests and see them pass**
 
 Run: `cargo test`
 Expected: `test_session_survives_render_error` PASSES; `test_start_with_multiple_decks` and all other tests still pass.
 
-- [ ] **Step 6: Update CHANGELOG.xml (BUG-01)**
+- [x] **Step 6: Update CHANGELOG.xml (BUG-01)**
 
 Insert directly after the `<fixed>` line inside `<unreleased>` in `CHANGELOG.xml`:
 
@@ -1234,7 +1234,7 @@ Insert directly after the `<fixed>` line inside `<unreleased>` in `CHANGELOG.xml
             </change>
 ```
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add src/cmd/serve/state.rs src/cmd/serve/handlers.rs src/cmd/serve/mod.rs CHANGELOG.xml
@@ -1247,7 +1247,7 @@ git commit -m "fix: keep serve-mode sessions alive across request errors via per
 
 **Files:** none new.
 
-- [ ] **Step 1: Full test suite and lint**
+- [x] **Step 1: Full test suite and lint**
 
 Run:
 ```bash
@@ -1255,7 +1255,7 @@ cargo test && cargo clippy -- -D warnings && cargo fmt --check
 ```
 Expected: all pass. Fix any clippy/fmt fallout within the files this plan touched before proceeding.
 
-- [ ] **Step 2: Verify no production `unwrap()` was introduced**
+- [x] **Step 2: Verify no production `unwrap()` was introduced**
 
 Run:
 ```bash
@@ -1263,7 +1263,7 @@ git diff master -- src | grep -n "unwrap()" | grep -v "mod tests" || true
 ```
 Manually confirm every surviving `unwrap()` in the diff is either inside a `#[cfg(test)]` module or an existing-convention `.lock().unwrap()` (BUG-50's scope).
 
-- [ ] **Step 3: Open the PR**
+- [x] **Step 3: Open the PR**
 
 ```bash
 git push -u origin fix/data-integrity
