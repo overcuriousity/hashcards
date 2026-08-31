@@ -53,9 +53,11 @@ pub enum CardContent {
     Cloze {
         /// The text of the card without brackets.
         text: String,
-        /// The position of the first character of the deletion.
+        /// The byte position (not character position) of the first byte of
+        /// the deletion within `text`.
         start: usize,
-        /// The position of the last character of the deletion.
+        /// The byte position (not character position) of the last byte of
+        /// the deletion within `text`, inclusive.
         end: usize,
     },
 }
@@ -260,5 +262,46 @@ mod tests {
         let a = CardContent::new_cloze("The capital of France is Paris", 0, 1);
         let b = CardContent::new_cloze("The capital of France is Paris", 0, 2);
         assert_eq!(a.family_hash(), b.family_hash());
+    }
+
+    use std::fs::write;
+    use crate::helper::create_tmp_directory;
+    use crate::media::resolve::MediaResolverBuilder;
+
+    fn make_test_render_config() -> Fallible<MarkdownRenderConfig> {
+        let coll_path: PathBuf = create_tmp_directory()?;
+        let abs_deck_path: PathBuf = coll_path.join("deck.md");
+        write(&abs_deck_path, "")?;
+        let config = MarkdownRenderConfig {
+            resolver: MediaResolverBuilder::new()
+                .with_collection_path(coll_path)?
+                .with_deck_path(PathBuf::from("deck.md"))?
+                .build()?,
+            file_url_prefix: "http://localhost:1234/file".to_string(),
+        };
+        Ok(config)
+    }
+
+    /// BUG-26: rendering a cloze card with non-ASCII text before and inside
+    /// the deletion round-trips through the byte-position splice without
+    /// mangling multi-byte characters.
+    #[test]
+    fn test_non_ascii_cloze_render_round_trip() -> Fallible<()> {
+        let config = make_test_render_config()?;
+        // "Größe: " = 9 bytes; deletion "10 µm" = bytes 9..=14.
+        let content = CardContent::new_cloze("Größe: 10 µm", 9, 14);
+
+        let front = content.html_front(&config)?.into_string();
+        assert!(front.contains("Größe:"), "front was: {front}");
+        assert!(front.contains("<span class='cloze'>"), "front was: {front}");
+        assert!(!front.contains("10 µm"), "deletion leaked into front: {front}");
+
+        let back = content.html_back(&config)?.into_string();
+        assert!(
+            back.contains("<span class='cloze-reveal'>10 µm</span>"),
+            "back was: {back}"
+        );
+        assert!(back.contains("Größe:"), "back was: {back}");
+        Ok(())
     }
 }

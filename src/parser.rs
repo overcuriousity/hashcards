@@ -35,17 +35,19 @@ struct DeckMetadata {
 }
 
 /// Extract TOML frontmatter from markdown text.
-/// Returns (frontmatter_metadata, content_without_frontmatter)
+/// Returns (frontmatter_metadata, content_without_frontmatter, content_start_line)
+/// where `content_start_line` is the 0-based file line at which the content
+/// begins (0 when there is no frontmatter).
 ///
 /// This function returns a slice of the original text to avoid
 /// collecting lines, joining them, and then re-splitting in parse().
-fn extract_frontmatter(text: &str) -> Fallible<(DeckMetadata, &str)> {
+fn extract_frontmatter(text: &str) -> Fallible<(DeckMetadata, &str, usize)> {
     let mut lines = text.lines().enumerate().peekable();
 
     // Check if the file starts with frontmatter delimiter
     match lines.peek() {
         Some((_, line)) if line.trim() == "---" => {}
-        _ => return Ok((DeckMetadata { name: None }, text)),
+        _ => return Ok((DeckMetadata { name: None }, text, 0)),
     };
     lines.next(); // consume the opening delimiter
 
@@ -91,13 +93,26 @@ fn extract_frontmatter(text: &str) -> Fallible<(DeckMetadata, &str)> {
         _ => "",
     };
 
-    Ok((metadata, content))
+    Ok((metadata, content, content_start_line))
 }
 
 /// Strip TOML frontmatter and return only the card content portion of a file.
+///
+/// Kept as a convenience wrapper around `strip_frontmatter_with_offset` for
+/// callers that don't need the line offset.
+#[allow(dead_code)]
 pub fn strip_frontmatter(text: &str) -> Fallible<&str> {
-    let (_, content) = extract_frontmatter(text)?;
+    let (content, _) = strip_frontmatter_with_offset(text)?;
     Ok(content)
+}
+
+/// Like `strip_frontmatter`, but also return the 0-based file line at which
+/// the content starts (0 when there is no frontmatter). Pass this as the
+/// `line_offset` of `Parser::new` so parse errors and card ranges report
+/// real file lines.
+pub fn strip_frontmatter_with_offset(text: &str) -> Fallible<(&str, usize)> {
+    let (_, content, offset) = extract_frontmatter(text)?;
+    Ok((content, offset))
 }
 
 /// Parses all Markdown files in the given directory.
@@ -107,10 +122,14 @@ pub fn parse_deck(directory: &PathBuf) -> Fallible<Vec<Card>> {
         let entry = entry?;
         let path = entry.path();
         if path.is_file() && path.extension().is_some_and(|ext| ext == "md") {
-            let text = read_to_string(path)?;
+            let text = read_to_string(path).map_err(|e| {
+                ErrorReport::new(format!("Failed to read {}: {e}", path.display()))
+            })?;
 
             // Extract frontmatter and get custom deck name if specified
-            let (metadata, content) = extract_frontmatter(&text)?;
+            let (metadata, content, line_offset) = extract_frontmatter(&text).map_err(|e| {
+                ErrorReport::new(format!("{} File: {}", e.message(), path.display()))
+            })?;
 
             let deck_name: DeckName = metadata.name.unwrap_or_else(|| {
                 path.strip_prefix(directory)
@@ -130,7 +149,7 @@ pub fn parse_deck(directory: &PathBuf) -> Fallible<Vec<Card>> {
                     })
             });
 
-            let parser = Parser::new(deck_name, path.to_path_buf());
+            let parser = Parser::new(deck_name, path.to_path_buf(), line_offset);
             let cards = parser.parse(content)?;
             all_cards.extend(cards);
         }
@@ -149,6 +168,10 @@ pub fn parse_deck(directory: &PathBuf) -> Fallible<Vec<Card>> {
 pub struct Parser {
     deck_name: DeckName,
     file_path: PathBuf,
+    /// The 0-based file line at which the parsed text begins. Non-zero when
+    /// TOML frontmatter was stripped before parsing, so that all error
+    /// locations and card ranges refer to real file lines.
+    line_offset: usize,
 }
 
 #[derive(Debug)]
@@ -214,8 +237,52 @@ enum Line {
     Eof,
 }
 
-impl Line {
-    fn read(line: &str) -> Self {
+/// The kind of fenced code block currently open.
+#[derive(PartialEq)]
+enum FenceKind {
+    /// ``` fences.
+    Backtick,
+    /// ~~~ fences.
+    Tilde,
+}
+
+/// Classifies lines, tracking fenced-code-block state: while inside a
+/// ``` or ~~~ fence, every line (including the closing fence) is `Text`,
+/// so card syntax inside code blocks is never parsed.
+struct LineReader {
+    fence: Option<FenceKind>,
+}
+
+impl LineReader {
+    fn new() -> Self {
+        LineReader { fence: None }
+    }
+
+    fn read(&mut self, line: &str) -> Line {
+        let trimmed = line.trim_start();
+        match self.fence {
+            Some(FenceKind::Backtick) => {
+                if trimmed.starts_with("```") {
+                    self.fence = None;
+                }
+                return Line::Text(line.to_string());
+            }
+            Some(FenceKind::Tilde) => {
+                if trimmed.starts_with("~~~") {
+                    self.fence = None;
+                }
+                return Line::Text(line.to_string());
+            }
+            None => {}
+        }
+        if trimmed.starts_with("```") {
+            self.fence = Some(FenceKind::Backtick);
+            return Line::Text(line.to_string());
+        }
+        if trimmed.starts_with("~~~") {
+            self.fence = Some(FenceKind::Tilde);
+            return Line::Text(line.to_string());
+        }
         if is_question(line) {
             Line::StartQuestion(trim(line))
         } else if is_answer(line) {
@@ -250,11 +317,29 @@ fn trim(line: &str) -> String {
     line[2..].trim().to_string()
 }
 
+/// Returns true if the unescaped `[` at byte position `open_pos` in `text`
+/// opens a markdown link: its bracket group closes with `](`. Nested `[`
+/// before the close means this is not a simple link.
+fn is_markdown_link_open(text: &str, open_pos: usize) -> bool {
+    let bytes = text.as_bytes();
+    let mut i = open_pos + 1;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' => i += 2,
+            b'[' => return false,
+            b']' => return bytes.get(i + 1) == Some(&b'('),
+            _ => i += 1,
+        }
+    }
+    false
+}
+
 impl Parser {
-    pub fn new(deck_name: DeckName, file_path: PathBuf) -> Self {
+    pub fn new(deck_name: DeckName, file_path: PathBuf, line_offset: usize) -> Self {
         Parser {
             deck_name,
             file_path,
+            line_offset,
         }
     }
 
@@ -262,13 +347,14 @@ impl Parser {
     pub fn parse(&self, text: &str) -> Result<Vec<Card>, ParserError> {
         let mut cards = Vec::new();
         let mut state = State::Start;
+        let mut reader = LineReader::new();
         let lines: Vec<&str> = text.lines().collect();
         let last_line = if lines.is_empty() { 0 } else { lines.len() - 1 };
         for (line_num, line) in lines.iter().enumerate() {
-            let line = Line::read(line);
-            state = self.parse_line(state, line, line_num, &mut cards)?;
+            let line = reader.read(line);
+            state = self.parse_line(state, line, line_num + self.line_offset, &mut cards)?;
         }
-        self.parse_line(state, Line::Eof, last_line, &mut cards)?;
+        self.parse_line(state, Line::Eof, last_line + self.line_offset, &mut cards)?;
 
         let mut seen = HashSet::new();
         let mut unique_cards = Vec::new();
@@ -477,6 +563,7 @@ impl Parser {
             // Set when the preceeding byte indicates it should be evaluated as
             // markdown and not part of the cloze and therefore added to clean_text.
             let mut image_mode = false; // ![
+            let mut link_mode = false; // [text](url)
             let mut escape_mode = false; // \[ and \]
             // We use `bytes` rather than `chars` because the cloze start/end
             // positions are byte positions, not character positions. This
@@ -484,11 +571,14 @@ impl Parser {
             // are a vague abstract concept.
             for (bytepos, c) in text.bytes().enumerate() {
                 if c == b'[' {
-                    if image_mode {
+                    if image_mode || link_mode {
                         clean_text.push(c);
-                    }
-                    if escape_mode {
+                    } else if escape_mode {
                         escape_mode = false;
+                        clean_text.push(c);
+                    } else if is_markdown_link_open(text, bytepos) {
+                        // This bracket opens a markdown link; keep it verbatim.
+                        link_mode = true;
                         clean_text.push(c);
                     }
                 } else if c == b']' {
@@ -496,6 +586,10 @@ impl Parser {
                         // We are in image mode, so this closing bracket is
                         // part of a Markdown image.
                         image_mode = false;
+                        clean_text.push(c);
+                    } else if link_mode {
+                        // Closing bracket of a markdown link.
+                        link_mode = false;
                         clean_text.push(c);
                     } else if escape_mode {
                         // We are in escape mode, so this closing bracket is
@@ -551,30 +645,47 @@ impl Parser {
         let mut start = None;
         let mut index = 0;
         let mut image_mode = false;
+        let mut link_mode = false;
         let mut escape_mode = false;
         for (bytepos, c) in text.bytes().enumerate() {
             if c == b'[' {
-                if image_mode {
-                    // We are in image mode, so this closing bracket is part of a markdown image.
+                if image_mode || link_mode {
                     index += 1;
                 } else if escape_mode {
-                    // We are in escape mode, so this closing bracket is part of a markdown text.
                     index += 1;
                     escape_mode = false;
+                } else if is_markdown_link_open(text, bytepos) {
+                    // This bracket opens a markdown link; it stays in the text.
+                    link_mode = true;
+                    index += 1;
+                } else if start.is_some() {
+                    return Err(ParserError::new(
+                        "Nested cloze brackets.",
+                        self.file_path.clone(),
+                        start_line,
+                    ));
                 } else {
                     start = Some(index);
                 }
             } else if c == b']' {
                 if image_mode {
-                    // We are in image mode, so this closing bracket is part of a markdown image.
                     image_mode = false;
                     index += 1;
+                } else if link_mode {
+                    link_mode = false;
+                    index += 1;
                 } else if escape_mode {
-                    // We are in escape mode, so this closing bracket is part of a markdown text.
                     escape_mode = false;
                     index += 1;
                 } else if let Some(s) = start {
                     let end = index;
+                    if end == s {
+                        return Err(ParserError::new(
+                            "Cloze deletion is empty.",
+                            self.file_path.clone(),
+                            start_line,
+                        ));
+                    }
                     let content = CardContent::new_cloze(clean_text.clone(), s, end - 1);
                     let card = Card::new(
                         self.deck_name.clone(),
@@ -614,9 +725,26 @@ impl Parser {
                         }
                     }
                 }
+            } else if c == b'\n' {
+                if start.is_some() {
+                    return Err(ParserError::new(
+                        "Unterminated cloze deletion.",
+                        self.file_path.clone(),
+                        start_line,
+                    ));
+                }
+                index += 1;
             } else {
                 index += 1;
             }
+        }
+
+        if start.is_some() {
+            return Err(ParserError::new(
+                "Unterminated cloze deletion.",
+                self.file_path.clone(),
+                start_line,
+            ));
         }
 
         if cards.is_empty() {
@@ -874,6 +1002,88 @@ mod tests {
         Ok(())
     }
 
+    /// BUG-16: an empty cloze deletion must be a parse error, not a usize
+    /// underflow (debug: panic; release: usize::MAX positions).
+    #[test]
+    fn test_empty_cloze_deletion_is_error() {
+        let input = "C: [] foo";
+        let parser = make_test_parser();
+        let result = parser.parse(input);
+        assert!(result.is_err());
+        let err = result.err().unwrap();
+        assert_eq!(
+            err.to_string(),
+            "Cloze deletion is empty. Location: test.md:1"
+        );
+    }
+
+    /// BUG-16 companion: a one-byte deletion still parses.
+    #[test]
+    fn test_single_byte_cloze_deletion_parses() -> Result<(), ParserError> {
+        let input = "C: [a]";
+        let parser = make_test_parser();
+        let cards = parser.parse(input)?;
+        assert_cloze(&cards, "a", &[(0, 0)]);
+        Ok(())
+    }
+
+    /// BUG-19: a `[` while a deletion is already open must be an error, not a
+    /// silent restart of the deletion.
+    #[test]
+    fn test_nested_cloze_brackets_is_error() {
+        let input = "C: [[a]]";
+        let parser = make_test_parser();
+        let result = parser.parse(input);
+        assert!(result.is_err());
+        let err = result.err().unwrap();
+        assert_eq!(
+            err.to_string(),
+            "Nested cloze brackets. Location: test.md:1"
+        );
+    }
+
+    /// BUG-19: an unmatched `[` at end of text must say so, not complain that
+    /// the card has no deletions.
+    #[test]
+    fn test_unterminated_cloze_at_eof_is_error() {
+        let input = "C: foo [bar";
+        let parser = make_test_parser();
+        let result = parser.parse(input);
+        assert!(result.is_err());
+        let err = result.err().unwrap();
+        assert_eq!(
+            err.to_string(),
+            "Unterminated cloze deletion. Location: test.md:1"
+        );
+    }
+
+    /// BUG-19: a deletion left open at the end of a line is an error.
+    #[test]
+    fn test_unterminated_cloze_at_eol_is_error() {
+        let input = "C: foo [bar\nbaz] quux";
+        let parser = make_test_parser();
+        let result = parser.parse(input);
+        assert!(result.is_err());
+        let err = result.err().unwrap();
+        assert_eq!(
+            err.to_string(),
+            "Unterminated cloze deletion. Location: test.md:1"
+        );
+    }
+
+    /// BUG-17: `[text](url)` is a markdown link, not a cloze deletion.
+    /// Byte positions: "See [the docs](https://x) for " is 30 bytes of clean
+    /// text; the deletion covers "answer", bytes 30..=35.
+    #[test]
+    fn test_markdown_link_is_not_a_deletion() -> Result<(), ParserError> {
+        let input = "C: See [the docs](https://x) for [answer]";
+        let parser = make_test_parser();
+        let cards = parser.parse(input)?;
+
+        assert_cloze(&cards, "See [the docs](https://x) for answer", &[(30, 35)]);
+        Ok(())
+    }
+
     #[test]
     fn test_cloze_with_initial_blank_line() -> Result<(), ParserError> {
         let input = "C:\nBuild something people want in Lisp.\n\n— [Paul Graham], [_Hackers and Painters_]\n\n";
@@ -935,7 +1145,7 @@ mod tests {
     }
 
     fn make_test_parser() -> Parser {
-        Parser::new("test_deck".to_string(), PathBuf::from("test.md"))
+        Parser::new("test_deck".to_string(), PathBuf::from("test.md"), 0)
     }
 
     fn assert_cloze(cards: &[Card], clean_text: &str, deletions: &[(usize, usize)]) {
@@ -1019,12 +1229,13 @@ A: A systems programming language."#;
 
         let result = extract_frontmatter(input);
         assert!(result.is_ok());
-        let (metadata, content) = result.unwrap();
+        let (metadata, content, offset) = result.unwrap();
         assert_eq!(metadata.name, Some("Custom Deck Name".to_string()));
         assert_eq!(
             content.trim(),
             "Q: What is Rust?\nA: A systems programming language."
         );
+        assert_eq!(offset, 3);
     }
 
     #[test]
@@ -1038,12 +1249,13 @@ A: A systems programming language."#;
 
         let result = extract_frontmatter(input);
         assert!(result.is_ok());
-        let (metadata, content) = result.unwrap();
+        let (metadata, content, offset) = result.unwrap();
         assert_eq!(metadata.name, None);
         assert_eq!(
             content.trim(),
             "Q: What is Rust?\nA: A systems programming language."
         );
+        assert_eq!(offset, 3);
     }
 
     #[test]
@@ -1056,12 +1268,13 @@ A: A systems programming language."#;
 
         let result = extract_frontmatter(input);
         assert!(result.is_ok());
-        let (metadata, content) = result.unwrap();
+        let (metadata, content, offset) = result.unwrap();
         assert_eq!(metadata.name, None);
         assert_eq!(
             content.trim(),
             "Q: What is Rust?\nA: A systems programming language."
         );
+        assert_eq!(offset, 2);
     }
 
     #[test]
@@ -1069,9 +1282,10 @@ A: A systems programming language."#;
         let input = "Q: What is Rust?\nA: A systems programming language.";
         let result = extract_frontmatter(input);
         assert!(result.is_ok());
-        let (metadata, content) = result.unwrap();
+        let (metadata, content, offset) = result.unwrap();
         assert_eq!(metadata.name, None);
         assert_eq!(content, input);
+        assert_eq!(offset, 0);
     }
 
     #[test]
@@ -1109,7 +1323,7 @@ name = "Custom Deck Name"
 Q: What is Rust?
 A: A systems programming language."#;
 
-        let (metadata, content) = extract_frontmatter(input).unwrap();
+        let (metadata, content, _offset) = extract_frontmatter(input).unwrap();
         assert_eq!(metadata.name, Some("Custom Deck Name".to_string()));
 
         let parser = make_test_parser();
@@ -1160,6 +1374,54 @@ A: Genetic material."#,
         // Clean up
         std::fs::remove_dir_all(&directory).ok();
 
+        Ok(())
+    }
+
+    /// BUG-20: a parse error after `---` frontmatter reports the real file
+    /// line, not the line within the stripped content.
+    #[test]
+    fn test_parse_error_after_frontmatter_reports_real_line() -> Fallible<()> {
+        let directory = temp_dir().join("frontmatter_error_line_test");
+        create_dir_all(&directory).expect("Failed to create test directory");
+        let file = directory.join("deck.md");
+        // "A: orphan" is on file line 5 (1-based).
+        std::fs::write(
+            &file,
+            "---\nname = \"X\"\n---\n\nA: orphan answer\n",
+        )
+        .expect("Failed to write test file");
+
+        let result = parse_deck(&directory);
+        std::fs::remove_dir_all(&directory).ok();
+
+        assert!(result.is_err());
+        let err = result.err().unwrap();
+        assert!(
+            err.to_string().contains("deck.md:5"),
+            "expected real file line 5 in: {err}"
+        );
+        Ok(())
+    }
+
+    /// BUG-20: card ranges are absolute file lines when frontmatter is present.
+    #[test]
+    fn test_card_range_accounts_for_frontmatter() -> Fallible<()> {
+        let directory = temp_dir().join("frontmatter_range_test");
+        create_dir_all(&directory).expect("Failed to create test directory");
+        let file = directory.join("deck.md");
+        // Q: is on 0-based file line 4, A: on line 5.
+        std::fs::write(
+            &file,
+            "---\nname = \"X\"\n---\n\nQ: question\nA: answer\n",
+        )
+        .expect("Failed to write test file");
+
+        let deck = parse_deck(&directory);
+        std::fs::remove_dir_all(&directory).ok();
+
+        let cards = deck?;
+        assert_eq!(cards.len(), 1);
+        assert_eq!(cards[0].range(), (4, 5));
         Ok(())
     }
 
@@ -1277,5 +1539,78 @@ A: Genetic material."#,
         let mut cards = Vec::new();
         let result = parser.parse_line(State::End, Line::Eof, 0, &mut cards);
         assert!(result.is_err());
+    }
+
+    /// BUG-18: `Q:`/`C:`/`---` lines inside a fenced code block are literal
+    /// text, so an answer containing a fence round-trips as one card.
+    #[test]
+    fn test_card_syntax_inside_backtick_fence_is_text() -> Result<(), ParserError> {
+        let input =
+            "Q: What does the file look like?\nA: Like this:\n```\nQ: not a card\n---\nC: not [a] cloze\n```\nDone.";
+        let parser = make_test_parser();
+        let cards = parser.parse(input)?;
+
+        assert_eq!(cards.len(), 1);
+        assert!(matches!(
+            &cards[0].content(),
+            CardContent::Basic {
+                question,
+                answer,
+            } if question == "What does the file look like?"
+                && answer == "Like this:\n```\nQ: not a card\n---\nC: not [a] cloze\n```\nDone."
+        ));
+        Ok(())
+    }
+
+    /// BUG-18: tilde fences count too.
+    #[test]
+    fn test_card_syntax_inside_tilde_fence_is_text() -> Result<(), ParserError> {
+        let input = "Q: q\nA: a\n~~~\nQ: not a card\n~~~";
+        let parser = make_test_parser();
+        let cards = parser.parse(input)?;
+
+        assert_eq!(cards.len(), 1);
+        assert!(matches!(
+            &cards[0].content(),
+            CardContent::Basic {
+                question,
+                answer,
+            } if question == "q" && answer == "a\n~~~\nQ: not a card\n~~~"
+        ));
+        Ok(())
+    }
+
+    /// BUG-21: frontmatter errors name the file they came from.
+    #[test]
+    fn test_frontmatter_error_carries_file_path() -> Fallible<()> {
+        let directory = temp_dir().join("frontmatter_path_test");
+        create_dir_all(&directory).expect("Failed to create test directory");
+        let file = directory.join("broken.md");
+        std::fs::write(&file, "---\nname = \"X\"\n").expect("Failed to write test file");
+
+        let result = parse_deck(&directory);
+        std::fs::remove_dir_all(&directory).ok();
+
+        assert!(result.is_err());
+        let err = result.err().unwrap();
+        assert!(
+            err.to_string().contains("broken.md"),
+            "expected file path in: {err}"
+        );
+        assert!(err.to_string().contains("no closing '---'"));
+        Ok(())
+    }
+
+    /// BUG-26: cloze positions are byte offsets. Multi-byte characters before
+    /// and inside the deletion must yield byte positions, not char positions.
+    /// "Größe: " is 9 bytes; "10 µm" is 6 bytes (µ is 2 bytes).
+    #[test]
+    fn test_non_ascii_cloze_positions_are_bytes() -> Result<(), ParserError> {
+        let input = "C: Größe: [10 µm]";
+        let parser = make_test_parser();
+        let cards = parser.parse(input)?;
+
+        assert_cloze(&cards, "Größe: 10 µm", &[(9, 14)]);
+        Ok(())
     }
 }

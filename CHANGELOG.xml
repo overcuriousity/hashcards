@@ -49,6 +49,27 @@
             <change author="claude">
                 Session and sync state locks no longer use `.lock().unwrap()`: a panic in one request can no longer poison the locks and cascade into crashes of every subsequent request.
             </change>
+            <change author="claude">
+                An empty cloze deletion (`[]`) now produces a clear parse error with the file and line, instead of crashing the parser (debug builds) or silently corrupting cloze positions (release builds). (BUG-16)
+            </change>
+            <change author="claude">
+                Nested cloze brackets (`[[a]]`) and cloze deletions left open at the end of a line or file now produce clear parse errors with the file and line, instead of silently dropping brackets or reporting a misleading "must contain at least one cloze deletion" message. (BUG-19)
+            </change>
+            <change author="claude">
+                Markdown links (`[text](url)`) inside cloze cards are no longer misparsed as cloze deletions; they are passed through to Markdown like image syntax. The bracket escape rules are now documented in the README. (BUG-17)
+            </change>
+            <change author="claude">
+                `Q:`, `A:`, `C:`, and `---` lines inside fenced code blocks (``` or ~~~) are now treated as literal text instead of card syntax, so cards containing code samples parse correctly. (BUG-18)
+            </change>
+            <change author="claude">
+                Line numbers in parse errors, media errors, and the JSON export are no longer offset by the length of a file's TOML frontmatter; they now refer to real file lines. (BUG-20)
+            </change>
+            <change author="claude">
+                Frontmatter and file-read errors now name the file they came from; I/O, database, path, UTF-8, and JSON errors are rendered as human-readable messages instead of debug dumps; and parse errors no longer carry a redundant "Parse error:" prefix. (BUG-21)
+            </change>
+            <change author="claude">
+                Cloze deletion positions are documented as byte offsets (they were previously described as character positions, including in the JSON export), and a non-ASCII cloze round-trip test now pins this behavior. (BUG-26)
+            </change>
         </fixed>
         <added>
             <change author="claude">

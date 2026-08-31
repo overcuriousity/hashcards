@@ -263,6 +263,19 @@ desire: this is also vanity and vexation of spirit.
 — [Ecclesiastes] [6]:[9]
 ```
 
+Square brackets are reserved for cloze deletions inside `C:` cards. The
+exact rules:
+
+- `[text]` marks a cloze deletion. It must be non-empty and must close on
+  the same line it opens.
+- `\[` and `\]` produce literal square brackets.
+- Image syntax (`![alt](path)`) is passed through to Markdown untouched.
+- Link syntax (`[text](url)`) is passed through to Markdown untouched: a
+  bracket group immediately followed by `(` is treated as a link, not a
+  deletion.
+- Nested brackets (`[[a]]`) and deletions left open at the end of a line
+  are parse errors.
+
 ### Separators
 
 Optionally, cards can be separated by horizontal rules, like so:
