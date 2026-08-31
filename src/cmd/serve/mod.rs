@@ -121,6 +121,14 @@ mod tests {
             response.status()
         );
 
+        // The redirect target must show the running drill session, not the
+        // deck browser (the redirect alone fires on success and failure).
+        let body = response.text().await?;
+        assert!(
+            body.contains("value=\"Reveal\""),
+            "expected the post-redirect page to show the drill session, got: {body}"
+        );
+
         Ok(())
     }
 
