@@ -537,12 +537,7 @@ fn collection_post_inner(state: &AppState, slug: &str, form: FormData) -> Fallib
     // `handle_action` yields `ActionResult::Home`. Every action reaching here
     // leaves the session running; the only result needing dispatch is
     // `ContinueWithFlash`, which carries a one-shot message for the user.
-    let result = handle_action(
-        &mut session.mutable,
-        session.session_started_at,
-        action,
-        submitted_card,
-    )?;
+    let result = handle_action(&mut session.mutable, action, submitted_card)?;
 
     // BUG-45: a finished session changes due counts; refresh them in the
     // background so the landing page is up to date.

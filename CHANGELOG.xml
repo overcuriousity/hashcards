@@ -203,6 +203,9 @@
         </added>
         <changed>
             <change author="claude">
+                Internal cleanup: removed the unused session start time parameter threaded through the drill action handlers, a leftover from the era when reviews were flushed in a batch at session end. (BUG-09)
+            </change>
+            <change author="claude">
                 The database now records its schema version in a `schema_version` table, and schema changes are applied as numbered, ordered migrations instead of ad-hoc column probes. Databases created by newer versions of hashcards are rejected with a clear error instead of being modified. Existing databases are adopted automatically. (BUG-32)
             </change>
             <change author="eudoxia0">

@@ -158,7 +158,7 @@ Do **not** touch `ServerState.session_started_at` (`src/cmd/drill/state.rs:35`),
 - Consumes: nothing from other tasks.
 - Produces: `pub fn handle_action(mutable: &mut MutableState, action: Action) -> Fallible<ActionResult>` and `fn finish_session(mutable: &mut MutableState) -> Fallible<()>`. Task 3 and Task 5 read this file but do not call these; serve's `handlers.rs:396` is updated here.
 
-- [ ] **Step 1: Remove the parameter from `finish_session` and `handle_action`**
+- [x] **Step 1: Remove the parameter from `finish_session` and `handle_action`**
 
 In `src/cmd/drill/post.rs`:
 
@@ -185,7 +185,7 @@ Update the two internal calls (`post.rs:141` and `post.rs:217`) to `finish_sessi
 
 If `Timestamp` is now unused in any `use` list in `post.rs`, remove the import (it is still used by `Timestamp::now()` in the grade and finish paths, so in practice it stays).
 
-- [ ] **Step 2: Update the serve call site**
+- [x] **Step 2: Update the serve call site**
 
 In `src/cmd/serve/handlers.rs:396`:
 
@@ -193,7 +193,7 @@ In `src/cmd/serve/handlers.rs:396`:
     handle_action(&mut session.mutable, action)?;
 ```
 
-- [ ] **Step 3: Update the tests in `post.rs`**
+- [x] **Step 3: Update the tests in `post.rs`**
 
 The four tests currently create `let now = Timestamp::now();` and pass it as the second argument. Change each call to the two-argument form and delete the now-unused `now` binding, e.g.:
 
@@ -209,12 +209,12 @@ The four tests currently create `let now = Timestamp::now();` and pass it as the
 
 Apply the same change to `test_home_returns_home`, `test_shutdown_returns_continue_when_unfinished`, and `test_reveal_sets_flag`.
 
-- [ ] **Step 4: Build and run the full test suite**
+- [x] **Step 4: Build and run the full test suite**
 
 Run: `cargo build && cargo test`
 Expected: clean build with no unused-variable/unused-import warnings in `post.rs` or `handlers.rs`; all tests PASS.
 
-- [ ] **Step 5: Update CHANGELOG.xml**
+- [x] **Step 5: Update CHANGELOG.xml**
 
 Append inside `<unreleased><changed>`:
 
@@ -224,7 +224,7 @@ Append inside `<unreleased><changed>`:
             </change>
 ```
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/cmd/drill/post.rs src/cmd/serve/handlers.rs CHANGELOG.xml

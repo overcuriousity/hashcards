@@ -112,12 +112,7 @@ async fn action_handler(state: ServerState, form: FormData) -> Fallible<Option<F
         None => None,
     };
     let mut mutable = state.mutable.lock();
-    let result = handle_action(
-        &mut mutable,
-        state.session_started_at,
-        form.action,
-        submitted_card,
-    )?;
+    let result = handle_action(&mut mutable, form.action, submitted_card)?;
     match result {
         ActionResult::Shutdown => {
             // Release the lock before sending shutdown signal.
@@ -142,7 +137,6 @@ async fn action_handler(state: ServerState, form: FormData) -> Fallible<Option<F
 /// actions) skips the check.
 pub fn handle_action(
     mutable: &mut MutableState,
-    session_started_at: Timestamp,
     action: Action,
     submitted_card: Option<CardHash>,
 ) -> Fallible<ActionResult> {
@@ -185,7 +179,7 @@ pub fn handle_action(
             Ok(ActionResult::Continue)
         }
         Action::End => {
-            finish_session(mutable, session_started_at)?;
+            finish_session(mutable)?;
             Ok(ActionResult::SessionFinished)
         }
         Action::Shutdown => {
@@ -304,7 +298,7 @@ pub fn handle_action(
 
             // Was this the last card?
             if mutable.cards.is_empty() {
-                finish_session(mutable, session_started_at)?;
+                finish_session(mutable)?;
                 return Ok(ActionResult::SessionFinished);
             }
             Ok(ActionResult::Continue)
@@ -312,7 +306,7 @@ pub fn handle_action(
     }
 }
 
-fn finish_session(mutable: &mut MutableState, _session_started_at: Timestamp) -> Fallible<()> {
+fn finish_session(mutable: &mut MutableState) -> Fallible<()> {
     log::debug!("Session completed");
     let session_ended_at = Timestamp::now();
     mutable
@@ -409,8 +403,7 @@ mod tests {
     #[test]
     fn test_undo_with_no_reviews_is_noop() {
         let mut mutable = make_mutable();
-        let now = Timestamp::now();
-        let result = handle_action(&mut mutable, now, Action::Undo, None).unwrap();
+        let result = handle_action(&mut mutable, Action::Undo, None).unwrap();
         assert!(matches!(result, ActionResult::Continue));
         assert!(mutable.reviews.is_empty());
         assert!(mutable.cards.is_empty());
@@ -434,8 +427,7 @@ mod tests {
     #[test]
     fn test_home_returns_home() {
         let mut mutable = make_mutable();
-        let now = Timestamp::now();
-        let result = handle_action(&mut mutable, now, Action::Home, None).unwrap();
+        let result = handle_action(&mut mutable, Action::Home, None).unwrap();
         assert!(matches!(result, ActionResult::Home));
     }
 
@@ -443,8 +435,7 @@ mod tests {
     fn test_shutdown_before_finish_flashes_explanation() {
         let mut mutable = make_mutable();
         assert!(mutable.finished_at.is_none());
-        let now = Timestamp::now();
-        let result = handle_action(&mut mutable, now, Action::Shutdown, None).unwrap();
+        let result = handle_action(&mut mutable, Action::Shutdown, None).unwrap();
         match result {
             ActionResult::ContinueWithFlash(flash) => {
                 assert_eq!(flash.kind, FlashKind::Error);
@@ -457,9 +448,8 @@ mod tests {
     #[test]
     fn test_reveal_sets_flag() {
         let mut mutable = make_mutable();
-        let now = Timestamp::now();
         assert!(!mutable.reveal);
-        let result = handle_action(&mut mutable, now, Action::Reveal, None).unwrap();
+        let result = handle_action(&mut mutable, Action::Reveal, None).unwrap();
         assert!(matches!(result, ActionResult::Continue));
         assert!(mutable.reveal);
     }
@@ -467,8 +457,7 @@ mod tests {
     #[test]
     fn test_end_finishes_session() {
         let mut mutable = make_mutable();
-        let now = Timestamp::now();
-        let result = handle_action(&mut mutable, now, Action::End, None).unwrap();
+        let result = handle_action(&mut mutable, Action::End, None).unwrap();
         assert!(matches!(result, ActionResult::SessionFinished));
         assert!(mutable.finished_at.is_some());
     }
@@ -495,7 +484,7 @@ mod tests {
             jitter: Jitter::none(),
             rng: TinyRng::from_seed(1),
         };
-        let result = handle_action(&mut mutable, Timestamp::now(), Action::Good, None);
+        let result = handle_action(&mut mutable, Action::Good, None);
         assert!(result.is_err(), "the injected DB failure must propagate");
         // On error, in-memory state must be completely unchanged.
         assert_eq!(mutable.cards.len(), 1, "card must still be in the queue");
@@ -535,15 +524,14 @@ mod tests {
         let card_a = make_card("QA");
         let card_b = make_card("QB");
         let mut mutable = make_state_with_cards(vec![card_a.clone(), card_b.clone()]);
-        let started = Timestamp::now();
-        handle_action(&mut mutable, started, Action::Reveal, None).unwrap();
-        handle_action(&mut mutable, started, Action::Good, None).unwrap();
+        handle_action(&mut mutable, Action::Reveal, None).unwrap();
+        handle_action(&mut mutable, Action::Good, None).unwrap();
         assert_eq!(mutable.cards.len(), 1);
         assert_eq!(mutable.reviews.len(), 1);
         // Inject a DB failure into the undo: point the recorded review at a
         // nonexistent row, so the void update matches zero rows and errors.
         mutable.reviews[0].review_id = 999_999;
-        let result = handle_action(&mut mutable, started, Action::Undo, None);
+        let result = handle_action(&mut mutable, Action::Undo, None);
         assert!(result.is_err(), "the injected DB failure must propagate");
         // On error, in-memory state must be completely unchanged: no duplicate
         // card in the queue, undo stack intact.
@@ -562,7 +550,7 @@ mod tests {
         let card = make_card("Q1");
         let mut mutable = make_state_with_cards(vec![card.clone()]);
         // No Reveal has happened; a grade POST (e.g. from a stale page) arrives.
-        let result = handle_action(&mut mutable, Timestamp::now(), Action::Good, None).unwrap();
+        let result = handle_action(&mut mutable, Action::Good, None).unwrap();
         assert!(
             matches!(result, ActionResult::Ignored(_)),
             "a grade without a prior reveal must be reported as ignored"
@@ -583,19 +571,16 @@ mod tests {
         let card_a = make_card("QA");
         let card_b = make_card("QB");
         let mut mutable = make_state_with_cards(vec![card_a.clone(), card_b.clone()]);
-        let started = Timestamp::now();
         // First grade of card A, carrying its hash: accepted.
-        handle_action(&mut mutable, started, Action::Reveal, None).unwrap();
-        let result =
-            handle_action(&mut mutable, started, Action::Good, Some(card_a.hash())).unwrap();
+        handle_action(&mut mutable, Action::Reveal, None).unwrap();
+        let result = handle_action(&mut mutable, Action::Good, Some(card_a.hash())).unwrap();
         assert!(matches!(result, ActionResult::Continue));
         assert_eq!(mutable.cards.len(), 1);
         assert_eq!(mutable.cards[0].hash(), card_b.hash());
         // Card B is revealed, then the SAME grade POST for card A arrives again
         // (key auto-repeat / double submit): it must be a no-op.
-        handle_action(&mut mutable, started, Action::Reveal, None).unwrap();
-        let result =
-            handle_action(&mut mutable, started, Action::Good, Some(card_a.hash())).unwrap();
+        handle_action(&mut mutable, Action::Reveal, None).unwrap();
+        let result = handle_action(&mut mutable, Action::Good, Some(card_a.hash())).unwrap();
         assert!(
             matches!(result, ActionResult::Ignored(_)),
             "a grade whose card hash does not match the queue head must be ignored"
@@ -638,12 +623,12 @@ mod tests {
             rng: TinyRng::from_seed(1),
         };
         // Grade the only card: the session finishes and the DB row is closed.
-        handle_action(&mut mutable, started_at, Action::Reveal, None).unwrap();
-        let result = handle_action(&mut mutable, started_at, Action::Good, None).unwrap();
+        handle_action(&mut mutable, Action::Reveal, None).unwrap();
+        let result = handle_action(&mut mutable, Action::Good, None).unwrap();
         assert!(matches!(result, ActionResult::SessionFinished));
         assert!(mutable.finished_at.is_some());
         // Undo must reopen the DB session row, not just the in-memory flag.
-        handle_action(&mut mutable, started_at, Action::Undo, None).unwrap();
+        handle_action(&mut mutable, Action::Undo, None).unwrap();
         assert!(mutable.finished_at.is_none());
         let sessions = mutable.db.get_all_sessions().unwrap();
         assert_eq!(sessions.len(), 1);
