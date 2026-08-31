@@ -63,7 +63,6 @@ use crate::collection::Collection;
 use crate::db::Database;
 use crate::error::ErrorReport;
 use crate::error::Fallible;
-use crate::error::fail;
 use crate::media::load::MediaLoader;
 use crate::rng::TinyRng;
 use crate::rng::shuffle;
@@ -239,18 +238,29 @@ pub async fn start_server(config: ServerConfig) -> Fallible<()> {
     if mutable.finished_at.is_some() {
         Ok(())
     } else {
-        // Mark the session as closed so ended_at reflects the actual stop time.
-        if let Err(e) = mutable
-            .db
-            .close_session(mutable.session_id, Timestamp::now())
-        {
-            log::error!(
-                "failed to close interrupted session {}: {e}",
-                mutable.session_id
-            );
-        }
-        fail("Session interrupted before completion")
+        // Interrupted (e.g. Ctrl+C). Reviews persist as they happen, so
+        // nothing is lost: close the session row and exit cleanly.
+        let summary = finalize_interrupted_session(&mutable)?;
+        println!("{summary}");
+        Ok(())
     }
+}
+
+/// Close an interrupted session's DB row and describe what was preserved.
+///
+/// Every grade is written to the database the moment it happens, so an
+/// interrupt loses nothing; this only stamps `ended_at` and counts the
+/// persisted (non-voided) reviews for the exit message.
+pub fn finalize_interrupted_session(mutable: &MutableState) -> Fallible<String> {
+    mutable
+        .db
+        .close_session(mutable.session_id, Timestamp::now())?;
+    let count = mutable
+        .db
+        .get_reviews_for_session(mutable.session_id)?
+        .len();
+    let noun = if count == 1 { "review" } else { "reviews" };
+    Ok(format!("Session interrupted. {count} {noun} saved."))
 }
 
 async fn script_handler(
@@ -425,4 +435,69 @@ fn bury_siblings(deck: Vec<Card>) -> Vec<Card> {
         result.push(card);
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cmd::drill::cache::Cache;
+    use crate::db::ReviewRecord;
+    use crate::fsrs::Grade;
+    use crate::types::performance::Jitter;
+    use crate::types::performance::Performance;
+    use crate::types::performance::update_performance;
+
+    /// BUG-10: interrupting a drill closes the session row and reports how
+    /// many reviews were persisted, instead of erroring out.
+    #[test]
+    fn test_finalize_interrupted_session_closes_row_and_summarizes() -> Fallible<()> {
+        let mut db = Database::new(":memory:")?;
+        let started_at = Timestamp::now();
+        let session_id = db.create_session(started_at)?;
+        let hash = CardHash::hash_bytes(b"card");
+        db.insert_card(hash, started_at)?;
+        // Persist one review, exactly as the grade path does.
+        let mut rng = TinyRng::from_seed(1);
+        let performance = update_performance(
+            Performance::New,
+            Grade::Good,
+            started_at,
+            Jitter::none(),
+            &mut rng,
+        );
+        let record = ReviewRecord {
+            card_hash: hash,
+            reviewed_at: started_at,
+            grade: Grade::Good,
+            stability: performance.stability,
+            difficulty: performance.difficulty,
+            interval_raw: performance.interval_raw,
+            interval_days: performance.interval_days,
+            due_date: performance.due_date,
+            duration_ms: Some(1500),
+        };
+        db.insert_review_and_update_performance(
+            session_id,
+            &record,
+            Performance::Reviewed(performance),
+        )?;
+        let mutable = MutableState::new(
+            db,
+            session_id,
+            Cache::new(),
+            Vec::new(),
+            Jitter::none(),
+            TinyRng::from_seed(1),
+        );
+
+        let summary = finalize_interrupted_session(&mutable)?;
+
+        assert_eq!(summary, "Session interrupted. 1 review saved.");
+        // The session row is closed: get_all_sessions decodes ended_at as a
+        // non-null Timestamp, so it only succeeds once the row is closed.
+        let sessions = mutable.db.get_all_sessions()?;
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].session_id, session_id);
+        Ok(())
+    }
 }

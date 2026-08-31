@@ -2,6 +2,9 @@
     <unreleased>
         <fixed>
             <change author="claude">
+                Interrupting a drill with Ctrl+C now exits cleanly: the session is closed, a summary of the saved reviews is printed, and the exit code is 0. Reviews are written to the database as they happen, so an interrupted session loses nothing. Previously the command exited with the error "Session interrupted before completion". (BUG-10)
+            </change>
+            <change author="claude">
                 Re-bookmarking a card during drilling (pressing `b` on an already-bookmarked card) no longer erases the bookmark's note or resets its creation time. (BUG-07)
             </change>
             <change author="mstoeck3">

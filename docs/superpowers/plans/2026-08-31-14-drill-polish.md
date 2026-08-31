@@ -246,7 +246,7 @@ git commit -m "refactor: remove dead session_started_at threading from drill act
 - Consumes: `MutableState::new(db, session_id, cache, cards)` (`src/cmd/drill/state.rs:55`), `Database::close_session(session_id, ended_at)` (`src/db.rs:342`), `Database::get_reviews_for_session(session_id) -> Fallible<Vec<ReviewRow>>` (`src/db.rs:502`, returns only non-voided reviews — matching the void-not-delete rule), `Database::insert_review_and_update_performance` (`src/db.rs:259`), `update_performance` (`src/types/performance.rs`).
 - Produces: `pub fn finalize_interrupted_session(mutable: &MutableState) -> Fallible<String>` in `src/cmd/drill/server.rs`. No other task calls it.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Add at the bottom of `src/cmd/drill/server.rs`:
 
@@ -305,12 +305,12 @@ mod tests {
 
 (`CardHash::hash_bytes` needs `use crate::types::card_hash::CardHash;` — already imported at the top of `server.rs`. `Fallible`, `Database`, `Timestamp`, `MutableState` are likewise already imported there and arrive via `use super::*;`.)
 
-- [ ] **Step 2: Run the test and see it fail**
+- [x] **Step 2: Run the test and see it fail**
 
 Run: `cargo test test_finalize_interrupted_session_closes_row_and_summarizes`
 Expected: FAIL to compile with "cannot find function `finalize_interrupted_session`" — the function does not exist yet. (This is the failing-first step; the behavioral regression — `start_server` returning an error on interrupt — is asserted gone in Step 4's code review of the tail, since exercising a real signal is out of scope by design.)
 
-- [ ] **Step 3: Implement `finalize_interrupted_session`**
+- [x] **Step 3: Implement `finalize_interrupted_session`**
 
 Add to `src/cmd/drill/server.rs`, just below `start_server`:
 
@@ -328,7 +328,7 @@ pub fn finalize_interrupted_session(mutable: &MutableState) -> Fallible<String> 
 }
 ```
 
-- [ ] **Step 4: Rewrite the tail of `start_server`**
+- [x] **Step 4: Rewrite the tail of `start_server`**
 
 Replace `src/cmd/drill/server.rs:218-231` (from the `// Check if session was complete...` comment through the closing brace of the `else` block):
 
@@ -350,12 +350,12 @@ Also remove `use crate::error::fail;` from the imports at the top of `server.rs`
 
 Note: the pre-existing `state.mutable.lock().unwrap()` at `server.rs:219` stays as-is — the `.lock().unwrap()` sweep is BUG-50 (PR 6), out of scope here.
 
-- [ ] **Step 5: Run the tests and see them pass**
+- [x] **Step 5: Run the tests and see them pass**
 
 Run: `cargo test --lib cmd::drill`
 Expected: PASS, including the new test and the existing drill server tests in `src/cmd/drill/mod.rs`.
 
-- [ ] **Step 6: Update CHANGELOG.xml**
+- [x] **Step 6: Update CHANGELOG.xml**
 
 Append inside `<unreleased><fixed>`:
 
@@ -365,7 +365,7 @@ Append inside `<unreleased><fixed>`:
             </change>
 ```
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add src/cmd/drill/server.rs CHANGELOG.xml
