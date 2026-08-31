@@ -19,6 +19,7 @@ pub mod katex;
 pub mod post;
 pub mod server;
 pub mod state;
+pub mod stats;
 pub mod template;
 
 #[cfg(test)]
@@ -419,6 +420,45 @@ mod tests {
         let body = response.text().await?;
         assert!(body.contains("flash-success"), "body: {body}");
         assert!(body.contains("Hello there"));
+        Ok(())
+    }
+
+    /// FEAT-02: the drill server serves the stats page at /stats.
+    #[tokio::test]
+    async fn test_stats_page() -> Fallible<()> {
+        let port = pick_unused_port().unwrap();
+        let directory = create_tmp_copy_of_test_directory()?;
+        let config = ServerConfig {
+            directory: Some(directory),
+            host: TEST_HOST.to_string(),
+            port,
+            session_started_at: Timestamp::now(),
+            card_limit: None,
+            new_card_limit: None,
+            deck_filter: None,
+            shuffle: false,
+            jitter: Jitter::none(),
+            answer_controls: AnswerControls::Full,
+            bury_siblings: false,
+        };
+        let handle = spawn(start_server(config));
+        wait_for_server(TEST_HOST, port).await?;
+        let resp = reqwest::get(format!("http://{TEST_HOST}:{port}/stats")).await?;
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+        let body = resp.text().await?;
+        assert!(
+            body.contains("Due forecast"),
+            "missing forecast section: {body}"
+        );
+        assert!(
+            body.contains("Reviews per day"),
+            "missing history section: {body}"
+        );
+        assert!(
+            body.contains("Grade distribution"),
+            "missing grades section: {body}"
+        );
+        handle.abort();
         Ok(())
     }
 }

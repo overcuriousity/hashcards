@@ -56,6 +56,7 @@ use crate::cmd::drill::katex::katex_mhchem_js_handler;
 use crate::cmd::drill::post::post_handler;
 use crate::cmd::drill::state::MutableState;
 use crate::cmd::drill::state::ServerState;
+use crate::cmd::drill::stats::stats_handler;
 use crate::cmd::drill::template::icon_192_handler;
 use crate::cmd::drill::template::icon_512_handler;
 use crate::cmd::drill::template::manifest_handler;
@@ -210,6 +211,7 @@ pub async fn start_server(config: ServerConfig) -> Fallible<()> {
     let app = Router::new();
     let app = app.route("/", get(get_handler));
     let app = app.route("/", post(post_handler));
+    let app = app.route("/stats", get(stats_handler));
     let app = app.route("/manifest.json", get(manifest_handler));
     let app = app.route("/icons/icon-192.png", get(icon_192_handler));
     let app = app.route("/icons/icon-512.png", get(icon_512_handler));
