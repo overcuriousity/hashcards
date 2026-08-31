@@ -65,7 +65,7 @@ pub struct Bookmark {
 
 /// The schema version a freshly created database gets, and the highest
 /// migration number `migrate` knows how to apply.
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 5;
 
 impl Database {
     pub fn new(database_path: &str) -> Fallible<Self> {
@@ -480,7 +480,7 @@ impl Database {
 
     /// Count the number of non-voided reviews performed on the given date.
     pub fn count_reviews_in_date(&self, date: Date) -> Fallible<usize> {
-        let sql = "select count(*) from reviews where substr(reviewed_at, 1, 10) = ? and voided = 0;";
+        let sql = "select count(*) from reviews where reviewed_date = ? and voided = 0;";
         let count: i64 = self.conn.query_row(sql, params![date], |row| row.get(0))?;
         Ok(count as usize)
     }
@@ -623,6 +623,7 @@ fn migrate(tx: &Transaction) -> Fallible<()> {
             2 => migrate_add_bookmarks(tx)?,
             3 => migrate_add_voided(tx)?,
             4 => migrate_add_review_indexes(tx)?,
+            5 => migrate_add_reviewed_date(tx)?,
             other => {
                 return fail(format!(
                     "Internal error: no migration defined for schema version {other}."
@@ -665,6 +666,14 @@ fn migrate_add_review_indexes(tx: &Transaction) -> Fallible<()> {
     tx.execute_batch(
         "create index if not exists idx_reviews_card_hash on reviews (card_hash);
          create index if not exists idx_reviews_session_id on reviews (session_id);",
+    )?;
+    Ok(())
+}
+
+fn migrate_add_reviewed_date(tx: &Transaction) -> Fallible<()> {
+    tx.execute_batch(
+        "alter table reviews add column reviewed_date text generated always as (substr(reviewed_at, 1, 10)) virtual;
+         create index if not exists idx_reviews_reviewed_date on reviews (reviewed_date);",
     )?;
     Ok(())
 }
@@ -1162,6 +1171,86 @@ mod tests {
         assert!(result.is_err());
         let message = result.err().unwrap().to_string();
         assert!(message.contains("999"), "unhelpful error: {message}");
+        Ok(())
+    }
+
+    /// Migrating a legacy DB that already holds rows backfills the generated
+    /// reviewed_date column for existing reviews (the convergence test above
+    /// only covers empty tables).
+    #[test]
+    fn test_populated_legacy_db_migrates() -> Fallible<()> {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("pop.db");
+        let path = path.to_str().unwrap();
+        {
+            let conn = Connection::open(path)?;
+            conn.execute_batch(OLD_SCHEMA)?;
+            conn.execute_batch(
+                "insert into cards (card_hash, added_at, review_count) values ('abc', '2026-08-30T09:00:00.000', 1);
+                 insert into sessions (session_id, started_at, ended_at) values (1, '2026-08-30T09:00:00.000', '2026-08-30T09:00:00.000');
+                 insert into reviews (review_id, session_id, card_hash, reviewed_at, grade, stability, difficulty, interval_raw, interval_days, due_date)
+                 values (1, 1, 'abc', '2026-08-30T09:00:00.000', 'good', 2.0, 5.0, 2.0, 2, '2026-09-01');",
+            )?;
+        }
+        let db = Database::new(path)?;
+        let d: String = db
+            .conn
+            .query_row("select reviewed_date from reviews;", [], |r| r.get(0))?;
+        assert_eq!(d, "2026-08-30");
+        let day = Date::new(chrono::NaiveDate::from_ymd_opt(2026, 8, 30).unwrap());
+        assert_eq!(db.count_reviews_in_date(day)?, 1);
+        Ok(())
+    }
+
+    /// count_reviews_in_date filters on the indexed reviewed_date column
+    /// (no substr() full scan) and still counts per-day correctly.
+    #[test]
+    fn test_count_reviews_in_date_uses_date_index() -> Fallible<()> {
+        use chrono::NaiveDate;
+        let mut db = Database::new(":memory:")?;
+        let card_hash = CardHash::hash_bytes(b"a");
+        db.insert_card(card_hash, Timestamp::now())?;
+        let day1 = Timestamp::new(
+            NaiveDate::from_ymd_opt(2026, 8, 30)
+                .unwrap()
+                .and_hms_opt(9, 0, 0)
+                .unwrap(),
+        );
+        let day2 = Timestamp::new(
+            NaiveDate::from_ymd_opt(2026, 8, 31)
+                .unwrap()
+                .and_hms_opt(9, 0, 0)
+                .unwrap(),
+        );
+        let session_id = db.create_session(day1)?;
+        db.insert_review_and_update_performance(
+            session_id,
+            &sample_review(card_hash, day1, 2.0),
+            sample_performance(day1, 2.0, 1),
+        )?;
+        db.insert_review_and_update_performance(
+            session_id,
+            &sample_review(card_hash, day1, 2.0),
+            sample_performance(day1, 2.0, 2),
+        )?;
+        db.insert_review_and_update_performance(
+            session_id,
+            &sample_review(card_hash, day2, 2.0),
+            sample_performance(day2, 2.0, 3),
+        )?;
+
+        assert_eq!(db.count_reviews_in_date(day1.date())?, 2);
+        assert_eq!(db.count_reviews_in_date(day2.date())?, 1);
+
+        let plan: String = db.conn.query_row(
+            "explain query plan select count(*) from reviews where reviewed_date = '2026-08-31' and voided = 0;",
+            [],
+            |row| row.get(3),
+        )?;
+        assert!(
+            plan.contains("idx_reviews_reviewed_date"),
+            "date query does not use the index; plan: {plan}"
+        );
         Ok(())
     }
 

@@ -13,6 +13,9 @@
             <change author="claude">
                 Deleting a card (e.g. via the orphans command) is now a single atomic statement relying on the database's foreign-key cascade. Previously the card's reviews were deleted in a separate step, so an interruption could erase review history while leaving the card in place. Note that card deletion permanently removes the card's review history and bookmarks; unlike undo, it does not keep a voided audit trail. (BUG-31)
             </change>
+            <change author="claude">
+                Review lookups by card, by session, and by day are now backed by database indexes (including a generated per-day date column), so daily review counts and session stats no longer scan the whole reviews table. (BUG-33)
+            </change>
         </fixed>
         <added>
             <change author="mstoeck3">
