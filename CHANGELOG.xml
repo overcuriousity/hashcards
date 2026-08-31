@@ -19,6 +19,9 @@
             <change author="claude">
                 Markdown links (`[text](url)`) inside cloze cards are no longer misparsed as cloze deletions; they are passed through to Markdown like image syntax. The bracket escape rules are now documented in the README. (BUG-17)
             </change>
+            <change author="claude">
+                `Q:`, `A:`, `C:`, and `---` lines inside fenced code blocks (``` or ~~~) are now treated as literal text instead of card syntax, so cards containing code samples parse correctly. (BUG-18)
+            </change>
         </fixed>
         <added>
             <change author="mstoeck3">

@@ -214,8 +214,52 @@ enum Line {
     Eof,
 }
 
-impl Line {
-    fn read(line: &str) -> Self {
+/// The kind of fenced code block currently open.
+#[derive(PartialEq)]
+enum FenceKind {
+    /// ``` fences.
+    Backtick,
+    /// ~~~ fences.
+    Tilde,
+}
+
+/// Classifies lines, tracking fenced-code-block state: while inside a
+/// ``` or ~~~ fence, every line (including the closing fence) is `Text`,
+/// so card syntax inside code blocks is never parsed.
+struct LineReader {
+    fence: Option<FenceKind>,
+}
+
+impl LineReader {
+    fn new() -> Self {
+        LineReader { fence: None }
+    }
+
+    fn read(&mut self, line: &str) -> Line {
+        let trimmed = line.trim_start();
+        match self.fence {
+            Some(FenceKind::Backtick) => {
+                if trimmed.starts_with("```") {
+                    self.fence = None;
+                }
+                return Line::Text(line.to_string());
+            }
+            Some(FenceKind::Tilde) => {
+                if trimmed.starts_with("~~~") {
+                    self.fence = None;
+                }
+                return Line::Text(line.to_string());
+            }
+            None => {}
+        }
+        if trimmed.starts_with("```") {
+            self.fence = Some(FenceKind::Backtick);
+            return Line::Text(line.to_string());
+        }
+        if trimmed.starts_with("~~~") {
+            self.fence = Some(FenceKind::Tilde);
+            return Line::Text(line.to_string());
+        }
         if is_question(line) {
             Line::StartQuestion(trim(line))
         } else if is_answer(line) {
@@ -279,10 +323,11 @@ impl Parser {
     pub fn parse(&self, text: &str) -> Result<Vec<Card>, ParserError> {
         let mut cards = Vec::new();
         let mut state = State::Start;
+        let mut reader = LineReader::new();
         let lines: Vec<&str> = text.lines().collect();
         let last_line = if lines.is_empty() { 0 } else { lines.len() - 1 };
         for (line_num, line) in lines.iter().enumerate() {
-            let line = Line::read(line);
+            let line = reader.read(line);
             state = self.parse_line(state, line, line_num, &mut cards)?;
         }
         self.parse_line(state, Line::Eof, last_line, &mut cards)?;
@@ -1404,6 +1449,45 @@ A: Genetic material."#,
                 question,
                 answer,
             } if question == "foo" && answer == "bar"
+        ));
+        Ok(())
+    }
+
+    /// BUG-18: `Q:`/`C:`/`---` lines inside a fenced code block are literal
+    /// text, so an answer containing a fence round-trips as one card.
+    #[test]
+    fn test_card_syntax_inside_backtick_fence_is_text() -> Result<(), ParserError> {
+        let input =
+            "Q: What does the file look like?\nA: Like this:\n```\nQ: not a card\n---\nC: not [a] cloze\n```\nDone.";
+        let parser = make_test_parser();
+        let cards = parser.parse(input)?;
+
+        assert_eq!(cards.len(), 1);
+        assert!(matches!(
+            &cards[0].content(),
+            CardContent::Basic {
+                question,
+                answer,
+            } if question == "What does the file look like?"
+                && answer == "Like this:\n```\nQ: not a card\n---\nC: not [a] cloze\n```\nDone."
+        ));
+        Ok(())
+    }
+
+    /// BUG-18: tilde fences count too.
+    #[test]
+    fn test_card_syntax_inside_tilde_fence_is_text() -> Result<(), ParserError> {
+        let input = "Q: q\nA: a\n~~~\nQ: not a card\n~~~";
+        let parser = make_test_parser();
+        let cards = parser.parse(input)?;
+
+        assert_eq!(cards.len(), 1);
+        assert!(matches!(
+            &cards[0].content(),
+            CardContent::Basic {
+                question,
+                answer,
+            } if question == "q" && answer == "a\n~~~\nQ: not a card\n~~~"
         ));
         Ok(())
     }
