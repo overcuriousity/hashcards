@@ -306,6 +306,14 @@ enum State {
     },
     /// Reading a cloze card (C:)
     ReadingCloze { text: String, start_line: usize },
+    /// Reading a term (T:), waiting for its definition.
+    ReadingTerm { term: String, start_line: usize },
+    /// Reading a definition (D:) for a term.
+    ReadingDefinition {
+        term: String,
+        definition: String,
+        start_line: usize,
+    },
     /// End state.
     End,
 }
@@ -317,6 +325,10 @@ enum Line {
     StartAnswer(String),
     /// A line like `C: <text>`.
     StartCloze(String),
+    /// A line like `T: <text>` (term-definition shorthand).
+    StartTerm(String),
+    /// A line like `D: <text>` (term-definition shorthand).
+    StartDefinition(String),
     /// A line that's just `---` (flashcard separator).
     Separator,
     /// Any other line.
@@ -377,6 +389,10 @@ impl LineReader {
             Line::StartAnswer(trim(line))
         } else if is_cloze(line) {
             Line::StartCloze(trim(line))
+        } else if is_term(line) {
+            Line::StartTerm(trim(line))
+        } else if is_definition(line) {
+            Line::StartDefinition(trim(line))
         } else if is_separator(line) {
             Line::Separator
         } else {
@@ -395,6 +411,14 @@ fn is_answer(line: &str) -> bool {
 
 fn is_cloze(line: &str) -> bool {
     line.starts_with("C:")
+}
+
+fn is_term(line: &str) -> bool {
+    line.starts_with("T:")
+}
+
+fn is_definition(line: &str) -> bool {
+    line.starts_with("D:")
 }
 
 fn is_separator(line: &str) -> bool {
@@ -503,6 +527,15 @@ impl Parser {
                     text,
                     start_line: line_num,
                 }),
+                Line::StartTerm(text) => Ok(State::ReadingTerm {
+                    term: text,
+                    start_line: line_num,
+                }),
+                Line::StartDefinition(_) => Err(ParserError::new(
+                    "Found definition tag without a term.",
+                    self.file_path.clone(),
+                    line_num,
+                )),
                 Line::Separator => Ok(State::Start),
                 Line::Text(_) => Ok(State::Start),
                 Line::Eof => Ok(State::End),
@@ -523,6 +556,16 @@ impl Parser {
                 }),
                 Line::StartCloze(_) => Err(ParserError::new(
                     "Found cloze tag while reading a question.",
+                    self.file_path.clone(),
+                    line_num,
+                )),
+                Line::StartTerm(_) => Err(ParserError::new(
+                    "Found term tag while reading a question.",
+                    self.file_path.clone(),
+                    line_num,
+                )),
+                Line::StartDefinition(_) => Err(ParserError::new(
+                    "Found definition tag while reading a question.",
                     self.file_path.clone(),
                     line_num,
                 )),
@@ -582,6 +625,26 @@ impl Parser {
                             start_line: line_num,
                         })
                     }
+                    Line::StartTerm(text) => {
+                        // Finalize the previous card.
+                        let card = Card::new(
+                            self.deck_name.clone(),
+                            self.file_path.clone(),
+                            (start_line, line_num),
+                            CardContent::new_basic(question, answer),
+                        );
+                        cards.push(card);
+                        // Start reading a term.
+                        Ok(State::ReadingTerm {
+                            term: text,
+                            start_line: line_num,
+                        })
+                    }
+                    Line::StartDefinition(_) => Err(ParserError::new(
+                        "Found definition tag without a term.",
+                        self.file_path.clone(),
+                        line_num,
+                    )),
                     Line::Separator => {
                         // Finalize the current card.
                         let card = Card::new(
@@ -637,6 +700,20 @@ impl Parser {
                             start_line: line_num,
                         })
                     }
+                    Line::StartTerm(new_text) => {
+                        // Finalize the previous cloze card.
+                        cards.extend(self.parse_cloze_cards(text, start_line, line_num)?);
+                        // Start reading a term.
+                        Ok(State::ReadingTerm {
+                            term: new_text,
+                            start_line: line_num,
+                        })
+                    }
+                    Line::StartDefinition(_) => Err(ParserError::new(
+                        "Found definition tag without a term.",
+                        self.file_path.clone(),
+                        line_num,
+                    )),
                     Line::Separator => {
                         // Finalize the current cloze card.
                         cards.extend(self.parse_cloze_cards(text, start_line, line_num)?);
@@ -654,8 +731,128 @@ impl Parser {
                     }
                 }
             }
+            State::ReadingTerm { term, start_line } => match line {
+                Line::StartQuestion(_) => Err(ParserError::new(
+                    "Found question tag while reading a term without a definition.",
+                    self.file_path.clone(),
+                    line_num,
+                )),
+                Line::StartAnswer(_) => Err(ParserError::new(
+                    "Found answer tag while reading a term. Terms take a definition (D:), not an answer.",
+                    self.file_path.clone(),
+                    line_num,
+                )),
+                Line::StartCloze(_) => Err(ParserError::new(
+                    "Found cloze tag while reading a term without a definition.",
+                    self.file_path.clone(),
+                    line_num,
+                )),
+                Line::StartTerm(_) => Err(ParserError::new(
+                    "New term without a definition.",
+                    self.file_path.clone(),
+                    line_num,
+                )),
+                Line::StartDefinition(text) => Ok(State::ReadingDefinition {
+                    term,
+                    definition: text,
+                    start_line,
+                }),
+                Line::Separator => Err(ParserError::new(
+                    "Found flashcard separator while reading a term without a definition.",
+                    self.file_path.clone(),
+                    line_num,
+                )),
+                Line::Text(text) => Ok(State::ReadingTerm {
+                    term: format!("{term}\n{text}"),
+                    start_line,
+                }),
+                Line::Eof => Err(ParserError::new(
+                    "File ended while reading a term without a definition.",
+                    self.file_path.clone(),
+                    line_num,
+                )),
+            },
+            State::ReadingDefinition {
+                term,
+                definition,
+                start_line,
+            } => match line {
+                Line::StartQuestion(text) => {
+                    self.push_term_cards(term, definition, start_line, line_num, cards);
+                    Ok(State::ReadingQuestion {
+                        question: text,
+                        start_line: line_num,
+                    })
+                }
+                Line::StartAnswer(_) => Err(ParserError::new(
+                    "Found answer tag while reading a definition.",
+                    self.file_path.clone(),
+                    line_num,
+                )),
+                Line::StartCloze(text) => {
+                    self.push_term_cards(term, definition, start_line, line_num, cards);
+                    Ok(State::ReadingCloze {
+                        text,
+                        start_line: line_num,
+                    })
+                }
+                Line::StartTerm(text) => {
+                    self.push_term_cards(term, definition, start_line, line_num, cards);
+                    Ok(State::ReadingTerm {
+                        term: text,
+                        start_line: line_num,
+                    })
+                }
+                Line::StartDefinition(_) => Err(ParserError::new(
+                    "Found definition tag while already reading a definition.",
+                    self.file_path.clone(),
+                    line_num,
+                )),
+                Line::Separator => {
+                    self.push_term_cards(term, definition, start_line, line_num, cards);
+                    Ok(State::Start)
+                }
+                Line::Text(text) => Ok(State::ReadingDefinition {
+                    term,
+                    definition: format!("{definition}\n{text}"),
+                    start_line,
+                }),
+                Line::Eof => {
+                    self.push_term_cards(term, definition, start_line, line_num, cards);
+                    Ok(State::End)
+                }
+            },
             State::End => unreachable!("Parsed a line after the end of the file."),
         }
+    }
+
+    /// Expand a term-definition pair into its two reciprocal basic cards.
+    ///
+    /// The generated cards are ordinary basic cards, so their hashes are
+    /// identical to hand-written `Q: Define: ...` / `Q: Term for: ...`
+    /// equivalents.
+    fn push_term_cards(
+        &self,
+        term: String,
+        definition: String,
+        start_line: usize,
+        end_line: usize,
+        cards: &mut Vec<Card>,
+    ) {
+        let term = term.trim();
+        let definition = definition.trim();
+        cards.push(Card::new(
+            self.deck_name.clone(),
+            self.file_path.clone(),
+            (start_line, end_line),
+            CardContent::new_basic(format!("Define: {term}"), definition),
+        ));
+        cards.push(Card::new(
+            self.deck_name.clone(),
+            self.file_path.clone(),
+            (start_line, end_line),
+            CardContent::new_basic(format!("Term for: {definition}"), term),
+        ));
     }
 
     fn parse_cloze_cards(
@@ -1751,6 +1948,65 @@ A: Genetic material."#,
         let cards = parser.parse(input)?;
 
         assert_cloze(&cards, "Größe: 10 µm", &[(9, 14)]);
+        Ok(())
+    }
+
+    /// FEAT-06: `T:`/`D:` shorthand expands into two reciprocal cards.
+    #[test]
+    fn test_term_definition_expands_to_two_cards() -> Result<(), ParserError> {
+        let input = "T: Monoid\nD: A semigroup with an identity element.";
+        let parser = make_test_parser();
+        let cards = parser.parse(input)?;
+        assert_eq!(cards.len(), 2);
+        assert!(matches!(
+            &cards[0].content(),
+            CardContent::Basic { question, answer }
+                if question == "Define: Monoid"
+                && answer == "A semigroup with an identity element."
+        ));
+        assert!(matches!(
+            &cards[1].content(),
+            CardContent::Basic { question, answer }
+                if question == "Term for: A semigroup with an identity element."
+                && answer == "Monoid"
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn test_term_definition_hashes_match_handwritten_cards() -> Result<(), ParserError> {
+        let shorthand = "T: Monoid\nD: A semigroup with an identity element.";
+        let handwritten = "Q: Define: Monoid\n\
+                           A: A semigroup with an identity element.\n\
+                           \n\
+                           ---\n\
+                           \n\
+                           Q: Term for: A semigroup with an identity element.\n\
+                           A: Monoid";
+        let parser = make_test_parser();
+        let from_shorthand: HashSet<_> = parser.parse(shorthand)?.iter().map(|c| c.hash()).collect();
+        let from_handwritten: HashSet<_> = parser.parse(handwritten)?.iter().map(|c| c.hash()).collect();
+        assert_eq!(from_shorthand.len(), 2);
+        assert_eq!(from_shorthand, from_handwritten);
+        Ok(())
+    }
+
+    #[test]
+    fn test_two_term_pairs_separated() -> Result<(), ParserError> {
+        let input = "T: Monoid\nD: A semigroup with an identity element.\n\n---\n\nT: Magma\nD: A set with a binary operation.";
+        let parser = make_test_parser();
+        let cards = parser.parse(input)?;
+        assert_eq!(cards.len(), 4);
+        Ok(())
+    }
+
+    #[test]
+    fn test_term_pair_followed_directly_by_term_pair() -> Result<(), ParserError> {
+        // A new T: finalizes the previous pair, like Q: after an answer.
+        let input = "T: Monoid\nD: A semigroup with an identity element.\nT: Magma\nD: A set with a binary operation.";
+        let parser = make_test_parser();
+        let cards = parser.parse(input)?;
+        assert_eq!(cards.len(), 4);
         Ok(())
     }
 }
