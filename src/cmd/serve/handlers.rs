@@ -35,13 +35,13 @@ use crate::cmd::drill::template::page_template;
 use crate::cmd::drill::template::page_template_with_script;
 use crate::cmd::serve::browse::build_deck_tree;
 use crate::cmd::serve::browse::render_browse_page;
-use crate::cmd::serve::config::HedgedocEntry;
 use crate::cmd::serve::config::ResolvedCollection;
 use crate::cmd::serve::git::clone_or_pull;
 use crate::cmd::serve::hedgedoc::all_hedgedoc_entries;
 use crate::cmd::serve::hedgedoc::build_combined_infos;
 use crate::cmd::serve::hedgedoc::build_note;
 use crate::cmd::serve::hedgedoc::build_source;
+use crate::cmd::serve::hedgedoc::commit_add;
 use crate::cmd::serve::hedgedoc::create_minimal_config;
 use crate::cmd::serve::hedgedoc::normalize_hedgedoc_url;
 use crate::cmd::serve::hedgedoc::persist_hedgedoc_entries;
@@ -705,36 +705,6 @@ pub async fn hedgedoc_add_handler(
         }
     }
 
-    // Compute what the new entries list would be without mutating shared state yet.
-    // This lets us persist to disk first; we only update in-memory state after success.
-    let new_entries: Vec<HedgedocEntry> = {
-        let sources = state.hedgedoc_sources.lock();
-        if new_source.is_some() {
-            if sources
-                .iter()
-                .flat_map(|s| s.notes.iter())
-                .any(|n| n.url == url)
-            {
-                return Flash::error("This note is already added.").redirect("/hedgedoc");
-            }
-        } else if new_note.is_some() {
-            if let Some(src) = sources.iter().find(|s| s.source_uri == source_uri) {
-                if src.notes.iter().any(|n| n.url == url) {
-                    return Flash::error("This note is already added.").redirect("/hedgedoc");
-                }
-            }
-        }
-        let mut updated = sources.clone();
-        if let Some(ref source) = new_source {
-            updated.push(source.clone());
-        } else if let Some(ref note) = new_note {
-            if let Some(src) = updated.iter_mut().find(|s| s.source_uri == source_uri) {
-                src.notes.push(note.clone());
-            }
-        }
-        all_hedgedoc_entries(&updated)
-    };
-
     // Get or create config path outside the lock, using spawn_blocking for the
     // filesystem work so we don't block the async runtime.
     let maybe_config_path = state.config_path.lock().clone();
@@ -745,11 +715,8 @@ pub async fn hedgedoc_add_handler(
             let p =
                 match tokio::task::spawn_blocking(move || create_minimal_config(&data_dir_owned))
                     .await
-                    .map_err(|e| {
-                        crate::error::ErrorReport::new(format!(
-                            "Config creation task panicked: {e}"
-                        ))
-                    }) {
+                    .map_err(|e| ErrorReport::new(format!("Config creation task panicked: {e}")))
+                {
                     Ok(Ok(p)) => p,
                     Ok(Err(e)) | Err(e) => {
                         log::error!("Failed to create minimal config file: {e}");
@@ -766,40 +733,40 @@ pub async fn hedgedoc_add_handler(
         }
     };
 
-    // Persist to TOML via spawn_blocking (atomic write).
+    // BUG-39: duplicate check + mutation + persist under ONE lock, persisting
+    // from the post-mutation state. spawn_blocking because commit_add writes
+    // the config file while holding the lock.
+    let sources_arc = state.hedgedoc_sources.clone();
     let config_path_owned = config_path.clone();
-    let entries_owned = new_entries.clone();
-    if let Err(e) = tokio::task::spawn_blocking(move || {
-        persist_hedgedoc_entries(&config_path_owned, &entries_owned)
+    let url_owned = url.clone();
+    let source_uri_owned = source_uri.clone();
+    let snapshot = match tokio::task::spawn_blocking(move || {
+        commit_add(
+            &sources_arc,
+            Some(config_path_owned.as_path()),
+            &url_owned,
+            &source_uri_owned,
+            new_source,
+            new_note,
+        )
     })
     .await
-    .map_err(|e| crate::error::ErrorReport::new(format!("Persist task panicked: {e}")))
+    .map_err(|e| ErrorReport::new(format!("HedgeDoc add task panicked: {e}")))
     .and_then(|r| r)
     {
-        log::error!("Failed to persist HedgeDoc entries to config: {e}");
-        return Flash::error(format!("Failed to save HedgeDoc sources to config: {e}"))
-            .redirect("/hedgedoc");
-    }
-
-    // Persist succeeded: now update in-memory state.
-    {
-        let mut sources = state.hedgedoc_sources.lock();
-        if let Some(source) = new_source {
-            sources.push(source);
-        } else if let Some(note) = new_note {
-            if let Some(src) = sources.iter_mut().find(|s| s.source_uri == source_uri) {
-                src.notes.push(note);
-            }
+        Ok(snapshot) => snapshot,
+        Err(e) => {
+            log::error!("Failed to add HedgeDoc source {url}: {e}");
+            return Flash::error(e.to_string()).redirect("/hedgedoc");
         }
-    }
+    };
 
-    // Refresh combined collection infos.
-    let sources_snapshot = state.hedgedoc_sources.lock().clone();
-    let combined = build_combined_infos(&state.config.collections, &sources_snapshot);
+    // Refresh combined collection infos from the committed snapshot.
+    let combined = build_combined_infos(&state.config.collections, &snapshot);
     *state.collections.write().await = combined;
 
     // Update last synced time if the newly added note fetched without error.
-    if sources_snapshot
+    if snapshot
         .iter()
         .flat_map(|s| s.notes.iter())
         .any(|n| n.url == url && n.last_error.is_none())

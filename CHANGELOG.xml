@@ -2,6 +2,9 @@
     <unreleased>
         <fixed>
             <change author="claude">
+                Adding and deleting HedgeDoc sources is now atomic: the duplicate check, the in-memory change, and the config-file write happen under a single lock, so concurrent add/delete requests can no longer lose configured sources. Failures are reported to the user instead of only being logged. (BUG-39)
+            </change>
+            <change author="claude">
                 HedgeDoc note filenames now include a short hash of the note ID, so two notes whose IDs differ only in special characters no longer overwrite each other's files. Old-format files are cleaned up automatically on the next sync. (BUG-41)
             </change>
             <change author="claude">

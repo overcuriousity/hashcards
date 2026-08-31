@@ -374,6 +374,57 @@ pub async fn sync_source(url: &str, rc: &ResolvedCollection) -> Fallible<(String
     Ok((deck_name, file_name))
 }
 
+/// Atomically commit an added HedgeDoc source or note (BUG-39): the duplicate
+/// check, the mutation, and the config persist all happen under one lock
+/// acquisition over the sources state, and the persist is computed from the
+/// post-mutation state. On any error the in-memory state is left unchanged.
+/// Returns the post-mutation snapshot on success.
+pub fn commit_add(
+    sources: &Mutex<Vec<HedgedocSource>>,
+    config_path: Option<&Path>,
+    url: &str,
+    source_uri: &str,
+    new_source: Option<HedgedocSource>,
+    new_note: Option<HedgedocNote>,
+) -> Fallible<Vec<HedgedocSource>> {
+    let mut guard = sources.lock();
+    if guard
+        .iter()
+        .flat_map(|s| s.notes.iter())
+        .any(|n| n.url == url)
+    {
+        return fail(format!("HedgeDoc note is already configured: {url}"));
+    }
+    let mut updated = guard.clone();
+    if let Some(source) = new_source {
+        match updated
+            .iter_mut()
+            .find(|s| s.source_uri == source.source_uri)
+        {
+            // Another request created this source concurrently: merge our
+            // note into it rather than pushing a duplicate source.
+            Some(existing) => existing.notes.extend(source.notes),
+            None => updated.push(source),
+        }
+    } else if let Some(note) = new_note {
+        match updated.iter_mut().find(|s| s.source_uri == source_uri) {
+            Some(src) => src.notes.push(note),
+            None => {
+                return fail(format!(
+                    "HedgeDoc source was removed while adding the note: {source_uri}"
+                ));
+            }
+        }
+    } else {
+        return fail("Nothing to add for HedgeDoc source.");
+    }
+    if let Some(path) = config_path {
+        persist_hedgedoc_entries(path, &all_hedgedoc_entries(&updated))?;
+    }
+    *guard = updated.clone();
+    Ok(updated)
+}
+
 /// Compute `CollectionInfo` for a single HedgeDoc source.
 pub fn collection_info_for_source(source: &HedgedocSource) -> CollectionInfo {
     let (total_cards, due_today) =
@@ -826,5 +877,113 @@ mod tests {
         remove_legacy_note_file(dir.path(), url, &current);
         assert!(!dir.path().join("abc123.md").exists());
         assert!(dir.path().join(&current).exists());
+    }
+
+    fn test_note_for(url: &str) -> HedgedocNote {
+        HedgedocNote {
+            url: url.to_string(),
+            deck_name: "Deck".to_string(),
+            file_name: "deck.md".to_string(),
+            last_error: None,
+        }
+    }
+
+    fn test_source_for(uri: &str, url: &str) -> HedgedocSource {
+        HedgedocSource {
+            source_uri: uri.to_string(),
+            collection: ResolvedCollection {
+                name: uri.to_string(),
+                slug: slug_for_source_uri(uri),
+                coll_dir: PathBuf::from("/nonexistent/hedgedoc/test"),
+                db_path: PathBuf::from("/nonexistent/db/test.db"),
+            },
+            notes: vec![test_note_for(url)],
+        }
+    }
+
+    #[test]
+    fn commit_add_rejects_duplicate_and_leaves_state_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("hashcards.toml");
+        write_toml(&config_path, "[server]\ndata_dir = \"/tmp\"\n");
+        let sources = Mutex::new(vec![test_source_for(
+            "https://n.example.com",
+            "https://n.example.com/doc1",
+        )]);
+
+        let result = commit_add(
+            &sources,
+            Some(&config_path),
+            "https://n.example.com/doc1",
+            "https://n.example.com",
+            None,
+            Some(test_note_for("https://n.example.com/doc1")),
+        );
+        assert!(result.is_err());
+        assert_eq!(sources.lock()[0].notes.len(), 1);
+    }
+
+    #[test]
+    fn commit_add_persist_failure_leaves_memory_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        // Config path in a directory that does not exist: persist must fail.
+        let missing_config = dir.path().join("no-such-dir").join("hashcards.toml");
+        let sources = Mutex::new(vec![test_source_for(
+            "https://n.example.com",
+            "https://n.example.com/doc1",
+        )]);
+
+        let result = commit_add(
+            &sources,
+            Some(&missing_config),
+            "https://n.example.com/doc2",
+            "https://n.example.com",
+            None,
+            Some(test_note_for("https://n.example.com/doc2")),
+        );
+        assert!(result.is_err());
+        assert_eq!(sources.lock()[0].notes.len(), 1);
+    }
+
+    /// Regression test (BUG-39): concurrent adds must not lose entries. The
+    /// old handler snapshotted, persisted, and applied under separate lock
+    /// acquisitions, so interleaved adds could persist a config missing each
+    /// other's notes. `commit_add` holds one lock across check+mutate+persist.
+    #[test]
+    fn concurrent_commit_adds_lose_no_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("hashcards.toml");
+        write_toml(&config_path, "[server]\ndata_dir = \"/tmp\"\n");
+        let sources = Arc::new(Mutex::new(vec![test_source_for(
+            "https://n.example.com",
+            "https://n.example.com/doc0",
+        )]));
+
+        let mut handles = Vec::new();
+        for i in 1..=8 {
+            let sources = sources.clone();
+            let config_path = config_path.clone();
+            handles.push(std::thread::spawn(move || {
+                let url = format!("https://n.example.com/doc{i}");
+                commit_add(
+                    &sources,
+                    Some(&config_path),
+                    &url,
+                    "https://n.example.com",
+                    None,
+                    Some(test_note_for(&url)),
+                )
+                .unwrap();
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        assert_eq!(sources.lock()[0].notes.len(), 9);
+        let content = std::fs::read_to_string(&config_path).unwrap();
+        for i in 0..=8 {
+            assert!(content.contains(&format!("doc{i}")), "config lost doc{i}");
+        }
     }
 }
