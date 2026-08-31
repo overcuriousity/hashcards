@@ -2,6 +2,9 @@
     <unreleased>
         <fixed>
             <change author="mstoeck3">
+                The in-browser card editor now re-checks the source file's modification time immediately before atomically replacing it, so a concurrent change on disk is never silently overwritten. If reverting a rejected edit fails, the editor now reports that the file may be inconsistent instead of silently ignoring the failure. (BUG-36)
+            </change>
+            <change author="mstoeck3">
                 In serve mode, an error while rendering a card or handling an action no longer destroys the running drill session. The session now stays in place behind a per-collection lock, so after a transient error the same card is shown again and progress is kept.
             </change>
             <change author="mstoeck3">

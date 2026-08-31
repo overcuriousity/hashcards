@@ -183,8 +183,7 @@ fn edit_post_inner(state: &AppState, slug: &str, hash_hex: &str, form: EditForm)
     let new_cards = match new_cards_result {
         Ok(c) => c,
         Err(e) => {
-            // Revert the file.
-            let _ = std::fs::write(&file_path, &file_content);
+            revert_file(&file_path, &file_content)?;
             return fail(format!("Parse error — edit reverted: {e}"));
         }
     };
@@ -311,6 +310,27 @@ fn tmp_path_for(file_path: &Path) -> PathBuf {
     dir.join(format!(".{file_name}.hashcards-edit.tmp"))
 }
 
+/// Write `content` to `file_path` atomically (tmp file + rename).
+fn write_atomic(file_path: &Path, content: &str) -> Fallible<()> {
+    let tmp = tmp_path_for(file_path);
+    std::fs::write(&tmp, content)?;
+    std::fs::rename(&tmp, file_path)?;
+    Ok(())
+}
+
+/// Restore a file to its pre-edit content after a rejected edit.
+///
+/// A failure here means the rejected edit is still on disk, so the error
+/// says so explicitly instead of being swallowed.
+fn revert_file(file_path: &Path, original: &str) -> Fallible<()> {
+    write_atomic(file_path, original).map_err(|e| {
+        ErrorReport::new(format!(
+            "Failed to revert {} after a rejected edit: {e}. The file may be inconsistent — check it by hand before editing again.",
+            file_path.display()
+        ))
+    })
+}
+
 // ── Utilities ─────────────────────────────────────────────────────────────────
 
 fn find_card_by_hash(cards: &[Card], hash: CardHash) -> Fallible<&Card> {
@@ -435,6 +455,44 @@ mod tests {
         assert_eq!(result, "Q: foo edited\nA: bar edited\n");
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_revert_file_restores_content() {
+        let dir = std::env::temp_dir().join("hashcards_edit_test_revert_ok");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("test.md");
+        std::fs::write(&path, "garbled").unwrap();
+
+        revert_file(&path, "Q: foo\nA: bar\n").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "Q: foo\nA: bar\n");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_revert_failure_reports_inconsistent_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join("hashcards_edit_test_revert_fail");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("test.md");
+        std::fs::write(&path, "Q: foo\nA: bar\n").unwrap();
+        // Read-only directory: the atomic tmp-file write must fail.
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        let result = revert_file(&path, "Q: foo\nA: bar\n");
+
+        // Restore permissions before asserting so cleanup always works.
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("may be inconsistent"),
+            "unexpected message: {msg}"
+        );
     }
 
     #[test]
