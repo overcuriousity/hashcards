@@ -50,6 +50,7 @@ use crate::cmd::serve::state::DrillSession;
 use crate::cmd::serve::state::SharedSession;
 use crate::collection::Collection;
 use crate::db::Database;
+use crate::error::ErrorReport;
 use crate::error::Fallible;
 use crate::error::fail;
 use crate::media::load::MediaLoader;
@@ -315,7 +316,9 @@ fn create_session(
     // Shuffle
     let seed = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap()
+        .map_err(|e| {
+            ErrorReport::new(format!("The system clock is set before the Unix epoch: {e}"))
+        })?
         .as_nanos() as u64;
     let mut rng = TinyRng::from_seed(seed);
     due_cards = shuffle(due_cards, &mut rng);

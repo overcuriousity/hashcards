@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::future::pending;
 use std::collections::HashSet;
 use std::fmt::Display;
 use std::fmt::Formatter;
@@ -59,6 +60,7 @@ use crate::cmd::drill::template::icon_512_handler;
 use crate::cmd::drill::template::manifest_handler;
 use crate::collection::Collection;
 use crate::db::Database;
+use crate::error::ErrorReport;
 use crate::error::Fallible;
 use crate::error::fail;
 use crate::media::load::MediaLoader;
@@ -149,7 +151,9 @@ pub async fn start_server(config: ServerConfig) -> Fallible<()> {
     let due_today: Vec<Card> = if config.shuffle {
         let seed = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap()
+            .map_err(|e| {
+                ErrorReport::new(format!("The system clock is set before the Unix epoch: {e}"))
+            })?
             .as_nanos() as u64;
         let mut rng = TinyRng::from_seed(seed);
         shuffle(due_today, &mut rng)
@@ -316,9 +320,12 @@ async fn file_handler(
 
 async fn shutdown_signal(shutdown_rx: Receiver<()>) {
     let ctrl_c = async {
-        signal::ctrl_c()
-            .await
-            .expect("failed to install Ctrl+C handler");
+        if let Err(e) = signal::ctrl_c().await {
+            log::error!(
+                "Failed to install Ctrl+C handler; graceful shutdown on Ctrl+C is disabled: {e}"
+            );
+            pending::<()>().await;
+        }
     };
 
     let shutdown = async {
