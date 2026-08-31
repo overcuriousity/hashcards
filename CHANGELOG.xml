@@ -2,6 +2,9 @@
     <unreleased>
         <fixed>
             <change author="claude">
+                HedgeDoc sources that fail to initialize at server startup (for example while the HedgeDoc instance is unreachable) are no longer silently dropped from the configuration. They now appear with an "Error" status, are retried on every sync, and are only removed when explicitly deleted. (BUG-40)
+            </change>
+            <change author="claude">
                 Deleting a HedgeDoc source now also deletes its downloaded note files from disk. The review database is deliberately kept so review history survives re-adding the source; the confirmation message states exactly what was deleted and what was kept. (BUG-42)
             </change>
             <change author="claude">

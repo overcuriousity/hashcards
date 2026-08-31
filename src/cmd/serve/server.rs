@@ -48,11 +48,13 @@ use crate::cmd::serve::handlers::hedgedoc_sync_now_handler;
 use crate::cmd::serve::handlers::sync_handler;
 use crate::cmd::serve::hedgedoc::build_combined_infos;
 use crate::cmd::serve::hedgedoc::build_note;
-use crate::cmd::serve::hedgedoc::build_source;
+use crate::cmd::serve::hedgedoc::build_source_lossless;
+use crate::cmd::serve::hedgedoc::error_note;
 use crate::cmd::serve::hedgedoc::source_uri_from_url;
 use crate::cmd::serve::hedgedoc::spawn_hedgedoc_sync_task;
 use crate::cmd::serve::landing::landing_handler;
 use crate::cmd::serve::state::AppState;
+use crate::cmd::serve::state::HedgedocSource;
 use crate::error::Fallible;
 use crate::types::timestamp::Timestamp;
 
@@ -89,39 +91,29 @@ pub async fn start_serve(config: ResolvedServeConfig) -> Fallible<()> {
     let data_dir: Option<PathBuf> = config.data_dir.clone();
 
     let hedgedoc_sources_init = if let Some(ref dd) = data_dir {
-        let mut sources = Vec::new();
+        let mut sources: Vec<HedgedocSource> = Vec::new();
         for entry in &config.hedgedoc_entries {
-            let maybe_source_uri = source_uri_from_url(&entry.url);
-            let maybe_collection = maybe_source_uri.as_ref().and_then(|source_uri| {
-                sources
-                    .iter()
-                    .find(|s: &&crate::cmd::serve::state::HedgedocSource| {
-                        &s.source_uri == source_uri
-                    })
-                    .map(|s| s.collection.clone())
-            });
-
-            if let Some(collection) = maybe_collection {
-                match build_note(&entry.url, &collection).await {
-                    Ok(note) => {
-                        if let Some(source_uri) = maybe_source_uri {
-                            if let Some(existing) =
-                                sources.iter_mut().find(|s| s.source_uri == source_uri)
-                            {
-                                existing.notes.push(note);
-                            }
+            let existing_idx = source_uri_from_url(&entry.url)
+                .and_then(|source_uri| sources.iter().position(|s| s.source_uri == source_uri));
+            match existing_idx {
+                Some(idx) => {
+                    // Additional note for an already-built source. build_note
+                    // reports sync failures via `last_error` rather than
+                    // erroring, and even a hard error keeps the entry (BUG-40).
+                    let collection = sources[idx].collection.clone();
+                    match build_note(&entry.url, &collection).await {
+                        Ok(note) => sources[idx].notes.push(note),
+                        Err(e) => {
+                            log::error!("Failed to initialize HedgeDoc note {}: {e}", entry.url);
+                            sources[idx]
+                                .notes
+                                .push(error_note(&entry.url, e.to_string()));
                         }
                     }
-                    Err(e) => {
-                        log::error!("Failed to initialize HedgeDoc source {}: {e}", entry.url)
-                    }
                 }
-                continue;
-            }
-
-            match build_source(&entry.url, dd).await {
-                Ok(s) => sources.push(s),
-                Err(e) => log::error!("Failed to initialize HedgeDoc source {}: {e}", entry.url),
+                // First note for this source (or unparseable URL):
+                // build_source_lossless never drops the entry.
+                None => sources.push(build_source_lossless(&entry.url, dd).await),
             }
         }
         sources

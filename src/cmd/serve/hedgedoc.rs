@@ -518,6 +518,39 @@ pub fn cleanup_after_delete(outcome: &DeleteOutcome) -> String {
     "Source removed.".to_string()
 }
 
+/// A placeholder note carrying an initialization error. `last_error: Some`
+/// is what the manage UI renders as the "Error" status.
+pub fn error_note(url: &str, message: String) -> HedgedocNote {
+    HedgedocNote {
+        url: url.to_string(),
+        deck_name: note_id_from_url(url).unwrap_or_else(|| "note".to_string()),
+        file_name: note_file_name(url),
+        last_error: Some(message),
+    }
+}
+
+/// Build a source for `url`, never dropping it (BUG-40): if initialization
+/// fails (unparseable URL, filesystem error, fetch failure), return a
+/// placeholder source whose note carries the error, so the configured entry
+/// stays in memory — and in the config file — with an Error status until the
+/// user explicitly deletes it. The periodic sync retries it automatically.
+pub async fn build_source_lossless(url: &str, data_dir: &Path) -> HedgedocSource {
+    match build_source(url, data_dir).await {
+        Ok(source) => source,
+        Err(e) => {
+            let msg = e.to_string();
+            log::error!("Failed to initialize HedgeDoc source {url}: {msg}");
+            let source_uri = source_uri_from_url(url).unwrap_or_else(|| url.to_string());
+            let collection = resolved_collection(&source_uri, data_dir);
+            HedgedocSource {
+                source_uri,
+                collection,
+                notes: vec![error_note(url, msg)],
+            }
+        }
+    }
+}
+
 /// Compute `CollectionInfo` for a single HedgeDoc source.
 pub fn collection_info_for_source(source: &HedgedocSource) -> CollectionInfo {
     let (total_cards, due_today) =
@@ -1206,5 +1239,27 @@ mod tests {
             message.contains("kept"),
             "message must say what remains: {message}"
         );
+    }
+
+    /// Regression test (BUG-40): a source that fails to initialize at startup
+    /// must stay in memory with an Error status — and therefore survive the
+    /// config round-trip — instead of being silently dropped and then written
+    /// out of the config by the next add/delete.
+    #[tokio::test]
+    async fn build_source_lossless_keeps_failing_entry_with_error_status() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = build_source_lossless("not a valid url", dir.path()).await;
+
+        assert_eq!(source.notes.len(), 1);
+        assert_eq!(source.notes[0].url, "not a valid url");
+        assert!(
+            source.notes[0].last_error.is_some(),
+            "failing source must carry an Error status"
+        );
+
+        // The entry survives the config persistence round-trip.
+        let entries = all_hedgedoc_entries(&[source]);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].url, "not a valid url");
     }
 }
