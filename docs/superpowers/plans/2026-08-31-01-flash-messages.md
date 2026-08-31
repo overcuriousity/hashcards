@@ -57,7 +57,7 @@ Additional constraints for this plan:
   ```
 - Encoding contract: `redirect` percent-encodes the message into `?flash=<encoded>&kind=<success|error>`. `from_query` does **no** decoding because axum's `Query` extractor already percent-decodes values; it reads the map directly.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `src/flash.rs` with only the test module (the `use super::*;` will fail to find the types):
 
@@ -139,12 +139,12 @@ Register the module in `src/main.rs` — after line 19 (`mod error;`) insert:
 mod flash;
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cargo test flash`
 Expected: COMPILE ERROR (`Flash`/`FlashKind` not found).
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Prepend to `src/flash.rs` (above the test module):
 
@@ -288,12 +288,12 @@ Append to `src/cmd/drill/style.css`:
 }
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test flash`
 Expected: all 8 tests PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 cargo fmt
@@ -319,7 +319,7 @@ Claude-Session: https://claude.ai/code/session_012SzQd3T2Dbb4nr1FGnFjTW"
 - Consumes: `crate::flash::Flash` from Task 1.
 - Produces: `ActionResult::ContinueWithFlash(Flash)` — new variant of `pub enum ActionResult` in `src/cmd/drill/post.rs`; `handle_action` may return it, and every caller must map it to `flash.redirect(...)`. Also: drill `get_handler` now takes `Query<HashMap<String, String>>` and renders the flash above the page body; `inner` becomes `async fn inner(state: ServerState, flash: Option<Flash>) -> Fallible<Markup>`.
 
-- [ ] **Step 1: Write the failing integration test**
+- [x] **Step 1: Write the failing integration test**
 
 In `src/cmd/drill/mod.rs`, inside the existing `mod tests`, add (imports `pick_unused_port`, `spawn`, `wait_for_server`, `create_tmp_copy_of_test_directory`, `Timestamp`, `ServerConfig`, `AnswerControls`, `start_server`, `TEST_HOST` already exist in that module):
 
@@ -355,12 +355,12 @@ async fn test_flash_query_param_renders_banner() -> Fallible<()> {
 }
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run: `cargo test test_flash_query_param_renders_banner`
 Expected: FAIL — the assertion `body.contains("flash-success")` fails (query param is ignored today).
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 In `src/cmd/drill/post.rs`, add imports:
 
@@ -482,12 +482,12 @@ async fn inner(state: ServerState, flash: Option<Flash>) -> Fallible<Markup> {
 
 (The error arm still returns `StatusCode::OK` here — Task 10 fixes that; do not fix it in this task.)
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test test_flash_query_param_renders_banner` then `cargo test`
 Expected: PASS; full suite green.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 cargo fmt
@@ -523,7 +523,7 @@ Every redirect target in serve mode must render an incoming flash: `/` (landing)
   - `bookmark_list_inner(state: &AppState, slug: &str, flash: Option<Flash>) -> Fallible<String>`
   - Also: `spawn_test_server` helper in serve `mod.rs` tests (used by Tasks 6, 7, 11).
 
-- [ ] **Step 1: Write the failing integration test and the test-server helper**
+- [x] **Step 1: Write the failing integration test and the test-server helper**
 
 In `src/cmd/serve/mod.rs`, inside `mod tests`, add the helper (above the existing test) and refactor is NOT needed yet — the existing test keeps its inline config. Add:
 
@@ -574,12 +574,12 @@ async fn test_flash_query_param_renders_on_collection_page() -> Fallible<()> {
 }
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run: `cargo test test_flash_query_param_renders_on_collection_page`
 Expected: FAIL on `body.contains("flash-success")`.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 `src/cmd/serve/handlers.rs` — add imports:
 
@@ -795,12 +795,12 @@ and inside its `page_template(html! { ... })`, render the flash first:
         div.bookmarks {
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test test_flash_query_param_renders_on_collection_page` then `cargo test`
 Expected: PASS; full suite green.
 
-- [ ] **Step 5: Update CHANGELOG.xml (FEAT-01)**
+- [x] **Step 5: Update CHANGELOG.xml (FEAT-01)**
 
 In `CHANGELOG.xml`, inside `<unreleased><added>`, add:
 
@@ -810,7 +810,7 @@ In `CHANGELOG.xml`, inside `<unreleased><added>`, add:
             </change>
 ```
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 cargo fmt
@@ -834,7 +834,7 @@ Claude-Session: https://claude.ai/code/session_012SzQd3T2Dbb4nr1FGnFjTW"
 - Consumes: `ActionResult::ContinueWithFlash` (Task 2), `Flash`, `FlashKind` (Task 1).
 - Produces: nothing new.
 
-- [ ] **Step 1: Write the failing regression test**
+- [x] **Step 1: Write the failing regression test**
 
 In `src/cmd/drill/post.rs` `mod tests`, add `use crate::flash::FlashKind;` to the test imports and **replace** the existing `test_shutdown_returns_continue_when_unfinished` test with:
 
@@ -855,12 +855,12 @@ fn test_shutdown_before_finish_flashes_explanation() {
 }
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run: `cargo test test_shutdown_before_finish_flashes_explanation`
 Expected: FAIL with `panicked at 'expected ContinueWithFlash'`.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 Replace the `Action::Shutdown` arm in `handle_action` (`post.rs:144-150`):
 
@@ -876,12 +876,12 @@ Replace the `Action::Shutdown` arm in `handle_action` (`post.rs:144-150`):
         }
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test test_shutdown_before_finish_flashes_explanation` then `cargo test`
 Expected: PASS; full suite green.
 
-- [ ] **Step 5: Update CHANGELOG.xml (BUG-11)**
+- [x] **Step 5: Update CHANGELOG.xml (BUG-11)**
 
 In `CHANGELOG.xml`, inside `<unreleased><fixed>`, add:
 
@@ -891,7 +891,7 @@ In `CHANGELOG.xml`, inside `<unreleased><fixed>`, add:
             </change>
 ```
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 cargo fmt
@@ -915,7 +915,7 @@ Claude-Session: https://claude.ai/code/session_012SzQd3T2Dbb4nr1FGnFjTW"
 - Consumes: `MutableState` (pub fields: `reveal, db, session_id, cache, cards, reviews, finished_at, card_shown_at`), `RenderContext`, `CompletionAction`.
 - Produces: `render_completion_page` behavior change only; signature unchanged (`pub fn render_completion_page(ctx: &RenderContext, mutable: &MutableState) -> Fallible<Markup>`). Serve mode (`handlers.rs:138`) picks the fix up automatically.
 
-- [ ] **Step 1: Write the failing regression test**
+- [x] **Step 1: Write the failing regression test**
 
 `src/cmd/drill/get.rs` has no tests module; add one at the end of the file:
 
@@ -962,12 +962,12 @@ mod tests {
 
 (`AnswerControls` is already imported at the top of `get.rs` via `use crate::cmd::drill::server::AnswerControls;`.)
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run: `cargo test test_completion_page_without_reviews_skips_stats`
 Expected: FAIL — today the page says "Done — 0 cards in 0 s (0 s/card)." and contains "Session Stats".
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 In `src/cmd/drill/get.rs`, extract the `(action_button, redirect_notice)` match that currently sits inside `render_completion_page` into a helper, add an early return, and add the empty-page renderer. At the top of `render_completion_page` insert:
 
@@ -1039,12 +1039,12 @@ fn render_empty_completion_page(ctx: &RenderContext) -> Markup {
 }
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test test_completion_page_without_reviews_skips_stats` then `cargo test`
 Expected: PASS; full suite green.
 
-- [ ] **Step 5: Update CHANGELOG.xml (BUG-05)**
+- [x] **Step 5: Update CHANGELOG.xml (BUG-05)**
 
 In `CHANGELOG.xml`, inside `<unreleased><fixed>`, add:
 
@@ -1054,7 +1054,7 @@ In `CHANGELOG.xml`, inside `<unreleased><fixed>`, add:
             </change>
 ```
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 cargo fmt
@@ -1079,7 +1079,7 @@ Claude-Session: https://claude.ai/code/session_012SzQd3T2Dbb4nr1FGnFjTW"
 - Consumes: `Flash` (Task 1), flash rendering on `/collection/{slug}` (Task 3), `spawn_test_server` (Task 3), `fail` from `crate::error`.
 - Produces: `collection_start_handler` error arm redirects with `Flash::error(e.to_string())` — Task 7 leaves this handler alone.
 
-- [ ] **Step 1: Write the failing regression test**
+- [x] **Step 1: Write the failing regression test**
 
 In `src/cmd/serve/mod.rs` `mod tests`, add:
 
@@ -1109,12 +1109,12 @@ async fn test_start_with_no_decks_is_rejected_with_flash() -> Fallible<()> {
 }
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run: `cargo test test_start_with_no_decks_is_rejected_with_flash`
 Expected: FAIL — today the empty selection starts a whole-collection drill and the body contains `value="Reveal"` and no flash.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 In `src/cmd/serve/handlers.rs`, add `use crate::error::fail;` to the imports. Replace `collection_start_handler` (`handlers.rs:213-225`):
 
@@ -1152,12 +1152,12 @@ fn collection_start_inner(
 
 (The `deck_filter.is_empty()` fallback inside `create_session` at `handlers.rs:268` is now unreachable from this path; leave it as defensive code.)
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test test_start_with_no_decks_is_rejected_with_flash` then `cargo test`
 Expected: PASS (the existing `test_start_with_multiple_decks` must still pass); full suite green.
 
-- [ ] **Step 5: Update CHANGELOG.xml (BUG-37)**
+- [x] **Step 5: Update CHANGELOG.xml (BUG-37)**
 
 In `CHANGELOG.xml`, inside `<unreleased><fixed>`, add:
 
@@ -1167,7 +1167,7 @@ In `CHANGELOG.xml`, inside `<unreleased><fixed>`, add:
             </change>
 ```
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 cargo fmt
@@ -1193,7 +1193,7 @@ Route the remaining silent paths through flash: `collection_post_handler` (`hand
 - Consumes: `Flash` (Task 1), `ActionResult::ContinueWithFlash` (Task 2), flash rendering on `/`, `/collection/{slug}`, `/collection/{slug}/bookmarks`, `/hedgedoc` (Task 3), `spawn_test_server` (Task 3).
 - Produces: nothing new.
 
-- [ ] **Step 1: Write the failing regression tests**
+- [x] **Step 1: Write the failing regression tests**
 
 In `src/cmd/serve/mod.rs` `mod tests`, add two tests exercising previously silent failures:
 
@@ -1239,12 +1239,12 @@ async fn test_hedgedoc_add_empty_url_is_surfaced_as_flash() -> Fallible<()> {
 }
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `cargo test test_bookmark_delete_error_is_surfaced_as_flash test_hedgedoc_add_empty_url_is_surfaced_as_flash` (run each; `cargo test surfaced_as_flash` matches both)
 Expected: both FAIL — today those requests redirect with no flash markup in the body.
 
-- [ ] **Step 3: Implement — bookmarks (`let _ =` removal)**
+- [x] **Step 3: Implement — bookmarks (`let _ =` removal)**
 
 In `src/cmd/serve/bookmarks.rs` (imports `use crate::flash::Flash;` already added in Task 3), replace `bookmark_delete_handler` (`bookmarks.rs:185-190`) and `bookmark_note_handler` (`bookmarks.rs:209-215`):
 
@@ -1275,7 +1275,7 @@ pub async fn bookmark_note_handler(
 }
 ```
 
-- [ ] **Step 4: Implement — collection POST and sync**
+- [x] **Step 4: Implement — collection POST and sync**
 
 In `src/cmd/serve/handlers.rs`, add `use crate::cmd::drill::post::ActionResult;` to the imports. Replace `collection_post_handler` (`handlers.rs:344-356`):
 
@@ -1343,7 +1343,7 @@ pub async fn sync_handler(State(state): State<AppState>) -> Redirect {
 }
 ```
 
-- [ ] **Step 5: Implement — HedgeDoc add/delete/sync-now**
+- [x] **Step 5: Implement — HedgeDoc add/delete/sync-now**
 
 In `hedgedoc_add_handler` (`handlers.rs:521-699`), replace each silent early return, keeping the existing `log::error!` lines where present:
 
@@ -1479,12 +1479,12 @@ After these edits, verify no swallowed writes remain in the serve/drill handlers
 Run: `grep -n 'let _ =' src/cmd/serve/*.rs src/cmd/drill/*.rs`
 Expected remaining matches only: `config.rs:176` (best-effort temp-dir cleanup on exit), `edit.rs:192` (BUG-36, separate PR), `hedgedoc.rs` temp-file cleanup lines (best-effort `remove_file` after a failure already being reported), `handlers.rs` `map.next_value::<serde::de::IgnoredAny>()` (deliberate form-field skip), `post.rs:99` (oneshot shutdown signal). None of these is a user-actionable fallible write. `bookmarks.rs:189` and `:214` must be gone.
 
-- [ ] **Step 6: Run tests to verify they pass**
+- [x] **Step 6: Run tests to verify they pass**
 
 Run: `cargo test surfaced_as_flash` then `cargo test`
 Expected: both new tests PASS; full suite green.
 
-- [ ] **Step 7: Update CHANGELOG.xml (BUG-03)**
+- [x] **Step 7: Update CHANGELOG.xml (BUG-03)**
 
 In `CHANGELOG.xml`, inside `<unreleased><fixed>`, add:
 
@@ -1494,7 +1494,7 @@ In `CHANGELOG.xml`, inside `<unreleased><fixed>`, add:
             </change>
 ```
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 cargo fmt
@@ -1519,7 +1519,7 @@ Claude-Session: https://claude.ai/code/session_012SzQd3T2Dbb4nr1FGnFjTW"
 - Consumes: `fail` from `crate::error`, `create_tmp_copy_of_test_directory` from `crate::helper`.
 - Produces: nothing other tasks use.
 
-- [ ] **Step 1: Write the failing regression tests**
+- [x] **Step 1: Write the failing regression tests**
 
 In `src/cmd/stats.rs` `mod tests`, add:
 
@@ -1553,12 +1553,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `cargo test test_print_stats_html_is_an_error test_stats_default_format_is_json` (i.e. `cargo test stats_`)
 Expected: `test_print_stats_html_is_an_error` FAILS (`print_stats` returns `Ok`); `test_stats_default_format_is_json` FAILS (default is `Html`).
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 `src/cli.rs:80` — change the default:
 
@@ -1575,12 +1575,12 @@ Expected: `test_print_stats_html_is_an_error` FAILS (`print_stats` returns `Ok`)
         }
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test stats_` then `cargo test`
 Expected: PASS; full suite green.
 
-- [ ] **Step 5: Update CHANGELOG.xml (BUG-51, stats item)**
+- [x] **Step 5: Update CHANGELOG.xml (BUG-51, stats item)**
 
 In `CHANGELOG.xml`, inside `<unreleased><changed>`, add:
 
@@ -1590,7 +1590,7 @@ In `CHANGELOG.xml`, inside `<unreleased><changed>`, add:
             </change>
 ```
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 cargo fmt
@@ -1614,7 +1614,7 @@ Claude-Session: https://claude.ai/code/session_012SzQd3T2Dbb4nr1FGnFjTW"
 - Consumes: `log::warn!`.
 - Produces: `fn parse_macros(content: &str) -> (Vec<(String, String)>, Vec<usize>)` (private to `collection.rs`).
 
-- [ ] **Step 1: Write the failing regression test**
+- [x] **Step 1: Write the failing regression test**
 
 `src/collection.rs` has no tests module; add one at the end of the file:
 
@@ -1641,12 +1641,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run: `cargo test test_parse_macros_reports_malformed_lines`
 Expected: COMPILE ERROR (`parse_macros` not found).
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 In `src/collection.rs`, add the function (below the `impl Collection` block):
 
@@ -1698,12 +1698,12 @@ Replace the macros block inside `with_db_path` (`collection.rs:63-82`):
 
 (Behavior note: whitespace-only lines previously produced a garbage `("", "")` macro via `split_once(' ')` on `"  "`; the new blank-line skip fixes that in passing.)
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test test_parse_macros_reports_malformed_lines` then `cargo test`
 Expected: PASS (the existing `test_get_stats` asserts `tex_macro_count == 1` and must still pass); full suite green.
 
-- [ ] **Step 5: Update CHANGELOG.xml (BUG-51, macros item)**
+- [x] **Step 5: Update CHANGELOG.xml (BUG-51, macros item)**
 
 In `CHANGELOG.xml`, inside `<unreleased><fixed>`, add:
 
@@ -1713,7 +1713,7 @@ In `CHANGELOG.xml`, inside `<unreleased><fixed>`, add:
             </change>
 ```
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 cargo fmt
@@ -1738,7 +1738,7 @@ The drill error page (`src/cmd/drill/get.rs`, `get_handler` error arm) returns `
 - Consumes: `page_template`, `ErrorReport` (`crate::error::ErrorReport`), get_handler shape from Task 2.
 - Produces: `pub(crate) fn error_response(e: &ErrorReport) -> (StatusCode, Html<String>)` in `src/cmd/drill/get.rs`.
 
-- [ ] **Step 1: Write the failing regression test**
+- [x] **Step 1: Write the failing regression test**
 
 In the `src/cmd/drill/get.rs` tests module (created in Task 5), add `use crate::error::ErrorReport;` to the test imports and:
 
@@ -1753,12 +1753,12 @@ fn test_error_response_is_styled_500_with_home_link() {
 }
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run: `cargo test test_error_response_is_styled_500_with_home_link`
 Expected: COMPILE ERROR (`error_response` not found).
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 In `src/cmd/drill/get.rs`, add `use crate::error::ErrorReport;` to the imports, add the function, and rewrite `get_handler` (as left by Task 2) to use it:
 
@@ -1816,12 +1816,12 @@ Append to `src/cmd/drill/style.css` (after the `.flash` rules from Task 1; neste
 
 (This also styles the pre-existing `div.error` pages in serve mode: `handlers.rs` `collection_get_handler` and `bookmarks.rs` `error_page`, which already set correct 404/500 status codes and have back links.)
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test test_error_response_is_styled_500_with_home_link` then `cargo test`
 Expected: PASS; full suite green.
 
-- [ ] **Step 5: Update CHANGELOG.xml (BUG-51, error-page item)**
+- [x] **Step 5: Update CHANGELOG.xml (BUG-51, error-page item)**
 
 In `CHANGELOG.xml`, inside `<unreleased><fixed>`, add:
 
@@ -1831,7 +1831,7 @@ In `CHANGELOG.xml`, inside `<unreleased><fixed>`, add:
             </change>
 ```
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 cargo fmt
@@ -1855,7 +1855,7 @@ Claude-Session: https://claude.ai/code/session_012SzQd3T2Dbb4nr1FGnFjTW"
 - Consumes: nothing new.
 - Produces: nothing.
 
-- [ ] **Step 1: Strengthen the test**
+- [x] **Step 1: Strengthen the test**
 
 In `test_start_with_multiple_decks`, after the existing status assertion (keep it), add:
 
@@ -1869,16 +1869,16 @@ In `test_start_with_multiple_decks`, after the existing status assertion (keep i
         );
 ```
 
-- [ ] **Step 2: Verify the assertion is exercised and can fail**
+- [x] **Step 2: Verify the assertion is exercised and can fail**
 
 Temporarily invert it to `assert!(!body.contains("value=\"Reveal\""), ...)`, run `cargo test test_start_with_multiple_decks`, confirm it FAILS, then restore the correct assertion. (This proves the session page really contains the marker and the assertion is not vacuous.)
 
-- [ ] **Step 3: Run the test to verify it passes**
+- [x] **Step 3: Run the test to verify it passes**
 
 Run: `cargo test test_start_with_multiple_decks` then `cargo test`
 Expected: PASS; full suite green.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 Test-only change; no CHANGELOG entry (CHANGELOG records user-visible changes).
 
