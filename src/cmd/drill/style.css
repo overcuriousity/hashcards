@@ -1197,3 +1197,41 @@ body {
         }
     }
 }
+
+.flash {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    max-width: 800px;
+    margin: 16px auto;
+    padding: 12px 16px;
+    border: 1px solid;
+    border-radius: 8px;
+    font-size: 14px;
+}
+
+.flash-message {
+    flex: 1;
+}
+
+.flash-dismiss {
+    background: none;
+    border: none;
+    font-size: 18px;
+    line-height: 1;
+    padding: 0 4px;
+    cursor: pointer;
+    color: inherit;
+}
+
+.flash-error {
+    background: #fff4f1;
+    border-color: #f3c5bd;
+    color: #7a271a;
+}
+
+.flash-success {
+    background: #f0fdf4;
+    border-color: #bbe5c8;
+    color: #027a48;
+}
