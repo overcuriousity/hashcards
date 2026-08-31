@@ -291,7 +291,6 @@ pub fn handle_action(
                 card: card.clone(),
                 review_id,
                 grade: record.grade,
-                duration_ms: record.duration_ms,
                 prev_performance,
             };
             if review.should_repeat() {

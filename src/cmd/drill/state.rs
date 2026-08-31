@@ -120,7 +120,6 @@ pub struct Review {
     pub card: Card,
     pub review_id: i64,
     pub grade: Grade,
-    pub duration_ms: Option<i64>,
     /// Performance before this review, used to restore state on undo.
     pub prev_performance: Performance,
 }
@@ -155,7 +154,6 @@ mod tests {
             card: card.clone(),
             review_id: 1,
             grade,
-            duration_ms: None,
             prev_performance: Performance::New,
         }
     }

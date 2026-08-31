@@ -2,6 +2,9 @@
     <unreleased>
         <fixed>
             <change author="mstoeck3">
+                Session completion stats are now computed from the session's persisted reviews: distinct cards and total reviews (including repeats) are reported separately, and the slowest-card row shows the card's question preview instead of its deck name. (BUG-13)
+            </change>
+            <change author="mstoeck3">
                 Per-card review timing now starts when the card is first displayed instead of when the answer is revealed, so recorded durations and pace stats include recall time. (BUG-14)
             </change>
             <change author="claude">

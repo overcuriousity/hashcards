@@ -19,6 +19,8 @@ use axum::extract::Query;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::Html;
+use std::collections::HashSet;
+
 use maud::Markup;
 use maud::html;
 
@@ -26,6 +28,7 @@ use crate::cmd::drill::server::AnswerControls;
 use crate::cmd::drill::state::MutableState;
 use crate::cmd::drill::state::ServerState;
 use crate::cmd::drill::template::page_template;
+use crate::db::ReviewRow;
 use crate::error::ErrorReport;
 use crate::error::Fallible;
 use crate::error::fail;
@@ -34,6 +37,7 @@ use crate::markdown::MarkdownRenderConfig;
 use crate::media::resolve::MediaResolverBuilder;
 use crate::types::card::Card;
 use crate::types::card::CardType;
+use crate::types::card_hash::CardHash;
 use crate::types::timestamp::Timestamp;
 
 /// What to show on the completion page.
@@ -289,7 +293,6 @@ pub fn render_completion_page(ctx: &RenderContext, mutable: &MutableState) -> Fa
         return Ok(render_empty_completion_page(ctx));
     }
     let total_cards = ctx.total_cards;
-    let cards_reviewed = ctx.total_cards - mutable.cards.len();
     let start = ctx.session_started_at.into_inner();
     let finished_at = match mutable.finished_at {
         Some(finished_at) => finished_at,
@@ -298,12 +301,27 @@ pub fn render_completion_page(ctx: &RenderContext, mutable: &MutableState) -> Fa
     let end = finished_at.into_inner();
     let duration_s = (end - start).num_seconds();
 
-    // Compute per-card durations for median pace and slowest card.
-    let mut durations_ms: Vec<i64> = mutable
+    // BUG-13: all stats come from the session's persisted, non-voided reviews
+    // so the numbers agree with the database. Repeats count toward total
+    // reviews but not toward distinct cards.
+    let rows: Vec<ReviewRow> = mutable.db.get_reviews_for_session(mutable.session_id)?;
+    let total_reviews = rows.len();
+    let distinct_cards = rows
+        .iter()
+        .map(|r| r.data.card_hash)
+        .collect::<HashSet<CardHash>>()
+        .len();
+
+    // Map card hashes to cards so the slowest card can show its question.
+    // Every non-voided review of this session has a live entry in
+    // mutable.reviews (undo pops the entry it voids), so this covers all rows.
+    let cards_by_hash: HashMap<CardHash, &Card> = mutable
         .reviews
         .iter()
-        .filter_map(|r| r.duration_ms)
+        .map(|r| (r.card.hash(), &r.card))
         .collect();
+
+    let mut durations_ms: Vec<i64> = rows.iter().filter_map(|r| r.data.duration_ms).collect();
     durations_ms.sort_unstable();
 
     let median_pace_s: Option<f64> = if durations_ms.is_empty() {
@@ -318,19 +336,24 @@ pub fn render_completion_page(ctx: &RenderContext, mutable: &MutableState) -> Fa
         Some(median_ms / 1000.0)
     };
 
-    let slowest_card: Option<(&str, f64)> = mutable
-        .reviews
+    let slowest_card: Option<(String, f64)> = rows
         .iter()
-        .filter_map(|r| r.duration_ms.map(|ms| (r.card.deck_name().as_str(), ms)))
+        .filter_map(|r| r.data.duration_ms.map(|ms| (r.data.card_hash, ms)))
         .max_by_key(|&(_, ms)| ms)
-        .map(|(name, ms)| (name, ms as f64 / 1000.0));
+        .map(|(hash, ms)| {
+            let label = match cards_by_hash.get(&hash) {
+                Some(card) => card.preview(),
+                None => hash.to_string(),
+            };
+            (label, ms as f64 / 1000.0)
+        });
 
     let pace_rounded = median_pace_s
         .unwrap_or_else(|| {
-            if cards_reviewed == 0 {
+            if total_reviews == 0 {
                 0.0
             } else {
-                duration_s as f64 / cards_reviewed as f64
+                duration_s as f64 / total_reviews as f64
             }
         })
         .round() as i64;
@@ -344,8 +367,8 @@ pub fn render_completion_page(ctx: &RenderContext, mutable: &MutableState) -> Fa
         format!("{duration_s} s")
     };
     let summary_line = format!(
-        "Done — {cards_reviewed} card{} in {duration_display} ({pace_rounded} s/card).",
-        if cards_reviewed == 1 { "" } else { "s" }
+        "Done — {distinct_cards} card{} in {duration_display} ({pace_rounded} s/card).",
+        if distinct_cards == 1 { "" } else { "s" }
     );
 
     let (action_button, redirect_notice) = completion_actions(ctx);
@@ -366,7 +389,11 @@ pub fn render_completion_page(ctx: &RenderContext, mutable: &MutableState) -> Fa
                             }
                             tr {
                                 td .key { "Cards Reviewed" }
-                                td .val { (cards_reviewed) }
+                                td .val { (distinct_cards) }
+                            }
+                            tr {
+                                td .key { "Total Reviews" }
+                                td .val { (total_reviews) }
                             }
                             tr {
                                 td .key { "Started" }
@@ -386,10 +413,10 @@ pub fn render_completion_page(ctx: &RenderContext, mutable: &MutableState) -> Fa
                                     td .val { (format!("{:.1}", median_s)) }
                                 }
                             }
-                            @if let Some((deck, slowest_s)) = slowest_card {
+                            @if let Some((preview, slowest_s)) = slowest_card {
                                 tr {
                                     td .key { "Slowest card" }
-                                    td .val { (format!("{deck} ({slowest_s:.1} s)")) }
+                                    td .val { (format!("{preview} ({slowest_s:.1} s)")) }
                                 }
                             }
                         }
@@ -491,13 +518,18 @@ fn bookmark_button(is_bookmarked: bool) -> Markup {
 #[cfg(test)]
 mod tests {
     use std::path::Path;
+    use std::path::PathBuf;
 
     use super::*;
     use crate::cmd::drill::cache::Cache;
     use crate::cmd::drill::state::Review;
     use crate::db::Database;
+    use crate::db::ReviewRecord;
+    use crate::db::ReviewRow;
     use crate::error::ErrorReport;
+    use crate::fsrs::Grade;
     use crate::rng::TinyRng;
+    use crate::types::card::CardContent;
     use crate::types::performance::Jitter;
     use crate::types::performance::Performance;
 
@@ -591,7 +623,6 @@ mod tests {
             card,
             review_id: 1,
             grade: crate::fsrs::Grade::Good,
-            duration_ms: None,
             prev_performance: Performance::New,
         });
         assert!(mutable.finished_at.is_none());
@@ -608,5 +639,146 @@ mod tests {
         assert_eq!(progress_text(7, 20, 1), "7 of 20 (+1 repeat)");
         assert_eq!(progress_text(7, 20, 3), "7 of 20 (+3 repeats)");
         assert_eq!(progress_text(20, 20, 2), "20 of 20 (+2 repeats)");
+    }
+
+    fn make_card(deck: &str, question: &str) -> Card {
+        Card::new(
+            deck.to_string(),
+            PathBuf::from("/tmp/deck.md"),
+            (1, 2),
+            CardContent::new_basic(question, "answer"),
+        )
+    }
+
+    fn record(card: &Card, now: Timestamp, duration_ms: i64) -> ReviewRecord {
+        ReviewRecord {
+            card_hash: card.hash(),
+            reviewed_at: now,
+            grade: Grade::Good,
+            stability: 2.0,
+            difficulty: 2.0,
+            interval_raw: 1.0,
+            interval_days: 1,
+            due_date: now.date(),
+            duration_ms: Some(duration_ms),
+        }
+    }
+
+    fn reviewed(now: Timestamp) -> Performance {
+        Performance::Reviewed(crate::types::performance::ReviewedPerformance {
+            last_reviewed_at: now,
+            stability: 2.0,
+            difficulty: 2.0,
+            interval_raw: 1.0,
+            interval_days: 1,
+            due_date: now.date(),
+            review_count: 1,
+        })
+    }
+
+    /// BUG-13: all completion stats come from the session's non-voided DB
+    /// reviews; distinct cards and total reviews are labeled separately; the
+    /// slowest card shows the question preview, not the deck name.
+    #[test]
+    fn test_completion_stats_from_db_reviews() -> Fallible<()> {
+        let mut db = Database::new(":memory:")?;
+        let now = Timestamp::now();
+        let slow = make_card("SlowDeck", "What is the slowest question?");
+        let fast = make_card("FastDeck", "Fast question?");
+        db.insert_card(slow.hash(), now)?;
+        db.insert_card(fast.hash(), now)?;
+        let session_id = db.create_session(now)?;
+
+        // Three live reviews on two distinct cards (slow card repeats).
+        let id1 = db.insert_review_and_update_performance(
+            session_id,
+            &record(&slow, now, 1000),
+            reviewed(now),
+        )?;
+        let id2 = db.insert_review_and_update_performance(
+            session_id,
+            &record(&fast, now, 2000),
+            reviewed(now),
+        )?;
+        let id3 = db.insert_review_and_update_performance(
+            session_id,
+            &record(&slow, now, 9000),
+            reviewed(now),
+        )?;
+        // A voided (undone) review must not count anywhere.
+        let id4 = db.insert_review_and_update_performance(
+            session_id,
+            &record(&slow, now, 50000),
+            reviewed(now),
+        )?;
+        db.void_review_and_restore_performance(id4, slow.hash(), reviewed(now), None)?;
+        db.close_session(session_id, now)?;
+
+        let reviews = vec![
+            Review {
+                card: slow.clone(),
+                review_id: id1,
+                grade: Grade::Good,
+                prev_performance: Performance::New,
+            },
+            Review {
+                card: fast.clone(),
+                review_id: id2,
+                grade: Grade::Good,
+                prev_performance: Performance::New,
+            },
+            Review {
+                card: slow.clone(),
+                review_id: id3,
+                grade: Grade::Good,
+                prev_performance: Performance::New,
+            },
+        ];
+        let mut mutable = MutableState::new(
+            db,
+            session_id,
+            Cache::new(),
+            Vec::new(),
+            Jitter::none(),
+            TinyRng::from_seed(1),
+        );
+        mutable.reviews = reviews;
+        mutable.finished_at = Some(now);
+        let ctx = RenderContext {
+            directory: std::path::Path::new("/tmp"),
+            total_cards: 2,
+            session_started_at: now,
+            answer_controls: AnswerControls::Full,
+            form_action: "/",
+            file_url_prefix: "/file",
+            completion_action: CompletionAction::Shutdown,
+        };
+        let html = render_completion_page(&ctx, &mutable)?.into_string();
+
+        // Distinct cards vs. total reviews, separately labeled.
+        assert!(
+            html.contains("Cards Reviewed"),
+            "missing distinct-cards row: {html}"
+        );
+        assert!(
+            html.contains("Total Reviews"),
+            "missing total-reviews row: {html}"
+        );
+        assert!(
+            html.contains("Done — 2 cards"),
+            "summary must count distinct cards: {html}"
+        );
+        // Slowest card: question preview, not deck name; voided 50s review excluded.
+        assert!(
+            html.contains("What is the slowest question? (9.0 s)"),
+            "slowest must show preview: {html}"
+        );
+        assert!(
+            !html.contains("SlowDeck (9.0 s)"),
+            "slowest must not show deck name: {html}"
+        );
+        // Median of [1000, 2000, 9000] = 2.0 s.
+        assert!(html.contains("2.0"), "median pace must be 2.0 s: {html}");
+        Ok(())
     }
 }
