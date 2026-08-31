@@ -10,6 +10,9 @@
             <change author="claude">
                 HedgeDoc notes whose permission level prevents anonymous download (e.g. "Locked" or "Protected") now show an "Error" status with a descriptive message instead of silently reporting "OK" while storing an HTML page as markdown (yielding zero cards).
             </change>
+            <change author="claude">
+                The error message for an invalid grade string now includes the offending value instead of the literal text `{value}`. (BUG-29)
+            </change>
         </fixed>
         <added>
             <change author="mstoeck3">
