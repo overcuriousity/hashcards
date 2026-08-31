@@ -36,7 +36,8 @@ create table reviews (
     interval_days integer not null,
     due_date text not null,
     duration_ms integer,
-    voided integer not null default 0
+    voided integer not null default 0,
+    reviewed_date text generated always as (substr(reviewed_at, 1, 10)) virtual
 ) strict;
 
 create table bookmarks (
@@ -46,4 +47,12 @@ create table bookmarks (
         on delete cascade,
     note text,
     created_at text not null
+) strict;
+
+create index idx_reviews_card_hash on reviews (card_hash);
+create index idx_reviews_session_id on reviews (session_id);
+create index idx_reviews_reviewed_date on reviews (reviewed_date);
+
+create table schema_version (
+    version integer not null
 ) strict;

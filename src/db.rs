@@ -63,6 +63,10 @@ pub struct Bookmark {
     pub created_at: Timestamp,
 }
 
+/// The schema version a freshly created database gets, and the highest
+/// migration number `migrate` knows how to apply.
+const SCHEMA_VERSION: i64 = 5;
+
 impl Database {
     pub fn new(database_path: &str) -> Fallible<Self> {
         let mut conn = Connection::open(database_path)?;
@@ -71,10 +75,9 @@ impl Database {
             let tx = conn.transaction()?;
             if !probe_schema_exists(&tx)? {
                 tx.execute_batch(include_str!("schema.sql"))?;
+                set_schema_version(&tx, SCHEMA_VERSION)?;
             } else {
-                migrate_add_duration_ms(&tx)?;
-                migrate_add_bookmarks(&tx)?;
-                migrate_add_voided(&tx)?;
+                migrate(&tx)?;
             }
             tx.commit()?;
         }
@@ -367,17 +370,19 @@ impl Database {
         Ok(())
     }
 
-    /// Delete a card and its reviews.
+    /// Delete a card. The foreign-key cascade removes its reviews and
+    /// bookmarks in the same statement, so the deletion is atomic.
+    ///
+    /// Note that this permanently erases the card's review history; it does
+    /// not go through the `voided` audit-trail model that undo uses.
     ///
     /// If no card with the given hash exists, returns an error.
     pub fn delete_card(&self, card_hash: CardHash) -> Fallible<()> {
-        if !self.card_exists(card_hash)? {
+        let sql = "delete from cards where card_hash = ?;";
+        let rows = self.conn.execute(sql, params![card_hash])?;
+        if rows != 1 {
             return fail("Card not found");
         }
-        let sql = "delete from reviews where card_hash = ?;";
-        self.conn.execute(sql, params![card_hash])?;
-        let sql = "delete from cards where card_hash = ?;";
-        self.conn.execute(sql, params![card_hash])?;
         Ok(())
     }
 
@@ -491,8 +496,7 @@ impl Database {
 
     /// Count the number of non-voided reviews performed on the given date.
     pub fn count_reviews_in_date(&self, date: Date) -> Fallible<usize> {
-        let sql =
-            "select count(*) from reviews where substr(reviewed_at, 1, 10) = ? and voided = 0;";
+        let sql = "select count(*) from reviews where reviewed_date = ? and voided = 0;";
         let count: i64 = self.conn.query_row(sql, params![date], |row| row.get(0))?;
         Ok(count as usize)
     }
@@ -618,6 +622,79 @@ fn migrate_add_voided(tx: &Transaction) -> Fallible<()> {
     if count == 0 {
         tx.execute_batch("alter table reviews add column voided integer not null default 0;")?;
     }
+    Ok(())
+}
+
+/// Bring an existing database up to SCHEMA_VERSION by applying numbered
+/// migrations in order. Databases from before the version table existed
+/// start at version 0; migrations 1-3 probe before altering, so they are
+/// safe no-ops on legacy databases that already have the feature.
+fn migrate(tx: &Transaction) -> Fallible<()> {
+    ensure_version_table(tx)?;
+    let current = get_schema_version(tx)?;
+    if current > SCHEMA_VERSION {
+        return fail(format!(
+            "This database uses schema version {current}, but this version of hashcards only supports up to schema version {SCHEMA_VERSION}. Please upgrade hashcards."
+        ));
+    }
+    for version in (current + 1)..=SCHEMA_VERSION {
+        match version {
+            1 => migrate_add_duration_ms(tx)?,
+            2 => migrate_add_bookmarks(tx)?,
+            3 => migrate_add_voided(tx)?,
+            4 => migrate_add_review_indexes(tx)?,
+            5 => migrate_add_reviewed_date(tx)?,
+            other => {
+                return fail(format!(
+                    "Internal error: no migration defined for schema version {other}."
+                ));
+            }
+        }
+        set_schema_version(tx, version)?;
+    }
+    Ok(())
+}
+
+/// Create the schema_version table if missing and seed it at version 0
+/// (the state of databases created before versioning existed).
+fn ensure_version_table(tx: &Transaction) -> Fallible<()> {
+    tx.execute_batch(
+        "create table if not exists schema_version (version integer not null) strict;",
+    )?;
+    let count: i64 = tx.query_row("select count(*) from schema_version;", [], |row| row.get(0))?;
+    if count == 0 {
+        tx.execute("insert into schema_version (version) values (0);", [])?;
+    }
+    Ok(())
+}
+
+fn get_schema_version(tx: &Transaction) -> Fallible<i64> {
+    let version: i64 = tx.query_row("select version from schema_version;", [], |row| row.get(0))?;
+    Ok(version)
+}
+
+fn set_schema_version(tx: &Transaction, version: i64) -> Fallible<()> {
+    tx.execute("delete from schema_version;", [])?;
+    tx.execute(
+        "insert into schema_version (version) values (?);",
+        params![version],
+    )?;
+    Ok(())
+}
+
+fn migrate_add_review_indexes(tx: &Transaction) -> Fallible<()> {
+    tx.execute_batch(
+        "create index if not exists idx_reviews_card_hash on reviews (card_hash);
+         create index if not exists idx_reviews_session_id on reviews (session_id);",
+    )?;
+    Ok(())
+}
+
+fn migrate_add_reviewed_date(tx: &Transaction) -> Fallible<()> {
+    tx.execute_batch(
+        "alter table reviews add column reviewed_date text generated always as (substr(reviewed_at, 1, 10)) virtual;
+         create index if not exists idx_reviews_reviewed_date on reviews (reviewed_date);",
+    )?;
     Ok(())
 }
 
@@ -960,6 +1037,341 @@ mod tests {
             err.to_string(),
             format!("error: No performance data found for card with hash {card_hash}")
         );
+        Ok(())
+    }
+
+    /// The reviews/cards/sessions schema as it stood before the duration_ms,
+    /// bookmarks, and voided migrations existed (schema.sql minus those three
+    /// features). Used to exercise the full migration chain from version 0.
+    const OLD_SCHEMA: &str = "
+        create table cards (
+            card_hash text primary key,
+            added_at text not null,
+            last_reviewed_at text,
+            stability real,
+            difficulty real,
+            interval_raw real,
+            interval_days integer,
+            due_date text,
+            review_count integer not null
+        ) strict;
+
+        create table sessions (
+            session_id integer primary key,
+            started_at text not null,
+            ended_at text not null
+        ) strict;
+
+        create table reviews (
+            review_id integer primary key,
+            session_id integer not null
+                references sessions (session_id)
+                on update cascade
+                on delete cascade,
+            card_hash text not null
+                references cards (card_hash)
+                on update cascade
+                on delete cascade,
+            reviewed_at text not null,
+            grade text not null,
+            stability real not null,
+            difficulty real not null,
+            interval_raw real not null,
+            interval_days integer not null,
+            due_date text not null
+        ) strict;
+    ";
+
+    /// Render a normalized, order-stable description of every user table:
+    /// all columns (via table_xinfo, so generated columns are included) and
+    /// every explicitly created index. Comparing two snapshots with
+    /// assert_eq! yields a readable diff on mismatch.
+    fn schema_snapshot(conn: &Connection) -> Fallible<String> {
+        use std::fmt::Write;
+        let mut out = String::new();
+        let tables: Vec<String> = {
+            let mut stmt = conn.prepare(
+                "select name from sqlite_master where type = 'table' and name not like 'sqlite_%' order by name;",
+            )?;
+            let rows = stmt.query_map([], |row| row.get(0))?;
+            let mut tables = Vec::new();
+            for row in rows {
+                tables.push(row?);
+            }
+            tables
+        };
+        for table in &tables {
+            writeln!(out, "table {table}").unwrap();
+            let mut stmt = conn.prepare(
+                "select cid, name, type, \"notnull\", dflt_value, pk, hidden from pragma_table_xinfo(?) order by cid;",
+            )?;
+            let mut rows = stmt.query(params![table])?;
+            while let Some(row) = rows.next()? {
+                let cid: i64 = row.get(0)?;
+                let name: String = row.get(1)?;
+                let col_type: String = row.get(2)?;
+                let notnull: i64 = row.get(3)?;
+                let dflt: Option<String> = row.get(4)?;
+                let pk: i64 = row.get(5)?;
+                let hidden: i64 = row.get(6)?;
+                writeln!(
+                    out,
+                    "  column {cid} {name} {col_type} notnull={notnull} default={dflt:?} pk={pk} hidden={hidden}"
+                )
+                .unwrap();
+            }
+            let index_names: Vec<String> = {
+                let mut stmt = conn.prepare(
+                    "select name from pragma_index_list(?) where origin = 'c' order by name;",
+                )?;
+                let rows = stmt.query_map(params![table], |row| row.get(0))?;
+                let mut names = Vec::new();
+                for row in rows {
+                    names.push(row?);
+                }
+                names
+            };
+            for index in &index_names {
+                let mut stmt =
+                    conn.prepare("select name from pragma_index_info(?) order by seqno;")?;
+                let mut rows = stmt.query(params![index])?;
+                let mut columns: Vec<String> = Vec::new();
+                while let Some(row) = rows.next()? {
+                    columns.push(row.get(0)?);
+                }
+                writeln!(out, "  index {index} on ({})", columns.join(", ")).unwrap();
+            }
+        }
+        Ok(out)
+    }
+
+    /// Migrating a pre-migration-era DB produces exactly the same schema as
+    /// executing a fresh schema.sql, and stamps the current schema version.
+    #[test]
+    fn test_migrated_schema_matches_fresh_schema() -> Fallible<()> {
+        let dir = tempfile::TempDir::new().unwrap();
+        let old_path = dir.path().join("old.db");
+        let old_path = old_path.to_str().unwrap();
+        {
+            let conn = Connection::open(old_path)?;
+            conn.execute_batch(OLD_SCHEMA)?;
+        }
+        let migrated = Database::new(old_path)?;
+        let fresh = Database::new(":memory:")?;
+        assert_eq!(
+            schema_snapshot(&migrated.conn)?,
+            schema_snapshot(&fresh.conn)?,
+            "migrated schema diverged from fresh schema.sql"
+        );
+        let version: i64 =
+            migrated
+                .conn
+                .query_row("select version from schema_version;", [], |row| row.get(0))?;
+        assert_eq!(version, SCHEMA_VERSION);
+        Ok(())
+    }
+
+    /// Reopening an already-migrated DB is a no-op (migrations are not
+    /// re-applied, the version is stable).
+    #[test]
+    fn test_reopening_migrated_db_is_stable() -> Fallible<()> {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("stable.db");
+        let path = path.to_str().unwrap();
+        {
+            let conn = Connection::open(path)?;
+            conn.execute_batch(OLD_SCHEMA)?;
+        }
+        let first = Database::new(path)?;
+        let snapshot = schema_snapshot(&first.conn)?;
+        drop(first);
+        let second = Database::new(path)?;
+        assert_eq!(schema_snapshot(&second.conn)?, snapshot);
+        Ok(())
+    }
+
+    /// A DB stamped with a schema version newer than this build supports is
+    /// rejected with a clear error instead of being mangled.
+    #[test]
+    fn test_newer_schema_version_is_rejected() -> Fallible<()> {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("future.db");
+        let path = path.to_str().unwrap();
+        {
+            let conn = Connection::open(path)?;
+            conn.execute_batch(include_str!("schema.sql"))?;
+            conn.execute_batch(
+                "create table if not exists schema_version (version integer not null) strict;",
+            )?;
+            conn.execute("delete from schema_version;", [])?;
+            conn.execute("insert into schema_version (version) values (999);", [])?;
+        }
+        let result = Database::new(path);
+        assert!(result.is_err());
+        let message = result.err().unwrap().to_string();
+        assert!(message.contains("999"), "unhelpful error: {message}");
+        Ok(())
+    }
+
+    /// Migrating a legacy DB that already holds rows backfills the generated
+    /// reviewed_date column for existing reviews (the convergence test above
+    /// only covers empty tables).
+    #[test]
+    fn test_populated_legacy_db_migrates() -> Fallible<()> {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("pop.db");
+        let path = path.to_str().unwrap();
+        {
+            let conn = Connection::open(path)?;
+            conn.execute_batch(OLD_SCHEMA)?;
+            conn.execute_batch(
+                "insert into cards (card_hash, added_at, review_count) values ('abc', '2026-08-30T09:00:00.000', 1);
+                 insert into sessions (session_id, started_at, ended_at) values (1, '2026-08-30T09:00:00.000', '2026-08-30T09:00:00.000');
+                 insert into reviews (review_id, session_id, card_hash, reviewed_at, grade, stability, difficulty, interval_raw, interval_days, due_date)
+                 values (1, 1, 'abc', '2026-08-30T09:00:00.000', 'good', 2.0, 5.0, 2.0, 2, '2026-09-01');",
+            )?;
+        }
+        let db = Database::new(path)?;
+        let d: String = db
+            .conn
+            .query_row("select reviewed_date from reviews;", [], |r| r.get(0))?;
+        assert_eq!(d, "2026-08-30");
+        let day = Date::new(chrono::NaiveDate::from_ymd_opt(2026, 8, 30).unwrap());
+        assert_eq!(db.count_reviews_in_date(day)?, 1);
+        Ok(())
+    }
+
+    /// count_reviews_in_date filters on the indexed reviewed_date column
+    /// (no substr() full scan) and still counts per-day correctly.
+    #[test]
+    fn test_count_reviews_in_date_uses_date_index() -> Fallible<()> {
+        use chrono::NaiveDate;
+        let mut db = Database::new(":memory:")?;
+        let card_hash = CardHash::hash_bytes(b"a");
+        db.insert_card(card_hash, Timestamp::now())?;
+        let day1 = Timestamp::new(
+            NaiveDate::from_ymd_opt(2026, 8, 30)
+                .unwrap()
+                .and_hms_opt(9, 0, 0)
+                .unwrap(),
+        );
+        let day2 = Timestamp::new(
+            NaiveDate::from_ymd_opt(2026, 8, 31)
+                .unwrap()
+                .and_hms_opt(9, 0, 0)
+                .unwrap(),
+        );
+        let session_id = db.create_session(day1)?;
+        db.insert_review_and_update_performance(
+            session_id,
+            &sample_review(card_hash, day1, 2.0),
+            sample_performance(day1, 2.0, 1),
+        )?;
+        db.insert_review_and_update_performance(
+            session_id,
+            &sample_review(card_hash, day1, 2.0),
+            sample_performance(day1, 2.0, 2),
+        )?;
+        db.insert_review_and_update_performance(
+            session_id,
+            &sample_review(card_hash, day2, 2.0),
+            sample_performance(day2, 2.0, 3),
+        )?;
+
+        assert_eq!(db.count_reviews_in_date(day1.date())?, 2);
+        assert_eq!(db.count_reviews_in_date(day2.date())?, 1);
+
+        let plan: String = db.conn.query_row(
+            "explain query plan select count(*) from reviews where reviewed_date = '2026-08-31' and voided = 0;",
+            [],
+            |row| row.get(3),
+        )?;
+        assert!(
+            plan.contains("idx_reviews_reviewed_date"),
+            "date query does not use the index; plan: {plan}"
+        );
+        Ok(())
+    }
+
+    /// The hot reviews lookups (by session and by card) are index searches,
+    /// not full table scans.
+    #[test]
+    fn test_reviews_queries_use_indexes() -> Fallible<()> {
+        let db = Database::new(":memory:")?;
+        let plan: String = db.conn.query_row(
+            "explain query plan select count(*) from reviews where session_id = 1 and voided = 0;",
+            [],
+            |row| row.get(3),
+        )?;
+        assert!(
+            plan.contains("idx_reviews_session_id"),
+            "session_id query does not use the index; plan: {plan}"
+        );
+        let plan: String = db.conn.query_row(
+            "explain query plan select count(*) from reviews where card_hash = 'abc';",
+            [],
+            |row| row.get(3),
+        )?;
+        assert!(
+            plan.contains("idx_reviews_card_hash"),
+            "card_hash query does not use the index; plan: {plan}"
+        );
+        Ok(())
+    }
+
+    /// A failed card deletion must not leave partial state behind.
+    ///
+    /// We force `delete from cards` to fail with a RESTRICT foreign key from a
+    /// scratch table; the card's reviews must survive the failed deletion.
+    /// The old implementation deleted reviews in a separate statement first,
+    /// so they were lost even though delete_card returned an error.
+    #[test]
+    fn test_delete_card_failure_leaves_no_partial_state() -> Fallible<()> {
+        let mut db = Database::new(":memory:")?;
+        let card_hash = CardHash::hash_bytes(b"a");
+        let now = Timestamp::now();
+        db.insert_card(card_hash, now)?;
+        let session_id = db.create_session(now)?;
+        let review = sample_review(card_hash, now, 2.0);
+        db.insert_review_and_update_performance(
+            session_id,
+            &review,
+            sample_performance(now, 2.0, 1),
+        )?;
+
+        // Block deletion of this card with a restricting reference.
+        db.conn.execute_batch(&format!(
+            "create table blocker (card_hash text references cards (card_hash) on delete restrict);
+             insert into blocker (card_hash) values ('{card_hash}');"
+        ))?;
+
+        let result = db.delete_card(card_hash);
+        assert!(result.is_err());
+
+        // The failed deletion must leave the card AND its reviews intact.
+        assert!(db.card_exists(card_hash)?);
+        assert_eq!(db.get_reviews_for_session(session_id)?.len(), 1);
+        Ok(())
+    }
+
+    /// Deleting a card removes its reviews via the FK cascade.
+    #[test]
+    fn test_delete_card_cascades_to_reviews() -> Fallible<()> {
+        let mut db = Database::new(":memory:")?;
+        let card_hash = CardHash::hash_bytes(b"a");
+        let now = Timestamp::now();
+        db.insert_card(card_hash, now)?;
+        let session_id = db.create_session(now)?;
+        let review = sample_review(card_hash, now, 2.0);
+        db.insert_review_and_update_performance(
+            session_id,
+            &review,
+            sample_performance(now, 2.0, 1),
+        )?;
+
+        db.delete_card(card_hash)?;
+        assert!(!db.card_exists(card_hash)?);
+        assert_eq!(db.get_reviews_for_session(session_id)?.len(), 0);
         Ok(())
     }
 

@@ -88,6 +88,12 @@
             <change author="claude">
                 Corrected documentation for `interval_raw` (card performance and JSON export): the value is in days, not hours. (BUG-30)
             </change>
+            <change author="claude">
+                Deleting a card (e.g. via the orphans command) is now a single atomic statement relying on the database's foreign-key cascade. Previously the card's reviews were deleted in a separate step, so an interruption could erase review history while leaving the card in place. Note that card deletion permanently removes the card's review history and bookmarks; unlike undo, it does not keep a voided audit trail. (BUG-31)
+            </change>
+            <change author="claude">
+                Review lookups by card, by session, and by day are now backed by database indexes (including a generated per-day date column), so daily review counts and session stats no longer scan the whole reviews table. (BUG-33)
+            </change>
         </fixed>
         <security>
             <change author="claude">
@@ -163,6 +169,9 @@
             </change>
         </added>
         <changed>
+            <change author="claude">
+                The database now records its schema version in a `schema_version` table, and schema changes are applied as numbered, ordered migrations instead of ad-hoc column probes. Databases created by newer versions of hashcards are rejected with a clear error instead of being modified. Existing databases are adopted automatically. (BUG-32)
+            </change>
             <change author="eudoxia0">
                 Update dependencies.
             </change>
