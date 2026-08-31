@@ -1258,3 +1258,10 @@ body {
         font-weight: 600;
     }
 }
+
+.browse .notice {
+    background: #fff8e1;
+    border: 1px solid #e0c97f;
+    border-radius: 4px;
+    padding: 0.5em 1em;
+}

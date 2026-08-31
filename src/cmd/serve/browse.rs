@@ -165,6 +165,7 @@ pub fn render_browse_page(
     tree: &DeckNode,
     hedge_urls: &HashMap<String, String>,
     bookmark_count: usize,
+    interrupted_sessions_closed: usize,
     flash: Option<Flash>,
 ) -> Markup {
     let total_due = tree.due_today_recursive();
@@ -174,6 +175,13 @@ pub fn render_browse_page(
             div.browse-header {
                 a.back-link href="/" { "\u{2190} Collections" }
                 h1 { (collection_name) }
+            }
+            @if interrupted_sessions_closed > 0 {
+                p.notice {
+                    (format!(
+                        "{interrupted_sessions_closed} interrupted session(s) from an earlier run were closed. All reviews already made were kept; interrupted sessions cannot be resumed because the card queue is not saved."
+                    ))
+                }
             }
             @if tree.children.is_empty() {
                 p.empty { "No decks found in this collection." }
@@ -364,7 +372,7 @@ mod tests {
         };
         let mut hedge_urls: HashMap<String, String> = HashMap::new();
         hedge_urls.insert("deck".to_string(), "javascript:alert(1)".to_string());
-        let html = render_browse_page("Coll", "coll", &tree, &hedge_urls, 0, None).into_string();
+        let html = render_browse_page("Coll", "coll", &tree, &hedge_urls, 0, 0, None).into_string();
         assert!(
             !html.contains(r#"href="javascript:"#),
             "unsafe scheme must not become an edit link: {html}"

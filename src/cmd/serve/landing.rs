@@ -65,8 +65,25 @@ pub async fn landing_handler(
     let git_enabled = state.config.git.is_some();
     let hedgedoc_count = state.hedgedoc_sources.lock().len();
     let config_available = state.config.data_dir.is_some();
+    // FEAT-03: surface running sessions so they can be resumed rather than
+    // silently restarted.
+    let resume: HashMap<String, usize> = {
+        let sessions = state.sessions.lock();
+        sessions
+            .iter()
+            .filter_map(|(slug, s)| {
+                let session = s.lock();
+                if session.mutable.finished_at.is_none() {
+                    Some((slug.clone(), session.mutable.cards.len()))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    };
     let html = render_landing_page(
         &collections,
+        &resume,
         last_synced,
         git_enabled,
         hedgedoc_count,
@@ -79,6 +96,7 @@ pub async fn landing_handler(
 
 fn render_landing_page(
     collections: &[CollectionInfo],
+    resume: &HashMap<String, usize>,
     last_synced: Option<Timestamp>,
     git_enabled: bool,
     hedgedoc_count: usize,
@@ -136,12 +154,16 @@ fn render_landing_page(
                     }
                     tbody {
                         @for coll in collections {
-                            tr class=@if coll.due_today == 0 { "muted" } {
+                            tr class=@if coll.due_today == 0 && !resume.contains_key(&coll.slug) { "muted" } {
                                 td { (coll.name.clone()) }
                                 td.num { (coll.due_today) }
                                 td.num { (coll.total_cards) }
                                 td {
-                                    @if coll.due_today > 0 {
+                                    @if let Some(remaining) = resume.get(&coll.slug) {
+                                        a.drill-link.btn.btn-primary href=(format!("/collection/{}", coll.slug)) {
+                                            (format!("Resume session ({remaining} cards remaining)"))
+                                        }
+                                    } @else if coll.due_today > 0 {
                                         a.drill-link.btn.btn-primary href=(format!("/collection/{}", coll.slug)) {
                                             "Drill"
                                         }

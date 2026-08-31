@@ -153,8 +153,26 @@ fn collection_get_inner(state: &AppState, slug: &str, flash: Option<Flash>) -> F
                 rc.db_path.display()
             ))
         })?;
-        let bookmark_count = Database::new(db_path)?.count_bookmarks()?;
-        let html = render_browse_page(&rc.name, slug, &tree, &hedge_urls, bookmark_count, flash);
+        let db = Database::new(db_path)?;
+        // FEAT-03: close session rows left open by a crash or restart. They
+        // cannot be resumed — the card queue only exists in memory — so
+        // close them (keeping all persisted reviews) and tell the user.
+        let interrupted_closed = db.close_dangling_sessions()?;
+        if interrupted_closed > 0 {
+            log::info!(
+                "Closed {interrupted_closed} interrupted session(s) for collection '{slug}'"
+            );
+        }
+        let bookmark_count = db.count_bookmarks()?;
+        let html = render_browse_page(
+            &rc.name,
+            slug,
+            &tree,
+            &hedge_urls,
+            bookmark_count,
+            interrupted_closed,
+            flash,
+        );
         return Ok(html.into_string());
     };
 
@@ -277,8 +295,19 @@ fn collection_start_inner(
     if selected_decks.is_empty() {
         return fail("Select at least one deck.");
     }
-    // Remove any existing session before doing DB work.
-    state.sessions.lock().remove(slug);
+    // FEAT-03: never silently discard an unfinished session. The redirect
+    // to /collection/{slug} lands on the running session; the user must
+    // End it (or let BUG-08 eviction reap it) before starting a new one.
+    {
+        let mut sessions = state.sessions.lock();
+        if let Some(existing) = sessions.get(slug) {
+            if existing.lock().mutable.finished_at.is_none() {
+                return Ok(());
+            }
+        }
+        // Finished sessions are replaced.
+        sessions.remove(slug);
+    }
 
     // Create the session outside the lock (may do filesystem/DB work).
     let session = create_session(state, slug, &selected_decks, limit)?;

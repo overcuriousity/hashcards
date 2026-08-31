@@ -140,6 +140,9 @@
             </change>
         </security>
         <added>
+            <change author="mstoeck3">
+                Session resume: the collection list now shows "Resume session (N cards remaining)" for a running drill session, and starting a new drill no longer silently discards an unfinished one. Session rows left open by a crash or restart are closed and reported on the collection page; every review made before the interruption is kept. (FEAT-03)
+            </change>
             <change author="claude">
                 Flash messages: actions in the drill and serve web interfaces now show one-shot success/error banners (dismissible) instead of failing or succeeding silently. The message travels as query parameters across the post-redirect.
             </change>

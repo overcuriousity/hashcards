@@ -370,6 +370,24 @@ impl Database {
         Ok(())
     }
 
+    /// Close sessions left dangling by a crash or restart.
+    ///
+    /// `create_session` writes `ended_at = started_at` as a placeholder, so
+    /// a row where the two are still equal was never closed. Each such row
+    /// is closed at the time of its last surviving (non-voided) review, or
+    /// left at `started_at` if no review was recorded. Returns the number
+    /// of rows touched.
+    ///
+    /// A genuinely instantaneous session matches the predicate too; it is
+    /// rewritten to the same value, which is harmless. Likewise, a row
+    /// belonging to a session mid-creation may be touched; `close_session`
+    /// simply overwrites `ended_at` later.
+    pub fn close_dangling_sessions(&self) -> Fallible<usize> {
+        let sql = "update sessions set ended_at = coalesce((select max(reviewed_at) from reviews where reviews.session_id = sessions.session_id and reviews.voided = 0), started_at) where ended_at = started_at;";
+        let rows = self.conn.execute(sql, [])?;
+        Ok(rows)
+    }
+
     /// Delete a card. The foreign-key cascade removes its reviews and
     /// bookmarks in the same statement, so the deletion is atomic.
     ///
@@ -1457,6 +1475,59 @@ mod tests {
         db.insert_card_if_new(hash, now)?;
         db.insert_card_if_new(hash, now)?; // no error on second call
         assert_eq!(db.card_hashes()?.len(), 1);
+        Ok(())
+    }
+
+    /// FEAT-03: sessions whose `ended_at` still equals the `create_session`
+    /// placeholder are dangling; closing them uses the last surviving
+    /// review's time, or the start time when no review was recorded.
+    #[test]
+    fn test_close_dangling_sessions() -> Fallible<()> {
+        let db = Database::new(":memory:")?;
+        let t0 = Timestamp::try_from("2026-01-01T10:00:00.000".to_string())?;
+        let t1 = Timestamp::try_from("2026-01-01T10:05:00.000".to_string())?;
+
+        // A properly closed session must be left untouched.
+        let closed = db.create_session(t0)?;
+        db.close_session(closed, t1)?;
+
+        // A dangling session with one review.
+        let card_hash = CardHash::hash_bytes(b"a");
+        db.insert_card(card_hash, t0)?;
+        let dangling = db.create_session(t0)?;
+        let review = sample_review(card_hash, t1, 2.0);
+        db.insert_review_immediately(dangling, &review)?;
+
+        // A dangling session with no reviews at all.
+        let empty_dangling = db.create_session(t1)?;
+
+        assert_eq!(db.close_dangling_sessions()?, 2);
+
+        let sessions = db.get_all_sessions()?;
+        let find = |id: i64| {
+            sessions
+                .iter()
+                .find(|s| s.session_id == id)
+                .ok_or_else(|| crate::error::ErrorReport::new("session row missing"))
+        };
+        assert_eq!(
+            find(dangling)?.ended_at,
+            t1,
+            "closed at its last review time"
+        );
+        assert_eq!(
+            find(empty_dangling)?.ended_at,
+            t1,
+            "closed at its start time"
+        );
+        assert_eq!(find(closed)?.ended_at, t1, "already-closed row untouched");
+
+        // Running it again: `dangling` no longer matches (t1 != t0), but
+        // `empty_dangling` was closed at its own start time, so it is
+        // indistinguishable from the placeholder and gets re-closed to the
+        // same value — the harmless instantaneous-session edge case.
+        assert_eq!(db.close_dangling_sessions()?, 1);
+        assert_eq!(find(empty_dangling)?.ended_at, t1);
         Ok(())
     }
 }

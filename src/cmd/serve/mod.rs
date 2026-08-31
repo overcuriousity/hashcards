@@ -25,7 +25,9 @@ mod tests {
     use crate::cmd::serve::config::ResolvedCollection;
     use crate::cmd::serve::config::ResolvedServeConfig;
     use crate::cmd::serve::server::start_serve;
+    use crate::db::Database;
     use crate::error::Fallible;
+    use crate::types::timestamp::Timestamp;
     use crate::utils::wait_for_server;
 
     const TEST_HOST: &str = "127.0.0.1";
@@ -321,6 +323,125 @@ mod tests {
         assert!(
             refreshed,
             "landing page still shows stale due counts after the session finished"
+        );
+        Ok(())
+    }
+
+    /// FEAT-03: an unfinished session is offered for resumption on the
+    /// landing page and is NOT silently discarded by another start POST.
+    #[tokio::test]
+    async fn test_unfinished_session_is_offered_for_resume_not_replaced() -> Fallible<()> {
+        let port = pick_unused_port().unwrap();
+        let dir = tempdir()?;
+        let coll_dir = dir.path().to_path_buf();
+        write(
+            coll_dir.join("Deck.md"),
+            "Q: What is 1+1?\nA: 2\n\n---\n\nQ: What is 2+2?\nA: 4\n",
+        )?;
+
+        let slug = "resume-collection".to_string();
+        let db_path = coll_dir.join("hashcards.db");
+        let config = ResolvedServeConfig {
+            host: TEST_HOST.to_string(),
+            port,
+            git: None,
+            defaults: DefaultsSection::default(),
+            collections: vec![ResolvedCollection {
+                name: "Resume Collection".to_string(),
+                slug: slug.clone(),
+                coll_dir: coll_dir.clone(),
+                db_path: db_path.clone(),
+            }],
+            data_dir: None,
+            config_path: None,
+            hedgedoc_entries: Vec::new(),
+            session_timeout_minutes: 1440,
+            _temp_dir: None,
+        };
+        spawn(async move { start_serve(config).await });
+        wait_for_server(TEST_HOST, port).await?;
+
+        let base = format!("http://{TEST_HOST}:{port}");
+        let client = reqwest::Client::new();
+        let start = || {
+            client
+                .post(format!("{base}/collection/{slug}/start"))
+                .body("decks=Deck")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .send()
+        };
+        start().await?;
+
+        // The landing page offers to resume the running two-card session.
+        let body = client.get(format!("{base}/")).send().await?.text().await?;
+        assert!(
+            body.contains("Resume session (2 cards remaining)"),
+            "landing page must offer resume: {body}"
+        );
+
+        // A second start POST must not discard the session: still one DB row.
+        start().await?;
+        let db_path_str = db_path
+            .to_str()
+            .ok_or_else(|| crate::error::ErrorReport::new("non-UTF-8 temp path"))?;
+        let db = Database::new(db_path_str)?;
+        assert_eq!(
+            db.get_all_sessions()?.len(),
+            1,
+            "second start POST must not create a new session"
+        );
+        Ok(())
+    }
+
+    /// FEAT-03: a dangling DB session row (left by a crash/restart) is closed
+    /// and reported on the deck browser page. It cannot be rehydrated: the
+    /// card queue only exists in memory.
+    #[tokio::test]
+    async fn test_dangling_session_row_is_closed_and_reported() -> Fallible<()> {
+        let port = pick_unused_port().unwrap();
+        let dir = tempdir()?;
+        let coll_dir = dir.path().to_path_buf();
+        write(coll_dir.join("Deck.md"), "Q: What is 1+1?\nA: 2\n")?;
+        let db_path = coll_dir.join("hashcards.db");
+
+        // Simulate a crash: a session row that was never closed.
+        {
+            let db_path_str = db_path
+                .to_str()
+                .ok_or_else(|| crate::error::ErrorReport::new("non-UTF-8 temp path"))?;
+            let db = Database::new(db_path_str)?;
+            let t0 = Timestamp::try_from("2026-01-01T10:00:00.000".to_string())?;
+            db.create_session(t0)?;
+        }
+
+        let slug = "dangling-collection".to_string();
+        let config = ResolvedServeConfig {
+            host: TEST_HOST.to_string(),
+            port,
+            git: None,
+            defaults: DefaultsSection::default(),
+            collections: vec![ResolvedCollection {
+                name: "Dangling Collection".to_string(),
+                slug: slug.clone(),
+                coll_dir: coll_dir.clone(),
+                db_path: db_path.clone(),
+            }],
+            data_dir: None,
+            config_path: None,
+            hedgedoc_entries: Vec::new(),
+            session_timeout_minutes: 1440,
+            _temp_dir: None,
+        };
+        spawn(async move { start_serve(config).await });
+        wait_for_server(TEST_HOST, port).await?;
+
+        let body = reqwest::get(format!("http://{TEST_HOST}:{port}/collection/{slug}"))
+            .await?
+            .text()
+            .await?;
+        assert!(
+            body.contains("interrupted session"),
+            "deck browser must report the closed interrupted session: {body}"
         );
         Ok(())
     }
