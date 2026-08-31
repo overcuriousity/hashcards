@@ -10,6 +10,9 @@
             <change author="claude">
                 HedgeDoc notes whose permission level prevents anonymous download (e.g. "Locked" or "Protected") now show an "Error" status with a descriptive message instead of silently reporting "OK" while storing an HTML page as markdown (yielding zero cards).
             </change>
+            <change author="claude">
+                Cloze cards whose text literally contains the string `CLOZE_DELETION` no longer render that text as a spurious cloze blank. The internal placeholder is now generated per render and checked against the card text.
+            </change>
         </fixed>
         <added>
             <change author="mstoeck3">

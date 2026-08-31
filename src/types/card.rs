@@ -27,8 +27,22 @@ use crate::types::aliases::DeckName;
 use crate::types::card_hash::CardHash;
 use crate::types::card_hash::Hasher;
 
-const CLOZE_TAG_BYTES: &[u8] = b"CLOZE_DELETION";
-const CLOZE_TAG: &str = "CLOZE_DELETION";
+/// Return a marker string that is guaranteed not to occur in `text`.
+///
+/// Used to stand in for a cloze deletion while the card's markdown is
+/// rendered to HTML; the containment check makes it impossible for card
+/// text to forge the marker (BUG-22). The marker is plain ASCII letters,
+/// digits, and hyphens, so pulldown-cmark passes it through unchanged.
+fn cloze_marker(text: &str) -> String {
+    let mut n: u64 = 0;
+    loop {
+        let marker = format!("HASHCARDS-CLOZE-{n}");
+        if !text.contains(&marker) {
+            return marker;
+        }
+        n += 1;
+    }
+}
 
 #[derive(Clone)]
 pub struct Card {
@@ -193,12 +207,13 @@ impl CardContent {
                 }
             }
             CardContent::Cloze { text, start, end } => {
+                let marker = cloze_marker(text);
                 let mut text_bytes: Vec<u8> = text.as_bytes().to_owned();
-                text_bytes.splice(*start..*end + 1, CLOZE_TAG_BYTES.iter().copied());
+                text_bytes.splice(*start..*end + 1, marker.bytes());
                 let text: String = String::from_utf8(text_bytes)?;
                 let text: String = markdown_to_html(config, &text)?;
                 let text: String =
-                    text.replace(CLOZE_TAG, "<span class='cloze'>.............</span>");
+                    text.replace(&marker, "<span class='cloze'>.............</span>");
                 html! {
                     (PreEscaped(text))
                 }
@@ -215,15 +230,16 @@ impl CardContent {
                 }
             }
             CardContent::Cloze { text, start, end } => {
+                let marker = cloze_marker(text);
                 let mut text_bytes: Vec<u8> = text.as_bytes().to_owned();
                 let deleted_text: Vec<u8> = text_bytes[*start..*end + 1].to_owned();
                 let deleted_text: String = String::from_utf8(deleted_text)?;
                 let deleted_text: String = markdown_to_html_inline(config, &deleted_text)?;
-                text_bytes.splice(*start..*end + 1, CLOZE_TAG_BYTES.iter().copied());
+                text_bytes.splice(*start..*end + 1, marker.bytes());
                 let text: String = String::from_utf8(text_bytes)?;
                 let text = markdown_to_html(config, &text)?;
                 let text = text.replace(
-                    CLOZE_TAG,
+                    &marker,
                     &format!("<span class='cloze-reveal'>{}</span>", deleted_text),
                 );
                 html! {
@@ -260,5 +276,60 @@ mod tests {
         let a = CardContent::new_cloze("The capital of France is Paris", 0, 1);
         let b = CardContent::new_cloze("The capital of France is Paris", 0, 2);
         assert_eq!(a.family_hash(), b.family_hash());
+    }
+
+    use crate::helper::create_tmp_directory;
+    use crate::media::resolve::MediaResolverBuilder;
+
+    fn make_render_config() -> Fallible<MarkdownRenderConfig> {
+        let coll_path: PathBuf = create_tmp_directory()?;
+        let deck_path: PathBuf = coll_path.join("deck.md");
+        std::fs::write(&deck_path, "")?;
+        Ok(MarkdownRenderConfig {
+            resolver: MediaResolverBuilder::new()
+                .with_collection_path(coll_path)?
+                .with_deck_path(PathBuf::from("deck.md"))?
+                .build()?,
+            file_url_prefix: "http://localhost:1234/file".to_string(),
+        })
+    }
+
+    #[test]
+    fn test_literal_cloze_sentinel_in_card_text_survives_rendering() -> Fallible<()> {
+        // Regression test for BUG-22: a card containing the literal string
+        // `CLOZE_DELETION` must render that text verbatim, with exactly one
+        // cloze span (for the actual deletion).
+        let text = "The string CLOZE_DELETION marks Paris in the code";
+        let start = text.find("Paris").unwrap();
+        let end = start + "Paris".len() - 1;
+        let content = CardContent::new_cloze(text, start, end);
+        let config = make_render_config()?;
+
+        let front = content.html_front(&config)?.into_string();
+        assert!(
+            front.contains("CLOZE_DELETION"),
+            "literal sentinel text must survive front rendering: {front}"
+        );
+        assert_eq!(
+            front.matches("<span class='cloze'>").count(),
+            1,
+            "exactly one cloze blank expected: {front}"
+        );
+
+        let back = content.html_back(&config)?.into_string();
+        assert!(
+            back.contains("CLOZE_DELETION"),
+            "literal sentinel text must survive back rendering: {back}"
+        );
+        assert!(
+            back.contains("<span class='cloze-reveal'>Paris</span>"),
+            "deletion must be revealed on the back: {back}"
+        );
+        assert_eq!(
+            back.matches("<span class='cloze-reveal'>").count(),
+            1,
+            "exactly one reveal span expected: {back}"
+        );
+        Ok(())
     }
 }
