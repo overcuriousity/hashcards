@@ -252,6 +252,79 @@ mod tests {
         Ok(())
     }
 
+    /// BUG-45 regression: after a session finishes, the landing page must
+    /// show refreshed due counts without a manual sync or Home action.
+    #[tokio::test]
+    async fn test_landing_counts_refresh_after_session_finish() -> Fallible<()> {
+        let port = pick_unused_port().unwrap();
+        let dir = tempdir()?;
+        let coll_dir = dir.path().to_path_buf();
+        write(coll_dir.join("Deck.md"), "Q: What is 1+1?\nA: 2\n")?;
+
+        let slug = "count-collection".to_string();
+        let config = ResolvedServeConfig {
+            host: TEST_HOST.to_string(),
+            port,
+            git: None,
+            defaults: DefaultsSection::default(),
+            collections: vec![ResolvedCollection {
+                name: "Count Collection".to_string(),
+                slug: slug.clone(),
+                coll_dir: coll_dir.clone(),
+                db_path: coll_dir.join("hashcards.db"),
+            }],
+            data_dir: None,
+            config_path: None,
+            hedgedoc_entries: Vec::new(),
+            session_timeout_minutes: 1440,
+            _temp_dir: None,
+        };
+        spawn(async move { start_serve(config).await });
+        wait_for_server(TEST_HOST, port).await?;
+
+        let base = format!("http://{TEST_HOST}:{port}");
+        let client = reqwest::Client::new();
+
+        // Sanity: the one new card is due, so the landing page offers a drill.
+        let body = client.get(format!("{base}/")).send().await?.text().await?;
+        assert!(
+            body.contains("Drill"),
+            "expected a due card before the session: {body}"
+        );
+
+        // Start and complete the one-card session.
+        client
+            .post(format!("{base}/collection/{slug}/start"))
+            .body("decks=Deck")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .send()
+            .await?;
+        for action in ["Reveal", "Good"] {
+            client
+                .post(format!("{base}/collection/{slug}"))
+                .body(format!("action={action}"))
+                .header("content-type", "application/x-www-form-urlencoded")
+                .send()
+                .await?;
+        }
+
+        // The refresh runs in the background; poll the landing page briefly.
+        let mut refreshed = false;
+        for _ in 0..40 {
+            let body = client.get(format!("{base}/")).send().await?.text().await?;
+            if body.contains("Nothing due") {
+                refreshed = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+        assert!(
+            refreshed,
+            "landing page still shows stale due counts after the session finished"
+        );
+        Ok(())
+    }
+
     /// Regression test (BUG-01): a request error mid-session must not drop
     /// the drill session. Forces a render error by deleting the card's
     /// source file, then asserts the session survives and the next GET

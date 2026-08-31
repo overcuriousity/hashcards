@@ -7,17 +7,58 @@ use axum::response::Html;
 use maud::Markup;
 use maud::html;
 
+use chrono::Duration;
+
 use crate::cmd::drill::template::page_template;
+use crate::cmd::serve::hedgedoc::build_combined_infos;
 use crate::cmd::serve::state::AppState;
 use crate::cmd::serve::state::CollectionInfo;
 use crate::flash::Flash;
 use crate::types::timestamp::Timestamp;
+
+/// True when the cached collection counts are older than the poll interval.
+pub fn counts_are_stale(last: Option<Timestamp>, now: Timestamp, interval_minutes: u64) -> bool {
+    match last {
+        None => true,
+        Some(last) => {
+            now.into_inner() - last.into_inner() >= Duration::minutes(interval_minutes as i64)
+        }
+    }
+}
 
 pub async fn landing_handler(
     State(state): State<AppState>,
     Query(query): Query<HashMap<String, String>>,
 ) -> (StatusCode, Html<String>) {
     let flash = Flash::from_query(&query);
+
+    // BUG-45: recompute counts when they are older than the poll interval.
+    let interval_minutes = state
+        .config
+        .git
+        .as_ref()
+        .map(|g| g.poll_interval_minutes)
+        .unwrap_or(30);
+    let stale = {
+        let last = state.counts_refreshed_at.lock();
+        counts_are_stale(*last, Timestamp::now(), interval_minutes)
+    };
+    if stale && interval_minutes > 0 {
+        let static_collections = state.config.collections.clone();
+        let sources_snapshot = state.hedgedoc_sources.lock().clone();
+        match tokio::task::spawn_blocking(move || {
+            build_combined_infos(&static_collections, &sources_snapshot)
+        })
+        .await
+        {
+            Ok(combined) => {
+                *state.collections.write().await = combined;
+                *state.counts_refreshed_at.lock() = Some(Timestamp::now());
+            }
+            Err(e) => log::error!("Failed to refresh collection counts: {e}"),
+        }
+    }
+
     let collections = state.collections.read().await;
     let last_synced = *state.last_synced.lock();
     let hedgedoc_last_synced = *state.hedgedoc_last_synced.lock();
@@ -115,4 +156,23 @@ fn render_landing_page(
             }
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::Fallible;
+
+    /// BUG-45: counts older than the poll interval are stale; missing
+    /// counts are always stale.
+    #[test]
+    fn test_counts_are_stale() -> Fallible<()> {
+        let t0 = Timestamp::try_from("2026-01-01T10:00:00.000".to_string())?;
+        let t29 = Timestamp::try_from("2026-01-01T10:29:00.000".to_string())?;
+        let t30 = Timestamp::try_from("2026-01-01T10:30:00.000".to_string())?;
+        assert!(counts_are_stale(None, t0, 30));
+        assert!(!counts_are_stale(Some(t0), t29, 30));
+        assert!(counts_are_stale(Some(t0), t30, 30));
+        Ok(())
+    }
 }

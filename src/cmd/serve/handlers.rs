@@ -455,13 +455,17 @@ fn collection_post_inner(state: &AppState, slug: &str, form: FormData) -> Fallib
         let sources_snapshot = state.hedgedoc_sources.lock().clone();
         let static_collections = state.config.collections.clone();
         let collections_clone = state.collections.clone();
+        let counts_refreshed_at = state.counts_refreshed_at.clone();
         tokio::spawn(async move {
             match tokio::task::spawn_blocking(move || {
                 build_combined_infos(&static_collections, &sources_snapshot)
             })
             .await
             {
-                Ok(combined) => *collections_clone.write().await = combined,
+                Ok(combined) => {
+                    *collections_clone.write().await = combined;
+                    *counts_refreshed_at.lock() = Some(Timestamp::now());
+                }
                 Err(e) => log::error!("Collection count refresh failed: {e}"),
             }
         });
@@ -510,6 +514,28 @@ fn collection_post_inner(state: &AppState, slug: &str, form: FormData) -> Fallib
         action,
         submitted_card,
     )?;
+
+    // BUG-45: a finished session changes due counts; refresh them in the
+    // background so the landing page is up to date.
+    if matches!(result, ActionResult::SessionFinished) {
+        let sources_snapshot = state.hedgedoc_sources.lock().clone();
+        let static_collections = state.config.collections.clone();
+        let collections_clone = state.collections.clone();
+        let counts_refreshed_at = state.counts_refreshed_at.clone();
+        tokio::spawn(async move {
+            match tokio::task::spawn_blocking(move || {
+                build_combined_infos(&static_collections, &sources_snapshot)
+            })
+            .await
+            {
+                Ok(combined) => {
+                    *collections_clone.write().await = combined;
+                    *counts_refreshed_at.lock() = Some(Timestamp::now());
+                }
+                Err(e) => log::error!("Collection count refresh failed: {e}"),
+            }
+        });
+    }
 
     match result {
         ActionResult::ContinueWithFlash(flash) => {
@@ -632,7 +658,10 @@ pub async fn sync_handler(State(state): State<AppState>) -> Redirect {
             })
             .await
             {
-                Ok(combined) => *state.collections.write().await = combined,
+                Ok(combined) => {
+                    *state.collections.write().await = combined;
+                    *state.counts_refreshed_at.lock() = Some(Timestamp::now());
+                }
                 Err(e) => log::error!("Manual sync failed to compute collection counts: {e}"),
             }
             *state.last_synced.lock() = Some(Timestamp::now());

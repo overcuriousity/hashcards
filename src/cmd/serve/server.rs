@@ -176,6 +176,8 @@ pub async fn start_serve(config: ResolvedServeConfig) -> Fallible<()> {
         hedgedoc_sources: hedgedoc_sources.clone(),
         hedgedoc_last_synced: hedgedoc_last_synced.clone(),
         config_path,
+        // Counts were just computed above, so the stamp starts fresh.
+        counts_refreshed_at: Arc::new(Mutex::new(Some(Timestamp::now()))),
     };
 
     spawn_session_eviction_task(state.sessions.clone(), config.session_timeout_minutes);

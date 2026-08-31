@@ -28,6 +28,8 @@ pub struct AppState {
     pub hedgedoc_sources: Arc<Mutex<Vec<HedgedocSource>>>,
     pub hedgedoc_last_synced: Arc<Mutex<Option<Timestamp>>>,
     pub config_path: Arc<Mutex<Option<PathBuf>>>,
+    /// When the collection counts were last recomputed (BUG-45).
+    pub counts_refreshed_at: Arc<Mutex<Option<Timestamp>>>,
 }
 
 pub struct CollectionInfo {
