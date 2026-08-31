@@ -15,6 +15,7 @@ use maud::html;
 use serde::Deserialize;
 
 use crate::cmd::drill::template::page_template;
+use crate::cmd::serve::git::commit_edit;
 use crate::cmd::serve::handlers::find_collection;
 use crate::cmd::serve::state::AppState;
 use crate::db::Database;
@@ -135,6 +136,8 @@ pub struct EditOutcome {
     pub migrated: usize,
     /// New cards that could not be matched to prior history and start fresh.
     pub skipped: usize,
+    /// Whether the edit was committed to a containing git repository.
+    pub committed: bool,
 }
 
 pub async fn edit_post_handler(
@@ -144,14 +147,24 @@ pub async fn edit_post_handler(
 ) -> Result<Redirect, (StatusCode, Html<String>)> {
     match edit_post_inner(&state, &slug, &hash_hex, form) {
         Ok(outcome) => {
+            log::debug!(
+                "Edit saved: {} card(s) migrated, {} skipped, committed={}",
+                outcome.migrated,
+                outcome.skipped,
+                outcome.committed
+            );
             let target = format!("/collection/{slug}/bookmarks");
+            let mut msg = String::from("Card saved.");
+            if outcome.committed {
+                msg.push_str(" Committed to git.");
+            }
             let flash = if outcome.skipped > 0 {
                 Flash::error(format!(
-                    "Card saved, but {} card(s) could not be matched to their previous review history and will start fresh.",
+                    "{msg} {} card(s) could not be matched to their previous review history and will start fresh.",
                     outcome.skipped
                 ))
             } else {
-                Flash::success("Card saved.")
+                Flash::success(msg)
             };
             Ok(flash.redirect(&target))
         }
@@ -241,9 +254,25 @@ fn edit_post_inner(
         db.insert_card_if_new(*new, now)?;
     }
 
+    // FEAT-04: every successful web edit becomes a git commit, so git sync
+    // keeps working and the collection gets versioned card history for free.
+    let (author_name, author_email) = match state.config.git.as_ref() {
+        Some(g) => (
+            g.commit_author_name.as_str(),
+            g.commit_author_email.as_str(),
+        ),
+        None => ("hashcards web edit", "hashcards@localhost"),
+    };
+    let committed = commit_edit(&file_path, author_name, author_email).map_err(|e| {
+        ErrorReport::new(format!(
+            "The edit was saved, but committing it to git failed: {e} Sync may fail until the change is committed by hand."
+        ))
+    })?;
+
     Ok(EditOutcome {
         migrated: plan.renames.len(),
         skipped: plan.skipped,
+        committed,
     })
 }
 
@@ -569,6 +598,102 @@ mod tests {
         for c in &old_cards {
             assert!(!db.card_exists(c.hash())?, "stale old card {}", c.hash());
         }
+        Ok(())
+    }
+
+    use std::process::Command as SyncCommand;
+
+    fn git(dir: &Path, args: &[&str]) {
+        let out = SyncCommand::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// Regression test for BUG-34 / FEAT-04: after a web edit in a git-backed
+    /// collection, the working tree is clean and a subsequent pull succeeds.
+    #[test]
+    fn test_edit_in_git_backed_collection_commits_and_pull_succeeds() -> Fallible<()> {
+        let dir = tempfile::tempdir()?;
+        let work = dir.path().join("work");
+        std::fs::create_dir_all(&work)?;
+        let work = work.canonicalize()?;
+
+        git(&work, &["init", "-b", "main"]);
+        // The per-collection DB lives in the collection dir in --directories
+        // mode; ignore it so the clean-tree assertion sees only card files.
+        std::fs::write(work.join(".gitignore"), "hashcards.db\n")?;
+        let file = work.join("Deck.md");
+        std::fs::write(&file, "Q: capital of France?\nA: Paris\n")?;
+        git(&work, &["add", "."]);
+        git(
+            &work,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-m",
+                "init",
+            ],
+        );
+
+        // A bare clone acts as the remote so `git pull` has something to talk to.
+        let remote = dir.path().join("remote.git");
+        let work_str = work
+            .to_str()
+            .ok_or_else(|| ErrorReport::new("non-utf8 tempdir"))?;
+        let remote_str = remote
+            .to_str()
+            .ok_or_else(|| ErrorReport::new("non-utf8 tempdir"))?;
+        git(dir.path(), &["clone", "--bare", work_str, remote_str]);
+        git(&work, &["remote", "add", "origin", remote_str]);
+
+        let state = test_state(&work)?;
+        let slug = state.config.collections[0].slug.clone();
+        let cards = parse_deck(&work)?.cards;
+        let hash_hex = cards[0].hash().to_hex();
+        let mtime = file_mtime_ms(&file)?;
+
+        let outcome = edit_post_inner(
+            &state,
+            &slug,
+            &hash_hex,
+            EditForm {
+                new_text: "Q: capital of France?\nA: **Paris**".to_string(),
+                mtime_ms: mtime.to_string(),
+            },
+        )?;
+        assert!(outcome.committed, "edit was not committed");
+
+        // The working tree is clean...
+        let status = SyncCommand::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(&work)
+            .output()?;
+        assert!(
+            status.stdout.is_empty(),
+            "working tree not clean after edit: {}",
+            String::from_utf8_lossy(&status.stdout)
+        );
+
+        // ...and a subsequent pull succeeds.
+        let pull = SyncCommand::new("git")
+            .args(["pull", "--ff-only", "origin", "main"])
+            .current_dir(&work)
+            .output()?;
+        assert!(
+            pull.status.success(),
+            "pull failed after edit: {}",
+            String::from_utf8_lossy(&pull.stderr)
+        );
         Ok(())
     }
 
