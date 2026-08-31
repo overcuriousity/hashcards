@@ -44,7 +44,7 @@ Note: SPEC.md also asks for "a dedicated `update_bookmark_note` for the notes fo
 - Consumes: `Database::insert_bookmark(card_hash, note, now)`, `Database::update_bookmark_note(card_hash, note)`, `Database::get_bookmark(card_hash)` — all existing, signatures unchanged.
 - Produces: `insert_bookmark` with insert-if-absent semantics (an existing bookmark row is left completely untouched). No signature change; no other task depends on this one.
 
-- [ ] **Step 1: Write the failing regression test**
+- [x] **Step 1: Write the failing regression test**
 
 Add to the tests module in `src/db.rs`, next to `test_bookmark_crud`:
 
@@ -88,12 +88,12 @@ This needs `NaiveDate` in scope inside the tests module. The tests module alread
 
 (`chrono` is already a dependency — `src/types/timestamp.rs` uses it. `Timestamp::new` is `#[cfg(test)]`-only, which is exactly this context. `Timestamp` derives `PartialEq`, so `assert_eq!` on `created_at` works.)
 
-- [ ] **Step 2: Run the test and see it fail**
+- [x] **Step 2: Run the test and see it fail**
 
 Run: `cargo test test_rebookmark_preserves_note_and_created_at`
 Expected: FAIL on the `bm.note` assertion — `insert or replace` replaced the row, so `note` is `None` (and `created_at` is `later`).
 
-- [ ] **Step 3: Implement the fix**
+- [x] **Step 3: Implement the fix**
 
 In `src/db.rs`, replace the doc comment and SQL of `insert_bookmark` (currently at lines 400-413):
 
@@ -118,12 +118,12 @@ In `src/db.rs`, replace the doc comment and SQL of `insert_bookmark` (currently 
 
 (`card_hash` is the primary key of `bookmarks` — see `src/schema.sql` — so `on conflict (card_hash)` is the right conflict target. The only production caller is `src/cmd/drill/post.rs:160`; the notes form goes through `update_bookmark_note`, so nothing loses the ability to change a note.)
 
-- [ ] **Step 4: Run the tests and see them pass**
+- [x] **Step 4: Run the tests and see them pass**
 
 Run: `cargo test --lib db`
 Expected: PASS, including `test_rebookmark_preserves_note_and_created_at`, `test_bookmark_crud`, `test_bookmark_cascade_delete`, `test_rename_card_hash_cascades_bookmark`.
 
-- [ ] **Step 5: Update CHANGELOG.xml**
+- [x] **Step 5: Update CHANGELOG.xml**
 
 In `CHANGELOG.xml`, append inside the existing `<unreleased><fixed>` list:
 
@@ -133,7 +133,7 @@ In `CHANGELOG.xml`, append inside the existing `<unreleased><fixed>` list:
             </change>
 ```
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/db.rs CHANGELOG.xml

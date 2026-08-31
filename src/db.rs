@@ -439,7 +439,10 @@ impl Database {
         Ok(count > 0)
     }
 
-    /// Insert or replace a bookmark. If the card has no DB row yet, it is created first.
+    /// Insert a bookmark for this card if none exists. An existing bookmark —
+    /// including its note and creation time — is left completely untouched.
+    /// The card row must already exist; drill callers ensure this with
+    /// `insert_card_if_new`.
     ///
     /// Unlike reviews, bookmarks write to the DB mid-session so they survive aborted sessions.
     pub fn insert_bookmark(
@@ -448,8 +451,7 @@ impl Database {
         note: Option<String>,
         now: Timestamp,
     ) -> Fallible<()> {
-        let sql =
-            "insert or replace into bookmarks (card_hash, note, created_at) values (?, ?, ?);";
+        let sql = "insert into bookmarks (card_hash, note, created_at) values (?, ?, ?) on conflict (card_hash) do nothing;";
         self.conn.execute(sql, params![card_hash, note, now])?;
         Ok(())
     }
@@ -1528,6 +1530,38 @@ mod tests {
         // same value — the harmless instantaneous-session edge case.
         assert_eq!(db.close_dangling_sessions()?, 1);
         assert_eq!(find(empty_dangling)?.ended_at, t1);
+        Ok(())
+    }
+
+    /// BUG-07: bookmark, add note, re-bookmark — the note and created_at survive.
+    #[test]
+    fn test_rebookmark_preserves_note_and_created_at() -> Fallible<()> {
+        use chrono::NaiveDate;
+
+        let db = Database::new(":memory:")?;
+        let hash = CardHash::hash_bytes(b"a");
+        let created = Timestamp::new(
+            NaiveDate::from_ymd_opt(2026, 8, 30)
+                .unwrap()
+                .and_hms_opt(10, 0, 0)
+                .unwrap(),
+        );
+        let later = Timestamp::new(
+            NaiveDate::from_ymd_opt(2026, 8, 31)
+                .unwrap()
+                .and_hms_opt(12, 30, 0)
+                .unwrap(),
+        );
+        db.insert_card(hash, created)?;
+        // Bookmark from the drill UI (the drill path always passes note: None).
+        db.insert_bookmark(hash, None, created)?;
+        // The user adds a note via the bookmark notes form.
+        db.update_bookmark_note(hash, Some("needs rephrasing".to_string()))?;
+        // The user presses `b` again on the same card in a later session.
+        db.insert_bookmark(hash, None, later)?;
+        let bm = db.get_bookmark(hash)?.unwrap();
+        assert_eq!(bm.note, Some("needs rephrasing".to_string()));
+        assert_eq!(bm.created_at, created);
         Ok(())
     }
 }
