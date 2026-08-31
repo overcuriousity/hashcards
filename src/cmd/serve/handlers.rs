@@ -158,7 +158,9 @@ fn collection_get_inner(state: &AppState, slug: &str, flash: Option<Flash>) -> F
         return Ok(html.into_string());
     };
 
-    let session = session.lock();
+    let mut session = session.lock();
+    // BUG-08: stamp activity so the eviction task only reaps idle sessions.
+    session.last_activity_at = Timestamp::now();
     let form_action = format!("/collection/{slug}");
     let file_url_prefix = format!("/collection/{slug}/file");
     let ctx = RenderContext {
@@ -495,6 +497,8 @@ fn collection_post_inner(state: &AppState, slug: &str, form: FormData) -> Fallib
     }
 
     let session = &mut *guard;
+    // BUG-08: stamp activity so the eviction task only reaps idle sessions.
+    session.last_activity_at = Timestamp::now();
 
     // `Action::Home` returned early above, and it is the only action for which
     // `handle_action` yields `ActionResult::Home`. Every action reaching here

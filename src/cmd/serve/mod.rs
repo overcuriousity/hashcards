@@ -48,6 +48,7 @@ mod tests {
             data_dir: None,
             config_path: None,
             hedgedoc_entries: Vec::new(),
+            session_timeout_minutes: 1440,
             _temp_dir: None,
         };
         spawn(async move { start_serve(config).await });
@@ -100,6 +101,7 @@ mod tests {
             data_dir: None,
             config_path: None,
             hedgedoc_entries: Vec::new(),
+            session_timeout_minutes: 1440,
             _temp_dir: None,
         };
 
@@ -221,6 +223,7 @@ mod tests {
             data_dir: Some(data_dir.clone()),
             config_path: Some(config_path.clone()),
             hedgedoc_entries: Vec::new(),
+            session_timeout_minutes: 1440,
             _temp_dir: None,
         };
         spawn(async move { start_serve(config).await });
@@ -276,6 +279,7 @@ mod tests {
             data_dir: None,
             config_path: None,
             hedgedoc_entries: Vec::new(),
+            session_timeout_minutes: 1440,
             _temp_dir: None,
         };
 

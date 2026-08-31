@@ -40,6 +40,10 @@ pub struct ServerSection {
     #[serde(default = "default_port")]
     pub port: u16,
     pub data_dir: String,
+    /// Evict drill sessions idle for this many minutes, closing their DB
+    /// session row. 0 disables eviction. Default: 1440 (24 hours).
+    #[serde(default = "default_session_timeout_minutes")]
+    pub session_timeout_minutes: u64,
 }
 
 /// Default bind address. Deliberately localhost-only: hashcards has no
@@ -51,6 +55,10 @@ fn default_host() -> String {
 
 fn default_port() -> u16 {
     8000
+}
+
+fn default_session_timeout_minutes() -> u64 {
+    1440
 }
 
 #[derive(Deserialize)]
@@ -208,6 +216,8 @@ pub struct ResolvedServeConfig {
     pub config_path: Option<PathBuf>,
     /// HedgeDoc source URLs loaded from the config file.
     pub hedgedoc_entries: Vec<HedgedocEntry>,
+    /// Idle drill sessions are evicted after this many minutes (0 = never).
+    pub session_timeout_minutes: u64,
     /// Kept alive for the process lifetime so the OS temp directory is cleaned up.
     pub _temp_dir: Option<std::sync::Arc<TempDirTracker>>,
 }
@@ -302,6 +312,7 @@ impl ResolvedServeConfig {
             data_dir: Some(data_dir),
             config_path: None,
             hedgedoc_entries: config.hedgedoc,
+            session_timeout_minutes: config.server.session_timeout_minutes,
             _temp_dir: None,
         })
     }
@@ -349,6 +360,7 @@ impl ResolvedServeConfig {
             data_dir: None,
             config_path: None,
             hedgedoc_entries: Vec::new(),
+            session_timeout_minutes: default_session_timeout_minutes(),
             _temp_dir: None,
         })
     }

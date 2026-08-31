@@ -258,6 +258,7 @@ fn resolve_serve_config(
         data_dir: Some(data_dir),
         config_path: None,
         hedgedoc_entries: Vec::new(),
+        session_timeout_minutes: 1440,
         _temp_dir: Some(std::sync::Arc::new(temp_tracker)),
     })
 }

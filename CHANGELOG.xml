@@ -2,6 +2,9 @@
     <unreleased>
         <fixed>
             <change author="mstoeck3">
+                Serve-mode drill sessions idle for longer than a configurable timeout (`session_timeout_minutes`, default 24 hours) are now evicted and their database session rows closed; previously abandoned sessions lived forever and their session rows stayed open. Serve mode's single-user semantics are now documented in the README. (BUG-08)
+            </change>
+            <change author="mstoeck3">
                 Serve mode now runs collection parsing and database work on a blocking thread pool instead of the async runtime, so one slow request no longer stalls every other request. (BUG-44)
             </change>
             <change author="mstoeck3">

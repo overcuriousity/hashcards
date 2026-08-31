@@ -469,6 +469,7 @@ For more control, create a `hashcards.toml` (see `hashcards.example.toml` for th
 host = "127.0.0.1"
 port = 8000
 data_dir = "/var/lib/hashcards"
+session_timeout_minutes = 1440
 
 [git]
 repo_url = "https://github.com/user/flashcards.git"
@@ -493,6 +494,14 @@ By default the server binds to `127.0.0.1` and is only reachable from the local 
 When a `[git]` section is present, the server clones the repository into `{data_dir}/repo` on startup and syncs it periodically. Databases are stored in `{data_dir}/db`. A "Sync Now" button on the landing page triggers an immediate sync.
 
 The `[git]` section is optional. Omitting it disables git syncing; collection paths are then resolved relative to `{data_dir}/repo` (or you can pass directories directly on the command line instead).
+
+The `[server]` section also accepts:
+
+- `session_timeout_minutes`: drill sessions idle for longer than this are evicted and their database session row is closed; progress already graded is kept (each grade is written immediately). Default: `1440` (24 hours). `0` disables eviction.
+
+### Single-user semantics
+
+Serve mode assumes a single user per collection. Drill sessions are keyed by collection, so two browsers (or tabs) pointed at the same collection share one drill session: both see the same card, and a grade from either advances the shared queue. There is no per-client session isolation and no authentication. If a session is abandoned, it is evicted after `session_timeout_minutes` of inactivity; every grade given before that is already persisted.
 
 ### Defaults
 

@@ -12,6 +12,8 @@
 # port = 8000                         # Port number (default: 8000)
 data_dir = "/var/lib/hashcards"       # Directory for repo clone and databases
 
+# session_timeout_minutes = 1440       # Evict drill sessions idle this long; 0 disables (default: 1440)
+
 [git]
 repo_url = "https://github.com/user/flashcards.git"
 # branch = "main"                     # Branch to track (default: main)

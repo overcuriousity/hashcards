@@ -55,6 +55,8 @@ use crate::cmd::serve::hedgedoc::spawn_hedgedoc_sync_task;
 use crate::cmd::serve::landing::landing_handler;
 use crate::cmd::serve::state::AppState;
 use crate::cmd::serve::state::HedgedocSource;
+use crate::cmd::serve::state::SharedSession;
+use crate::cmd::serve::state::evict_idle_sessions;
 use crate::error::Fallible;
 use crate::types::timestamp::Timestamp;
 
@@ -176,6 +178,8 @@ pub async fn start_serve(config: ResolvedServeConfig) -> Fallible<()> {
         config_path,
     };
 
+    spawn_session_eviction_task(state.sessions.clone(), config.session_timeout_minutes);
+
     // Spawn background git sync task (only in git mode)
     if let Some(git) = sync_git {
         spawn_sync_task(
@@ -291,4 +295,41 @@ async fn shutdown_signal() {
         pending::<()>().await;
     }
     log::debug!("Received shutdown signal");
+}
+
+/// Periodically evict drill sessions idle past the configured timeout,
+/// closing their DB session rows (BUG-08).
+fn spawn_session_eviction_task(
+    sessions: Arc<Mutex<HashMap<String, SharedSession>>>,
+    timeout_minutes: u64,
+) {
+    if timeout_minutes == 0 {
+        log::debug!("Idle session eviction disabled (session_timeout_minutes = 0)");
+        return;
+    }
+    tokio::spawn(async move {
+        // Check at a quarter of the timeout, capped at every 10 minutes.
+        let tick_secs = (timeout_minutes * 60 / 4).clamp(1, 600);
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(tick_secs));
+        ticker.tick().await;
+        loop {
+            ticker.tick().await;
+            let sessions = sessions.clone();
+            match tokio::task::spawn_blocking(move || {
+                evict_idle_sessions(&sessions, timeout_minutes, Timestamp::now())
+            })
+            .await
+            {
+                Ok(evicted) if !evicted.is_empty() => {
+                    log::info!(
+                        "Evicted {} idle drill session(s): {}",
+                        evicted.len(),
+                        evicted.join(", ")
+                    );
+                }
+                Ok(_) => {}
+                Err(e) => log::error!("Session eviction task failed: {e}"),
+            }
+        }
+    });
 }
