@@ -1,6 +1,9 @@
 <changelog>
     <unreleased>
         <fixed>
+            <change author="mstoeck3">
+                Serve mode now detects URL slug collisions between collections (e.g. paths `a/b` and `a-b`, or a configured collection shadowing a HedgeDoc source) at config load and when adding a HedgeDoc source, failing with a message naming both colliding collections. Previously one collection was silently routed to the other's database. (BUG-43)
+            </change>
             <change author="claude">
                 HedgeDoc sources that fail to initialize at server startup (for example while the HedgeDoc instance is unreachable) are no longer silently dropped from the configuration. They now appear with an "Error" status, are retried on every sync, and are only removed when explicitly deleted. (BUG-40)
             </change>

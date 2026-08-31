@@ -55,6 +55,18 @@ pub fn slug_for_source_uri(source_uri: &str) -> String {
     format!("hedgedoc-{}", slugify(source_uri))
 }
 
+/// Return the configured collection whose slug collides with `slug`, if any.
+///
+/// Used when adding a HedgeDoc source: `find_collection` prefers configured
+/// collections, so a colliding source would silently drill against the wrong
+/// database (BUG-43).
+pub fn find_slug_collision<'a>(
+    slug: &str,
+    collections: &'a [ResolvedCollection],
+) -> Option<&'a ResolvedCollection> {
+    collections.iter().find(|c| c.slug == slug)
+}
+
 /// Validate that a HedgeDoc URL is safe to fetch (HTTPS only).
 fn validate_hedgedoc_url(url: &str) -> Fallible<()> {
     let parsed = reqwest::Url::parse(url).map_err(|e| {
@@ -1261,5 +1273,30 @@ mod tests {
         let entries = all_hedgedoc_entries(&[source]);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].url, "not a valid url");
+    }
+
+    /// BUG-43 regression: a configured collection whose slug equals a
+    /// HedgeDoc source slug must be reported as a collision.
+    #[test]
+    fn test_hedgedoc_slug_collision_is_detected() {
+        let source_uri = "demo@hedgedoc.example.org";
+        let hedgedoc_slug = slug_for_source_uri(source_uri);
+        let colliding = ResolvedCollection {
+            name: "Sneaky".to_string(),
+            slug: hedgedoc_slug.clone(),
+            coll_dir: PathBuf::from("/tmp/sneaky"),
+            db_path: PathBuf::from("/tmp/sneaky.db"),
+        };
+        let harmless = ResolvedCollection {
+            name: "Fine".to_string(),
+            slug: "fine".to_string(),
+            coll_dir: PathBuf::from("/tmp/fine"),
+            db_path: PathBuf::from("/tmp/fine.db"),
+        };
+
+        let collections = vec![harmless, colliding];
+        let hit = find_slug_collision(&hedgedoc_slug, &collections);
+        assert_eq!(hit.map(|c| c.name.as_str()), Some("Sneaky"));
+        assert!(find_slug_collision("something-else", &collections).is_none());
     }
 }

@@ -44,7 +44,9 @@ use crate::cmd::serve::hedgedoc::cleanup_after_delete;
 use crate::cmd::serve::hedgedoc::commit_add;
 use crate::cmd::serve::hedgedoc::commit_delete;
 use crate::cmd::serve::hedgedoc::create_minimal_config;
+use crate::cmd::serve::hedgedoc::find_slug_collision;
 use crate::cmd::serve::hedgedoc::normalize_hedgedoc_url;
+use crate::cmd::serve::hedgedoc::slug_for_source_uri;
 use crate::cmd::serve::hedgedoc::source_uri_from_url;
 use crate::cmd::serve::hedgedoc::sync_source;
 use crate::cmd::serve::state::AppState;
@@ -673,6 +675,17 @@ pub async fn hedgedoc_add_handler(
                 .redirect("/hedgedoc");
         }
     };
+
+    // BUG-43: refuse to create a source whose slug collides with a configured
+    // collection; find_collection would route it to the wrong database.
+    let new_slug = slug_for_source_uri(&source_uri);
+    if let Some(existing) = find_slug_collision(&new_slug, &state.config.collections) {
+        return Flash::error(format!(
+            "Cannot add this HedgeDoc source: its collection slug '{new_slug}' collides with the configured collection '{}'. Rename that collection or use a different source.",
+            existing.name
+        ))
+        .redirect("/hedgedoc");
+    }
 
     let existing_collection = {
         let sources = state.hedgedoc_sources.lock();
