@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::Mutex;
+use parking_lot::Mutex;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
@@ -70,7 +70,7 @@ pub async fn collection_get_handler(
     // Determine whether this slug is known before calling the inner function,
     // so we can return 404 for unknown collections vs. 500 for real errors.
     let known = find_collection(&state, &slug).is_some()
-        || state.sessions.lock().unwrap().contains_key(&slug);
+        || state.sessions.lock().contains_key(&slug);
     match collection_get_inner(&state, &slug, flash) {
         Ok(html) => (StatusCode::OK, Html(html)),
         Err(e) => {
@@ -95,7 +95,7 @@ pub async fn collection_get_handler(
 fn collection_get_inner(state: &AppState, slug: &str, flash: Option<Flash>) -> Fallible<String> {
     // Clone the Arc out of the map so the map lock is not held during
     // rendering; the session itself stays in the map even if rendering fails.
-    let session: Option<SharedSession> = state.sessions.lock().unwrap().get(slug).cloned();
+    let session: Option<SharedSession> = state.sessions.lock().get(slug).cloned();
 
     let Some(session) = session else {
         // No active session: show the deck browser.
@@ -107,7 +107,7 @@ fn collection_get_inner(state: &AppState, slug: &str, flash: Option<Flash>) -> F
         // share the same deck name the edit link is suppressed for that deck to
         // avoid pointing at an arbitrary note.
         let hedge_urls: std::collections::HashMap<String, String> = {
-            let sources = state.hedgedoc_sources.lock().unwrap();
+            let sources = state.hedgedoc_sources.lock();
             let mut map = std::collections::HashMap::new();
             let mut dupes: HashSet<String> = HashSet::new();
             for (deck_name, url) in sources
@@ -136,7 +136,7 @@ fn collection_get_inner(state: &AppState, slug: &str, flash: Option<Flash>) -> F
         return Ok(html.into_string());
     };
 
-    let session = session.lock().unwrap();
+    let session = session.lock();
     let form_action = format!("/collection/{slug}");
     let file_url_prefix = format!("/collection/{slug}/file");
     let ctx = RenderContext {
@@ -166,7 +166,7 @@ pub(super) fn find_collection(state: &AppState, slug: &str) -> Option<ResolvedCo
     if let Some(rc) = state.config.collections.iter().find(|c| c.slug == slug) {
         return Some(rc.clone());
     }
-    let sources = state.hedgedoc_sources.lock().unwrap();
+    let sources = state.hedgedoc_sources.lock();
     sources
         .iter()
         .find(|s| s.collection.slug == slug)
@@ -250,7 +250,7 @@ fn collection_start_inner(
         return fail("Select at least one deck.");
     }
     // Remove any existing session before doing DB work.
-    state.sessions.lock().unwrap().remove(slug);
+    state.sessions.lock().remove(slug);
 
     // Create the session outside the lock (may do filesystem/DB work).
     let session = create_session(state, slug, &selected_decks, limit)?;
@@ -258,7 +258,6 @@ fn collection_start_inner(
         state
             .sessions
             .lock()
-            .unwrap()
             .insert(slug.to_string(), Arc::new(Mutex::new(s)));
     }
     Ok(())
@@ -396,9 +395,9 @@ fn collection_post_inner(state: &AppState, slug: &str, form: FormData) -> Fallib
     // Home action: close the session and drop it without needing to hold the
     // global lock during DB work.
     if matches!(action, Action::Home) {
-        let session = state.sessions.lock().unwrap().remove(slug);
+        let session = state.sessions.lock().remove(slug);
         if let Some(s) = session {
-            let s = s.lock().unwrap();
+            let s = s.lock();
             if s.mutable.finished_at.is_none() {
                 if let Err(e) = s
                     .mutable
@@ -414,7 +413,7 @@ fn collection_post_inner(state: &AppState, slug: &str, form: FormData) -> Fallib
         }
 
         // Snapshot inputs, then compute + update in background (don't block response).
-        let sources_snapshot = state.hedgedoc_sources.lock().unwrap().clone();
+        let sources_snapshot = state.hedgedoc_sources.lock().clone();
         let static_collections = state.config.collections.clone();
         let collections_clone = state.collections.clone();
         tokio::spawn(async move {
@@ -428,11 +427,11 @@ fn collection_post_inner(state: &AppState, slug: &str, form: FormData) -> Fallib
     // Lock the session in place: the map lock is released immediately, the
     // per-slug lock is held for the DB work, and an error leaves the session
     // in the map untouched.
-    let session: SharedSession = match state.sessions.lock().unwrap().get(slug).cloned() {
+    let session: SharedSession = match state.sessions.lock().get(slug).cloned() {
         Some(s) => s,
         None => return Ok(Redirect::to(&format!("/collection/{slug}"))),
     };
-    let mut guard = session.lock().unwrap();
+    let mut guard = session.lock();
 
     // Re-check that this is still the session the map holds for `slug`: a
     // concurrent Home request may have removed it (and closed its DB row)
@@ -442,7 +441,7 @@ fn collection_post_inner(state: &AppState, slug: &str, form: FormData) -> Fallib
     // than this check (Home never holds the two locks together either, so
     // this ordering can't deadlock against it).
     let still_current = {
-        let map = state.sessions.lock().unwrap();
+        let map = state.sessions.lock();
         matches!(map.get(slug), Some(current) if Arc::ptr_eq(&session, current))
     };
     if !still_current {
@@ -534,9 +533,9 @@ pub async fn collection_script_handler(
     State(state): State<AppState>,
     Path(slug): Path<String>,
 ) -> (StatusCode, [(HeaderName, &'static str); 1], String) {
-    let session: Option<SharedSession> = state.sessions.lock().unwrap().get(&slug).cloned();
+    let session: Option<SharedSession> = state.sessions.lock().get(&slug).cloned();
     let macros: Vec<(String, String)> = match session {
-        Some(session) => session.lock().unwrap().macros.clone(),
+        Some(session) => session.lock().macros.clone(),
         None => {
             // No active session; serve script without macros
             let content = format!(
@@ -569,10 +568,10 @@ pub async fn sync_handler(State(state): State<AppState>) -> Redirect {
 
     match clone_or_pull(&git.repo_url, &git.branch, &git.repo_dir).await {
         Ok(()) => {
-            let sources_snapshot = state.hedgedoc_sources.lock().unwrap().clone();
+            let sources_snapshot = state.hedgedoc_sources.lock().clone();
             let combined = build_combined_infos(&state.config.collections, &sources_snapshot);
             *state.collections.write().await = combined;
-            *state.last_synced.lock().unwrap() = Some(Timestamp::now());
+            *state.last_synced.lock() = Some(Timestamp::now());
             log::debug!("Manual sync completed successfully");
             Flash::success("Sync complete.").redirect("/")
         }
@@ -592,8 +591,8 @@ pub async fn hedgedoc_manage_handler(
 ) -> (StatusCode, Html<String>) {
     use crate::cmd::serve::hedgedoc_ui::render_manage_page;
     let flash = Flash::from_query(&query);
-    let sources = state.hedgedoc_sources.lock().unwrap();
-    let last_synced = *state.hedgedoc_last_synced.lock().unwrap();
+    let sources = state.hedgedoc_sources.lock();
+    let last_synced = *state.hedgedoc_last_synced.lock();
     let config_available = state.config.data_dir.is_some();
     let html = render_manage_page(&sources, last_synced, config_available, flash);
     (StatusCode::OK, Html(html.into_string()))
@@ -644,7 +643,7 @@ pub async fn hedgedoc_add_handler(
 
     // Check for duplicate URL.
     {
-        let sources = state.hedgedoc_sources.lock().unwrap();
+        let sources = state.hedgedoc_sources.lock();
         if sources
             .iter()
             .flat_map(|s| s.notes.iter())
@@ -664,7 +663,7 @@ pub async fn hedgedoc_add_handler(
     };
 
     let existing_collection = {
-        let sources = state.hedgedoc_sources.lock().unwrap();
+        let sources = state.hedgedoc_sources.lock();
         sources
             .iter()
             .find(|s| s.source_uri == source_uri)
@@ -697,7 +696,7 @@ pub async fn hedgedoc_add_handler(
     // Compute what the new entries list would be without mutating shared state yet.
     // This lets us persist to disk first; we only update in-memory state after success.
     let new_entries: Vec<HedgedocEntry> = {
-        let sources = state.hedgedoc_sources.lock().unwrap();
+        let sources = state.hedgedoc_sources.lock();
         if new_source.is_some() {
             if sources
                 .iter()
@@ -726,7 +725,7 @@ pub async fn hedgedoc_add_handler(
 
     // Get or create config path outside the lock, using spawn_blocking for the
     // filesystem work so we don't block the async runtime.
-    let maybe_config_path = state.config_path.lock().unwrap().clone();
+    let maybe_config_path = state.config_path.lock().clone();
     let config_path = match maybe_config_path {
         Some(p) => p,
         None => {
@@ -746,7 +745,7 @@ pub async fn hedgedoc_add_handler(
                             .redirect("/hedgedoc");
                     }
                 };
-            *state.config_path.lock().unwrap() = Some(p.clone());
+            *state.config_path.lock() = Some(p.clone());
             // The config now references the temp data dir; stop cleanup on exit.
             if let Some(tracker) = state.config._temp_dir.as_ref() {
                 tracker.dismiss();
@@ -772,7 +771,7 @@ pub async fn hedgedoc_add_handler(
 
     // Persist succeeded: now update in-memory state.
     {
-        let mut sources = state.hedgedoc_sources.lock().unwrap();
+        let mut sources = state.hedgedoc_sources.lock();
         if let Some(source) = new_source {
             sources.push(source);
         } else if let Some(note) = new_note {
@@ -783,7 +782,7 @@ pub async fn hedgedoc_add_handler(
     }
 
     // Refresh combined collection infos.
-    let sources_snapshot = state.hedgedoc_sources.lock().unwrap().clone();
+    let sources_snapshot = state.hedgedoc_sources.lock().clone();
     let combined = build_combined_infos(&state.config.collections, &sources_snapshot);
     *state.collections.write().await = combined;
 
@@ -793,7 +792,7 @@ pub async fn hedgedoc_add_handler(
         .flat_map(|s| s.notes.iter())
         .any(|n| n.url == url && n.last_error.is_none())
     {
-        *state.hedgedoc_last_synced.lock().unwrap() = Some(Timestamp::now());
+        *state.hedgedoc_last_synced.lock() = Some(Timestamp::now());
     }
 
     Flash::success("HedgeDoc source added.").redirect("/hedgedoc")
@@ -811,7 +810,7 @@ pub async fn hedgedoc_delete_handler(
 ) -> Redirect {
     // Phase 1: compute the post-deletion entries without mutating shared state.
     let (remaining, new_sources) = {
-        let sources = state.hedgedoc_sources.lock().unwrap();
+        let sources = state.hedgedoc_sources.lock();
         let mut working = sources.clone();
         for src in working.iter_mut() {
             src.notes.retain(|n| n.url != form.url);
@@ -823,7 +822,7 @@ pub async fn hedgedoc_delete_handler(
 
     // Phase 2: persist to TOML if config file is available, via spawn_blocking.
     // Extract config path before any await so the MutexGuard is dropped first.
-    let maybe_config_path: Option<std::path::PathBuf> = state.config_path.lock().unwrap().clone();
+    let maybe_config_path: Option<std::path::PathBuf> = state.config_path.lock().clone();
     let persist_result: Result<(), String> = if let Some(config_path) = maybe_config_path {
         let remaining_for_persist = remaining.clone();
         match tokio::task::spawn_blocking(move || {
@@ -848,7 +847,7 @@ pub async fn hedgedoc_delete_handler(
     // Only update in-memory state if persist succeeded (or was not needed).
     match persist_result {
         Ok(()) => {
-            *state.hedgedoc_sources.lock().unwrap() = new_sources.clone();
+            *state.hedgedoc_sources.lock() = new_sources.clone();
             let combined = build_combined_infos(&state.config.collections, &new_sources);
             *state.collections.write().await = combined;
             Flash::success("HedgeDoc source removed.").redirect("/hedgedoc")
@@ -868,7 +867,7 @@ pub async fn hedgedoc_sync_now_handler(State(state): State<AppState>) -> Redirec
 
     // Collect URLs to sync (release lock before awaiting).
     let entries: Vec<(String, ResolvedCollection)> = {
-        let sources = state.hedgedoc_sources.lock().unwrap();
+        let sources = state.hedgedoc_sources.lock();
         sources
             .iter()
             .flat_map(|s| {
@@ -885,7 +884,7 @@ pub async fn hedgedoc_sync_now_handler(State(state): State<AppState>) -> Redirec
         match sync_source(url, rc).await {
             Ok((deck_name, file_name)) => {
                 any_success = true;
-                let mut sources = state.hedgedoc_sources.lock().unwrap();
+                let mut sources = state.hedgedoc_sources.lock();
                 for src in sources.iter_mut() {
                     if let Some(note) = src.notes.iter_mut().find(|n| &n.url == url) {
                         note.deck_name = deck_name.clone();
@@ -898,7 +897,7 @@ pub async fn hedgedoc_sync_now_handler(State(state): State<AppState>) -> Redirec
             Err(e) => {
                 let msg = e.to_string();
                 log::error!("Manual HedgeDoc sync failed for {url}: {msg}");
-                let mut sources = state.hedgedoc_sources.lock().unwrap();
+                let mut sources = state.hedgedoc_sources.lock();
                 for src in sources.iter_mut() {
                     if let Some(note) = src.notes.iter_mut().find(|n| &n.url == url) {
                         note.last_error = Some(msg.clone());
@@ -909,11 +908,11 @@ pub async fn hedgedoc_sync_now_handler(State(state): State<AppState>) -> Redirec
         }
     }
 
-    let sources_snapshot = state.hedgedoc_sources.lock().unwrap().clone();
+    let sources_snapshot = state.hedgedoc_sources.lock().clone();
     let combined = build_combined_infos(&state.config.collections, &sources_snapshot);
     *state.collections.write().await = combined;
     if any_success {
-        *state.hedgedoc_last_synced.lock().unwrap() = Some(Timestamp::now());
+        *state.hedgedoc_last_synced.lock() = Some(Timestamp::now());
     }
 
     if any_success || entries.is_empty() {

@@ -2,7 +2,7 @@ use std::future::pending;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::Mutex;
+use parking_lot::Mutex;
 
 use axum::Router;
 use axum::routing::get;

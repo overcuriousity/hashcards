@@ -111,7 +111,7 @@ async fn action_handler(state: ServerState, form: FormData) -> Fallible<Option<F
         },
         None => None,
     };
-    let mut mutable = state.mutable.lock().unwrap();
+    let mut mutable = state.mutable.lock();
     let result = handle_action(
         &mut mutable,
         state.session_started_at,
@@ -122,7 +122,7 @@ async fn action_handler(state: ServerState, form: FormData) -> Fallible<Option<F
         ActionResult::Shutdown => {
             // Release the lock before sending shutdown signal.
             drop(mutable);
-            let mut shutdown_tx = state.shutdown_tx.lock().unwrap();
+            let mut shutdown_tx = state.shutdown_tx.lock();
             if let Some(tx) = shutdown_tx.take() {
                 let _ = tx.send(());
             }
@@ -373,6 +373,25 @@ mod tests {
             finished_at: None,
             card_shown_at: None,
         }
+    }
+
+    #[test]
+    fn test_lock_usable_after_panicked_holder() {
+        use std::sync::Arc;
+
+        use parking_lot::Mutex;
+
+        // Same shape as ServerState.mutable (Arc<Mutex<MutableState>>).
+        let mutable = Arc::new(Mutex::new(make_mutable()));
+        let m2 = Arc::clone(&mutable);
+        let _ = std::thread::spawn(move || {
+            let _guard = m2.lock();
+            panic!("simulated handler panic while holding the state lock");
+        })
+        .join();
+        // Without poisoning, the lock must still be usable afterwards.
+        let guard = mutable.lock();
+        assert!(guard.cards.is_empty());
     }
 
     #[test]

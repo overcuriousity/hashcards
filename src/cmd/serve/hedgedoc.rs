@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::Mutex;
+use parking_lot::Mutex;
 use std::time::Duration;
 
 use tokio::sync::RwLock;
@@ -401,7 +401,7 @@ pub fn spawn_hedgedoc_sync_task(
 
             // Collect the URLs we need to sync (without holding the lock during await).
             let entries: Vec<(String, ResolvedCollection)> = {
-                let sources = hedgedoc_sources.lock().unwrap();
+                let sources = hedgedoc_sources.lock();
                 sources
                     .iter()
                     .flat_map(|s| {
@@ -418,7 +418,7 @@ pub fn spawn_hedgedoc_sync_task(
                 match sync_source(url, rc).await {
                     Ok((deck_name, file_name)) => {
                         any_success = true;
-                        let mut sources = hedgedoc_sources.lock().unwrap();
+                        let mut sources = hedgedoc_sources.lock();
                         if let Some(src) = sources.iter_mut().find(|s| s.collection.slug == rc.slug)
                         {
                             if let Some(note) = src.notes.iter_mut().find(|n| &n.url == url) {
@@ -431,7 +431,7 @@ pub fn spawn_hedgedoc_sync_task(
                     Err(e) => {
                         let msg = e.to_string();
                         log::error!("Periodic HedgeDoc sync failed for {url}: {msg}");
-                        let mut sources = hedgedoc_sources.lock().unwrap();
+                        let mut sources = hedgedoc_sources.lock();
                         for src in sources.iter_mut() {
                             if let Some(note) = src.notes.iter_mut().find(|n| &n.url == url) {
                                 note.last_error = Some(msg.clone());
@@ -443,11 +443,11 @@ pub fn spawn_hedgedoc_sync_task(
             }
 
             // Snapshot sources before releasing the lock, then do FS/DB work outside it.
-            let hedgedoc_snapshot = hedgedoc_sources.lock().unwrap().clone();
+            let hedgedoc_snapshot = hedgedoc_sources.lock().clone();
             let all_infos = build_combined_infos(&static_collections, &hedgedoc_snapshot);
             *collection_infos.write().await = all_infos;
             if any_success {
-                *hedgedoc_last_synced.lock().unwrap() = Some(Timestamp::now());
+                *hedgedoc_last_synced.lock() = Some(Timestamp::now());
             }
             log::debug!("Periodic HedgeDoc sync complete");
         }

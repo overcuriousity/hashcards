@@ -1,6 +1,6 @@
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::Mutex;
+use parking_lot::Mutex;
 use std::time::Duration;
 
 use tokio::process::Command;
@@ -137,7 +137,7 @@ pub fn spawn_sync_task(
             // Snapshot only the paths needed, then release the lock before
             // doing filesystem/DB work to avoid blocking other handlers.
             let source_paths: Vec<(String, String, std::path::PathBuf, std::path::PathBuf)> = {
-                let sources = hedgedoc_sources.lock().unwrap();
+                let sources = hedgedoc_sources.lock();
                 sources
                     .iter()
                     .map(|s| {
@@ -182,7 +182,7 @@ pub fn spawn_sync_task(
             let mut combined = static_infos;
             combined.extend(hedgedoc_infos);
             *collection_infos.write().await = combined;
-            *last_synced.lock().unwrap() = Some(Timestamp::now());
+            *last_synced.lock() = Some(Timestamp::now());
             log::debug!("Periodic git sync complete");
         }
     });

@@ -79,7 +79,7 @@ pub async fn get_handler(
 }
 
 async fn inner(state: ServerState, flash: Option<Flash>) -> Fallible<Markup> {
-    let mutable = state.mutable.lock().unwrap();
+    let mutable = state.mutable.lock();
     let file_url_prefix = format!("http://localhost:{}/file", state.port);
     let ctx = RenderContext {
         directory: &state.directory,

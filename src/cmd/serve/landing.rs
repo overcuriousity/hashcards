@@ -19,10 +19,10 @@ pub async fn landing_handler(
 ) -> (StatusCode, Html<String>) {
     let flash = Flash::from_query(&query);
     let collections = state.collections.read().await;
-    let last_synced = *state.last_synced.lock().unwrap();
-    let hedgedoc_last_synced = *state.hedgedoc_last_synced.lock().unwrap();
+    let last_synced = *state.last_synced.lock();
+    let hedgedoc_last_synced = *state.hedgedoc_last_synced.lock();
     let git_enabled = state.config.git.is_some();
-    let hedgedoc_count = state.hedgedoc_sources.lock().unwrap().len();
+    let hedgedoc_count = state.hedgedoc_sources.lock().len();
     let config_available = state.config.data_dir.is_some();
     let html = render_landing_page(
         &collections,

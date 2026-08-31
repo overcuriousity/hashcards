@@ -18,7 +18,7 @@ use std::fmt::Display;
 use std::fmt::Formatter;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::Mutex;
+use parking_lot::Mutex;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
@@ -220,7 +220,7 @@ pub async fn start_server(config: ServerConfig) -> Fallible<()> {
         .await?;
 
     // Check if session was complete when server shut down
-    let mutable = state.mutable.lock().unwrap();
+    let mutable = state.mutable.lock();
     if mutable.finished_at.is_some() {
         Ok(())
     } else {
