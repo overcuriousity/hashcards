@@ -21,16 +21,19 @@ use crate::cmd::drill::katex::katex_css_handler;
 use crate::cmd::drill::katex::katex_font_handler;
 use crate::cmd::drill::katex::katex_js_handler;
 use crate::cmd::drill::katex::katex_mhchem_js_handler;
-use crate::cmd::serve::config::ResolvedCollection;
-use crate::cmd::serve::config::ResolvedGit;
-use crate::cmd::serve::config::ResolvedServeConfig;
-use crate::cmd::serve::git::clone_or_pull;
-use crate::cmd::serve::git::spawn_sync_task;
+use crate::cmd::drill::template::icon_192_handler;
+use crate::cmd::drill::template::icon_512_handler;
+use crate::cmd::drill::template::manifest_handler;
 use crate::cmd::serve::bookmarks::bookmark_delete_handler;
 use crate::cmd::serve::bookmarks::bookmark_list_handler;
 use crate::cmd::serve::bookmarks::bookmark_note_handler;
+use crate::cmd::serve::config::ResolvedCollection;
+use crate::cmd::serve::config::ResolvedGit;
+use crate::cmd::serve::config::ResolvedServeConfig;
 use crate::cmd::serve::edit::edit_get_handler;
 use crate::cmd::serve::edit::edit_post_handler;
+use crate::cmd::serve::git::clone_or_pull;
+use crate::cmd::serve::git::spawn_sync_task;
 use crate::cmd::serve::handlers::collection_file_handler;
 use crate::cmd::serve::handlers::collection_get_handler;
 use crate::cmd::serve::handlers::collection_post_handler;
@@ -46,9 +49,6 @@ use crate::cmd::serve::hedgedoc::build_note;
 use crate::cmd::serve::hedgedoc::build_source;
 use crate::cmd::serve::hedgedoc::source_uri_from_url;
 use crate::cmd::serve::hedgedoc::spawn_hedgedoc_sync_task;
-use crate::cmd::drill::template::icon_192_handler;
-use crate::cmd::drill::template::icon_512_handler;
-use crate::cmd::drill::template::manifest_handler;
 use crate::cmd::serve::landing::landing_handler;
 use crate::cmd::serve::state::AppState;
 use crate::error::Fallible;
@@ -93,7 +93,9 @@ pub async fn start_serve(config: ResolvedServeConfig) -> Fallible<()> {
             let maybe_collection = maybe_source_uri.as_ref().and_then(|source_uri| {
                 sources
                     .iter()
-                    .find(|s: &&crate::cmd::serve::state::HedgedocSource| &s.source_uri == source_uri)
+                    .find(|s: &&crate::cmd::serve::state::HedgedocSource| {
+                        &s.source_uri == source_uri
+                    })
                     .map(|s| s.collection.clone())
             });
 
@@ -212,10 +214,7 @@ pub async fn start_serve(config: ResolvedServeConfig) -> Fallible<()> {
         .route("/collection/{slug}", get(collection_get_handler))
         .route("/collection/{slug}", post(collection_post_handler))
         .route("/collection/{slug}/start", post(collection_start_handler))
-        .route(
-            "/collection/{slug}/bookmarks",
-            get(bookmark_list_handler),
-        )
+        .route("/collection/{slug}/bookmarks", get(bookmark_list_handler))
         .route(
             "/collection/{slug}/bookmarks/{hash}/delete",
             post(bookmark_delete_handler),
@@ -224,14 +223,8 @@ pub async fn start_serve(config: ResolvedServeConfig) -> Fallible<()> {
             "/collection/{slug}/bookmarks/{hash}/note",
             post(bookmark_note_handler),
         )
-        .route(
-            "/collection/{slug}/edit/{hash}",
-            get(edit_get_handler),
-        )
-        .route(
-            "/collection/{slug}/edit/{hash}",
-            post(edit_post_handler),
-        )
+        .route("/collection/{slug}/edit/{hash}", get(edit_get_handler))
+        .route("/collection/{slug}/edit/{hash}", post(edit_post_handler))
         .route(
             "/collection/{slug}/file/{*path}",
             get(collection_file_handler),
@@ -264,7 +257,6 @@ pub async fn start_serve(config: ResolvedServeConfig) -> Fallible<()> {
     log::debug!("Server shut down");
     Ok(())
 }
-
 
 async fn script_handler() -> (
     axum::http::StatusCode,

@@ -160,13 +160,17 @@ pub struct TempDirTracker {
 
 impl TempDirTracker {
     pub fn new(path: PathBuf) -> Self {
-        Self { path, dismissed: std::sync::atomic::AtomicBool::new(false) }
+        Self {
+            path,
+            dismissed: std::sync::atomic::AtomicBool::new(false),
+        }
     }
 
     /// Stop the temp directory from being deleted on drop (e.g. once a config
     /// that references it has been persisted to disk).
     pub fn dismiss(&self) {
-        self.dismissed.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.dismissed
+            .store(true, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -231,7 +235,11 @@ impl ResolvedServeConfig {
                     repo_dir: repo_dir.clone(),
                     db_dir: db_dir.clone(),
                 }),
-                None => return fail("configuration error: [git] section is present but `repo_url` is missing"),
+                None => {
+                    return fail(
+                        "configuration error: [git] section is present but `repo_url` is missing",
+                    );
+                }
             },
         };
 
@@ -253,11 +261,7 @@ impl ResolvedServeConfig {
         self
     }
 
-    pub fn from_directories(
-        directories: Vec<String>,
-        host: String,
-        port: u16,
-    ) -> Fallible<Self> {
+    pub fn from_directories(directories: Vec<String>, host: String, port: u16) -> Fallible<Self> {
         let base = current_dir()?;
         let mut collections = Vec::new();
 

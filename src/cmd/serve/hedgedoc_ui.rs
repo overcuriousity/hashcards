@@ -3,14 +3,17 @@ use maud::html;
 
 use crate::cmd::drill::template::page_template;
 use crate::cmd::serve::state::HedgedocSource;
+use crate::flash::Flash;
 use crate::types::timestamp::Timestamp;
 
 pub fn render_manage_page(
     sources: &[HedgedocSource],
     last_synced: Option<Timestamp>,
     config_available: bool,
+    flash: Option<Flash>,
 ) -> Markup {
     page_template(html! {
+        @if let Some(f) = &flash { (f.render()) }
         div.landing {
             h1 { "HedgeDoc Sources" }
             p { a href="/" { "← Back to collections" } }
