@@ -11,6 +11,11 @@
                 HedgeDoc notes whose permission level prevents anonymous download (e.g. "Locked" or "Protected") now show an "Error" status with a descriptive message instead of silently reporting "OK" while storing an HTML page as markdown (yielding zero cards).
             </change>
         </fixed>
+        <security>
+            <change author="claude">
+                Symlinked directories inside a collection can no longer be used to serve files from outside the collection root: media paths are now canonicalized and must resolve inside the (canonicalized) collection directory, in both the file-serving endpoint and collection-relative (`@/`) media resolution (BUG-46).
+            </change>
+        </security>
         <added>
             <change author="mstoeck3">
                 Each grade is now written to the database as it happens, so a session interrupted by a dropped connection or a closed tab keeps the progress made up to that point. Previously an interrupted session was lost entirely.

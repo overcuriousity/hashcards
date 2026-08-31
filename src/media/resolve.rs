@@ -137,6 +137,15 @@ impl MediaResolver {
             if !abspath.exists() {
                 return Err(ResolveError::InvalidPath);
             }
+            // Canonicalize to resolve symbolic links, and require the result
+            // to stay inside the collection root. `collection_path` is
+            // canonicalized by the builder.
+            let canonical: PathBuf = abspath
+                .canonicalize()
+                .map_err(|_| ResolveError::InvalidPath)?;
+            if !canonical.starts_with(&self.collection_path) {
+                return Err(ResolveError::OutsideCollection);
+            }
             Ok(path)
         } else {
             // Path is deck-relative.
@@ -366,6 +375,33 @@ mod tests {
             .build()?;
         assert_eq!(
             r.resolve("../../../../../../../../etc/passwd"),
+            Err(ResolveError::OutsideCollection)
+        );
+        Ok(())
+    }
+
+    /// Regression test for BUG-46: a symlinked directory inside the
+    /// collection must not let a collection-relative (`@/`) path resolve to a
+    /// file outside the collection root.
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn test_collection_relative_symlinked_dir_rejected() -> Fallible<()> {
+        use std::os::unix::fs::symlink;
+
+        let coll_path: PathBuf = create_tmp_directory()?;
+        let outside: PathBuf = create_tmp_directory()?;
+        std::fs::write(outside.join("secret.jpg"), "")?;
+
+        // Symlinked directory inside the collection, pointing outside it.
+        symlink(&outside, coll_path.join("linkdir"))?;
+
+        let deck_path: PathBuf = PathBuf::from("deck.md");
+        let r: MediaResolver = MediaResolverBuilder::new()
+            .with_collection_path(coll_path)?
+            .with_deck_path(deck_path)?
+            .build()?;
+        assert_eq!(
+            r.resolve("@/linkdir/secret.jpg"),
             Err(ResolveError::OutsideCollection)
         );
         Ok(())
