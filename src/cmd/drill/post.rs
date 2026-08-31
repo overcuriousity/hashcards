@@ -179,15 +179,17 @@ pub fn handle_action(
         }
         Action::Forgot | Action::Hard | Action::Good | Action::Easy => {
             if mutable.reveal {
+                let head: Card = match mutable.cards.first() {
+                    Some(card) => card.clone(),
+                    None => return Ok(ActionResult::Continue),
+                };
                 let reviewed_at: Timestamp = Timestamp::now();
                 let duration_ms: Option<i64> = mutable.card_shown_at.map(|shown_at| {
                     (reviewed_at.into_inner() - shown_at.into_inner())
                         .num_milliseconds()
                         .max(0)
                 });
-                mutable.card_shown_at = None;
-                let card: Card = mutable.cards.remove(0);
-                let hash: CardHash = card.hash();
+                let hash: CardHash = head.hash();
                 let grade: Grade = action.grade();
                 let prev_performance: Performance = mutable.cache.get(hash)?;
                 let performance: ReviewedPerformance =
@@ -204,14 +206,19 @@ pub fn handle_action(
                     duration_ms,
                 };
                 let new_performance = Performance::Reviewed(performance);
-                // Write review and card performance atomically so a crash between
-                // the two operations cannot leave the DB inconsistent.
+                // Write review and card performance atomically, and commit
+                // BEFORE mutating any in-memory state. If this fails, the
+                // queue, cache, undo stack, and reveal state are untouched
+                // and the grade can simply be retried.
                 let review_id = mutable.db.insert_review_and_update_performance(
                     mutable.session_id,
                     &record,
                     new_performance,
                 )?;
+                // The transaction committed; it is now safe to mutate memory.
                 mutable.cache.update(hash, new_performance)?;
+                mutable.card_shown_at = None;
+                let card: Card = mutable.cards.remove(0);
                 let review = Review {
                     card: card.clone(),
                     review_id,
@@ -220,7 +227,7 @@ pub fn handle_action(
                     prev_performance,
                 };
                 if review.should_repeat() {
-                    mutable.cards.push(card.clone());
+                    mutable.cards.push(card);
                 }
                 mutable.reviews.push(review);
                 mutable.reveal = false;
@@ -253,6 +260,9 @@ mod tests {
     use crate::cmd::drill::state::MutableState;
     use crate::db::Database;
     use crate::flash::FlashKind;
+    use crate::types::card::CardContent;
+    use crate::types::performance::Performance;
+    use std::path::PathBuf;
 
     fn make_mutable() -> MutableState {
         let db = Database::new(":memory:").unwrap();
@@ -263,6 +273,37 @@ mod tests {
             db,
             cache: Cache::new(),
             cards: Vec::new(),
+            reviews: Vec::new(),
+            finished_at: None,
+            card_shown_at: None,
+        }
+    }
+
+    fn make_card(question: &str) -> Card {
+        Card::new(
+            "TestDeck".to_string(),
+            PathBuf::from("/tmp/test-deck.md"),
+            (1, 2),
+            CardContent::new_basic(question, "answer"),
+        )
+    }
+
+    /// A session whose cards exist in the queue, the cache, AND the cards table.
+    fn make_state_with_cards(cards: Vec<Card>) -> MutableState {
+        let db = Database::new(":memory:").unwrap();
+        let now = Timestamp::now();
+        let mut cache = Cache::new();
+        for card in &cards {
+            db.insert_card(card.hash(), now).unwrap();
+            cache.insert(card.hash(), Performance::New).unwrap();
+        }
+        let session_id = db.create_session(now).unwrap();
+        MutableState {
+            reveal: false,
+            db,
+            session_id,
+            cache,
+            cards,
             reviews: Vec::new(),
             finished_at: None,
             card_shown_at: None,
@@ -317,5 +358,60 @@ mod tests {
         let result = handle_action(&mut mutable, now, Action::End).unwrap();
         assert!(matches!(result, ActionResult::SessionFinished));
         assert!(mutable.finished_at.is_some());
+    }
+
+    #[test]
+    fn test_grade_db_failure_leaves_state_unchanged() {
+        // The card is in the queue and cache but NOT in the cards table, so
+        // inserting its review fails the foreign-key check: an injected DB
+        // write failure inside the grade transaction.
+        let card = make_card("Q1");
+        let db = Database::new(":memory:").unwrap();
+        let session_id = db.create_session(Timestamp::now()).unwrap();
+        let mut cache = Cache::new();
+        cache.insert(card.hash(), Performance::New).unwrap();
+        let mut mutable = MutableState {
+            reveal: true,
+            db,
+            session_id,
+            cache,
+            cards: vec![card.clone()],
+            reviews: Vec::new(),
+            finished_at: None,
+            card_shown_at: Some(Timestamp::now()),
+        };
+        let result = handle_action(&mut mutable, Timestamp::now(), Action::Good);
+        assert!(result.is_err(), "the injected DB failure must propagate");
+        // On error, in-memory state must be completely unchanged.
+        assert_eq!(mutable.cards.len(), 1, "card must still be in the queue");
+        assert_eq!(
+            mutable.cards[0].hash(),
+            card.hash(),
+            "card must still be at the head"
+        );
+        assert!(
+            mutable.reviews.is_empty(),
+            "no review must be recorded in memory"
+        );
+        assert!(
+            mutable.reveal,
+            "reveal must stay set so the grade can be retried"
+        );
+        assert!(
+            mutable.card_shown_at.is_some(),
+            "timing info must not be cleared"
+        );
+        assert!(matches!(
+            mutable.cache.get(card.hash()).unwrap(),
+            Performance::New
+        ));
+        assert!(
+            mutable
+                .db
+                .get_reviews_for_session(mutable.session_id)
+                .unwrap()
+                .is_empty(),
+            "no review row must exist"
+        );
     }
 }
