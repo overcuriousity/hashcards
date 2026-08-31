@@ -47,6 +47,7 @@ use crate::cmd::serve::state::DrillSession;
 use crate::collection::Collection;
 use crate::db::Database;
 use crate::error::Fallible;
+use crate::error::fail;
 use crate::media::load::MediaLoader;
 use crate::rng::TinyRng;
 use crate::rng::shuffle;
@@ -233,7 +234,7 @@ pub async fn collection_start_handler(
         Ok(()) => Redirect::to(&format!("/collection/{slug}")),
         Err(e) => {
             log::error!("error starting drill for collection {slug}: {e}");
-            Redirect::to(&format!("/collection/{slug}"))
+            Flash::error(e.to_string()).redirect(&format!("/collection/{slug}"))
         }
     }
 }
@@ -244,6 +245,9 @@ fn collection_start_inner(
     selected_decks: Vec<String>,
     limit: Option<usize>,
 ) -> Fallible<()> {
+    if selected_decks.is_empty() {
+        return fail("Select at least one deck.");
+    }
     // Remove any existing session before doing DB work.
     state.sessions.lock().unwrap().remove(slug);
 

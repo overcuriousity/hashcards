@@ -123,4 +123,28 @@ mod tests {
 
         Ok(())
     }
+
+    #[tokio::test]
+    async fn test_start_with_no_decks_is_rejected_with_flash() -> Fallible<()> {
+        let dir = tempdir()?;
+        let coll_dir = dir.path().to_path_buf();
+        write(coll_dir.join("Alpha.md"), "Q: What is 1+1?\nA: 2\n")?;
+        let slug = "test-collection";
+        let port = spawn_test_server(coll_dir, slug).await?;
+
+        // POST with no `decks` field at all (no-JS or hand-made form).
+        let response = reqwest::Client::new()
+            .post(format!("http://{TEST_HOST}:{port}/collection/{slug}/start"))
+            .body("")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .send()
+            .await?;
+        let body = response.text().await?;
+        // The post-redirect page shows the flash and stays on the deck browser:
+        assert!(body.contains("Select at least one deck"), "body: {body}");
+        assert!(body.contains("flash-error"));
+        // No session was started (a session page would show the Reveal button).
+        assert!(!body.contains("value=\"Reveal\""));
+        Ok(())
+    }
 }

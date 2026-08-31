@@ -16,6 +16,9 @@
             <change author="claude">
                 Ending a session before revealing or grading any card no longer shows nonsense statistics (0 cards reviewed over the whole server uptime); the completion page now simply reports that no cards were reviewed.
             </change>
+            <change author="claude">
+                Starting a drill with no decks selected no longer silently drills the entire collection; it now shows "Select at least one deck."
+            </change>
         </fixed>
         <added>
             <change author="claude">
