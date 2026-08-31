@@ -12,8 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::path::Path;
 
+use axum::extract::Query;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::Html;
@@ -25,6 +27,7 @@ use crate::cmd::drill::state::MutableState;
 use crate::cmd::drill::state::ServerState;
 use crate::cmd::drill::template::page_template;
 use crate::error::Fallible;
+use crate::flash::Flash;
 use crate::markdown::MarkdownRenderConfig;
 use crate::media::resolve::MediaResolverBuilder;
 use crate::types::card::Card;
@@ -50,8 +53,12 @@ pub struct RenderContext<'a> {
     pub completion_action: CompletionAction,
 }
 
-pub async fn get_handler(State(state): State<ServerState>) -> (StatusCode, Html<String>) {
-    let html = match inner(state).await {
+pub async fn get_handler(
+    State(state): State<ServerState>,
+    Query(query): Query<HashMap<String, String>>,
+) -> (StatusCode, Html<String>) {
+    let flash = Flash::from_query(&query);
+    let html = match inner(state, flash).await {
         Ok(html) => html,
         Err(e) => page_template(html! {
             div.error {
@@ -63,7 +70,7 @@ pub async fn get_handler(State(state): State<ServerState>) -> (StatusCode, Html<
     (StatusCode::OK, Html(html.into_string()))
 }
 
-async fn inner(state: ServerState) -> Fallible<Markup> {
+async fn inner(state: ServerState, flash: Option<Flash>) -> Fallible<Markup> {
     let mutable = state.mutable.lock().unwrap();
     let file_url_prefix = format!("http://localhost:{}/file", state.port);
     let ctx = RenderContext {
@@ -79,6 +86,10 @@ async fn inner(state: ServerState) -> Fallible<Markup> {
         render_completion_page(&ctx, &mutable)?
     } else {
         render_session_page(&ctx, &mutable)?
+    };
+    let body = html! {
+        @if let Some(f) = &flash { (f.render()) }
+        (body)
     };
     let html = page_template(body);
     Ok(html)
@@ -276,9 +287,15 @@ pub fn render_completion_page(ctx: &RenderContext, mutable: &MutableState) -> Fa
         .max_by_key(|&(_, ms)| ms)
         .map(|(name, ms)| (name, ms as f64 / 1000.0));
 
-    let pace_rounded = median_pace_s.unwrap_or_else(|| {
-        if cards_reviewed == 0 { 0.0 } else { duration_s as f64 / cards_reviewed as f64 }
-    }).round() as i64;
+    let pace_rounded = median_pace_s
+        .unwrap_or_else(|| {
+            if cards_reviewed == 0 {
+                0.0
+            } else {
+                duration_s as f64 / cards_reviewed as f64
+            }
+        })
+        .round() as i64;
 
     let start_ts = start.format(TS_FORMAT).to_string();
     let end_ts = end.format(TS_FORMAT).to_string();

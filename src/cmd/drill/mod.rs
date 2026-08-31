@@ -380,4 +380,35 @@ mod tests {
 
         Ok(())
     }
+
+    #[tokio::test]
+    async fn test_flash_query_param_renders_banner() -> Fallible<()> {
+        let port = pick_unused_port().unwrap();
+        let directory = create_tmp_copy_of_test_directory()?;
+        let session_started_at = Timestamp::now();
+        let config = ServerConfig {
+            directory: Some(directory),
+            host: TEST_HOST.to_string(),
+            port,
+            session_started_at,
+            card_limit: None,
+            new_card_limit: None,
+            deck_filter: None,
+            shuffle: false,
+            answer_controls: AnswerControls::Full,
+            bury_siblings: false,
+        };
+        spawn(async move { start_server(config).await });
+        wait_for_server(TEST_HOST, port).await?;
+
+        let response = reqwest::get(format!(
+            "http://{TEST_HOST}:{port}/?flash=Hello%20there&kind=success"
+        ))
+        .await?;
+        assert!(response.status().is_success());
+        let body = response.text().await?;
+        assert!(body.contains("flash-success"), "body: {body}");
+        assert!(body.contains("Hello there"));
+        Ok(())
+    }
 }

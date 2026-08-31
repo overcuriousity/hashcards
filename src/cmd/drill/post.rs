@@ -22,6 +22,7 @@ use crate::cmd::drill::state::Review;
 use crate::cmd::drill::state::ServerState;
 use crate::db::ReviewRecord;
 use crate::error::Fallible;
+use crate::flash::Flash;
 use crate::fsrs::Grade;
 use crate::types::card::Card;
 use crate::types::card_hash::CardHash;
@@ -66,6 +67,8 @@ pub struct FormData {
 pub enum ActionResult {
     /// Continue drilling (redirect back to the same page).
     Continue,
+    /// Continue drilling, showing a one-shot flash message.
+    ContinueWithFlash(Flash),
     /// The session finished (all cards done or user pressed End).
     SessionFinished,
     /// The user requested server shutdown (drill mode only).
@@ -79,15 +82,16 @@ pub async fn post_handler(
     Form(form): Form<FormData>,
 ) -> Redirect {
     match action_handler(state, form.action).await {
-        Ok(_) => {}
+        Ok(Some(flash)) => flash.redirect("/"),
+        Ok(None) => Redirect::to("/"),
         Err(e) => {
             log::error!("error: {e}");
+            Flash::error(e.to_string()).redirect("/")
         }
     }
-    Redirect::to("/")
 }
 
-async fn action_handler(state: ServerState, action: Action) -> Fallible<()> {
+async fn action_handler(state: ServerState, action: Action) -> Fallible<Option<Flash>> {
     let mut mutable = state.mutable.lock().unwrap();
     let result = handle_action(&mut mutable, state.session_started_at, action)?;
     match result {
@@ -98,10 +102,11 @@ async fn action_handler(state: ServerState, action: Action) -> Fallible<()> {
             if let Some(tx) = shutdown_tx.take() {
                 let _ = tx.send(());
             }
+            Ok(None)
         }
-        _ => {}
+        ActionResult::ContinueWithFlash(flash) => Ok(Some(flash)),
+        _ => Ok(None),
     }
-    Ok(())
 }
 
 /// Core action handling logic, reusable by both drill and serve modes.
@@ -129,7 +134,11 @@ pub fn handle_action(
                 let hash: CardHash = card.hash();
                 mutable.cards.insert(0, card);
                 // Void the review and restore prior performance atomically.
-                mutable.db.void_review_and_restore_performance(last_review.review_id, hash, last_review.prev_performance)?;
+                mutable.db.void_review_and_restore_performance(
+                    last_review.review_id,
+                    hash,
+                    last_review.prev_performance,
+                )?;
                 mutable.cache.update(hash, last_review.prev_performance)?;
                 mutable.finished_at = None;
                 mutable.reveal = false;
@@ -148,9 +157,7 @@ pub fn handle_action(
                 Ok(ActionResult::Continue)
             }
         }
-        Action::Home => {
-            Ok(ActionResult::Home)
-        }
+        Action::Home => Ok(ActionResult::Home),
         Action::Bookmark => {
             // Write immediately to DB so bookmarks survive aborted sessions.
             if !mutable.cards.is_empty() {
@@ -197,7 +204,11 @@ pub fn handle_action(
                 let new_performance = Performance::Reviewed(performance);
                 // Write review and card performance atomically so a crash between
                 // the two operations cannot leave the DB inconsistent.
-                let review_id = mutable.db.insert_review_and_update_performance(mutable.session_id, &record, new_performance)?;
+                let review_id = mutable.db.insert_review_and_update_performance(
+                    mutable.session_id,
+                    &record,
+                    new_performance,
+                )?;
                 mutable.cache.update(hash, new_performance)?;
                 let review = Review {
                     card: card.clone(),
@@ -226,7 +237,9 @@ pub fn handle_action(
 fn finish_session(mutable: &mut MutableState, _session_started_at: Timestamp) -> Fallible<()> {
     log::debug!("Session completed");
     let session_ended_at = Timestamp::now();
-    mutable.db.close_session(mutable.session_id, session_ended_at)?;
+    mutable
+        .db
+        .close_session(mutable.session_id, session_ended_at)?;
     mutable.finished_at = Some(session_ended_at);
     Ok(())
 }
