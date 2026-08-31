@@ -24,8 +24,7 @@ pub fn note_id_from_url(url: &str) -> Option<String> {
     let parsed = reqwest::Url::parse(url).ok()?;
     parsed
         .path_segments()?
-        .filter(|s| !s.is_empty())
-        .last()
+        .rfind(|s| !s.is_empty())
         .map(|s| s.to_string())
 }
 
@@ -223,7 +222,7 @@ fn split_yaml_frontmatter(markdown: &str) -> Option<(&str, &str)> {
 
 fn strip_leading_yaml_frontmatter(markdown: &str) -> &str {
     match split_yaml_frontmatter(markdown) {
-        Some((_, body)) => body.trim_start_matches(|c| c == '\n' || c == '\r'),
+        Some((_, body)) => body.trim_start_matches(['\n', '\r']),
         None => markdown,
     }
 }

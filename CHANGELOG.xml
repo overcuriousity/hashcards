@@ -2,6 +2,9 @@
     <unreleased>
         <fixed>
             <change author="claude">
+                The collection browse page now reports database errors instead of silently displaying a bookmark count of zero.
+            </change>
+            <change author="claude">
                 HedgeDoc shared/published notes (URLs with a `/s/` path prefix) can now be registered as sources. Previously the `/download` URL was constructed incorrectly, causing fetches to fail.
             </change>
             <change author="claude">
