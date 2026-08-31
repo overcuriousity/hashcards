@@ -88,7 +88,10 @@ pub fn update_performance(
             ..
         }) => {
             let last_reviewed_at: NaiveDate = last_reviewed_at.date().into_inner();
-            let time: Interval = (today - last_reviewed_at).num_days() as f64;
+            // Clamp: a clock rollback can put `last_reviewed_at` in the
+            // future; negative elapsed time makes retrievability exceed 1.0
+            // or go NaN (BUG-28).
+            let time: Interval = ((today - last_reviewed_at).num_days() as f64).max(0.0);
             let retr: Recall = retrievability(time, stability);
             let stability: Stability = new_stability(difficulty, stability, retr, grade);
             let difficulty: Difficulty = new_difficulty(difficulty, grade);
@@ -185,5 +188,51 @@ mod tests {
         assert!(approx_eq(interval_raw, 25.80));
         assert_eq!(interval_days, 26);
         assert_eq!(review_count, 2);
+    }
+
+    /// Regression test for BUG-28: a `last_reviewed_at` in the future (clock
+    /// rollback) must not produce negative elapsed time. Elapsed days clamp
+    /// to zero, so retrievability is exactly 1.0 and the update stays finite.
+    #[test]
+    fn test_future_last_reviewed_at_is_clamped() {
+        let now = Timestamp::now();
+        let today = now.date();
+
+        // Case A: one day in the future. Without clamping, retrievability
+        // exceeds 1.0 and stability shrinks on a Good grade.
+        let one_day = Duration::days(1);
+        let perf = ReviewedPerformance {
+            last_reviewed_at: Timestamp::new(now.into_inner() + one_day),
+            stability: 3.17,
+            difficulty: 5.28,
+            interval_raw: 3.17,
+            interval_days: 3,
+            due_date: Date::new(today.into_inner() + one_day),
+            review_count: 1,
+        };
+        let result = update_performance(Performance::Reviewed(perf), Grade::Good, now);
+        assert!(result.stability.is_finite());
+        assert!(result.interval_raw.is_finite());
+        // With elapsed time clamped to 0, retrievability is 1.0 and a Good
+        // grade leaves stability unchanged.
+        assert!(approx_eq(result.stability, 3.17));
+        assert_eq!(result.interval_days, 3);
+
+        // Case B: five days in the future with low stability. Without
+        // clamping, retrievability's base goes negative and powf() is NaN.
+        let five_days = Duration::days(5);
+        let perf = ReviewedPerformance {
+            last_reviewed_at: Timestamp::new(now.into_inner() + five_days),
+            stability: 1.0,
+            difficulty: 5.0,
+            interval_raw: 1.0,
+            interval_days: 1,
+            due_date: Date::new(today.into_inner() + five_days),
+            review_count: 1,
+        };
+        let result = update_performance(Performance::Reviewed(perf), Grade::Good, now);
+        assert!(result.stability.is_finite());
+        assert!(result.interval_raw.is_finite());
+        assert!(result.interval_days >= 1);
     }
 }

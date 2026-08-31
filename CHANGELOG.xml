@@ -13,6 +13,9 @@
             <change author="claude">
                 The error message for an invalid grade string now includes the offending value instead of the literal text `{value}`. (BUG-29)
             </change>
+            <change author="claude">
+                A system clock rollback (a last-review timestamp in the future) no longer corrupts scheduling: negative elapsed time is clamped to zero, preventing NaN stability and intervals. (BUG-28)
+            </change>
         </fixed>
         <added>
             <change author="mstoeck3">
