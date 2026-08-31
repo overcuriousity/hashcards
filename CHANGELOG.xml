@@ -18,6 +18,9 @@
             <change author="claude">
                 Titles of audio media references are now HTML-escaped before being embedded in the audio element, preventing HTML injection through a crafted markdown title.
             </change>
+            <change author="claude">
+                HedgeDoc source URLs are now validated at storage time (well-formed HTTPS only) and re-checked at render time, so a link with an unsafe scheme such as `javascript:` can never be stored or rendered as a clickable link.
+            </change>
         </security>
         <added>
             <change author="mstoeck3">

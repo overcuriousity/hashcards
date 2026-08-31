@@ -6,6 +6,7 @@ mod git;
 mod handlers;
 mod hedgedoc;
 mod hedgedoc_ui;
+mod href;
 mod landing;
 pub mod server;
 mod state;
