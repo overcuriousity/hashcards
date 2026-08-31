@@ -1,6 +1,9 @@
 <changelog>
     <unreleased>
         <fixed>
+            <change author="claude">
+                HedgeDoc URLs are now validated when a source is added: non-HTTPS or malformed URLs are rejected immediately with an error message instead of being persisted and showing a permanent "Error" status. (BUG-38)
+            </change>
             <change author="mstoeck3">
                 In serve mode, an error while rendering a card or handling an action no longer destroys the running drill session. The session now stays in place behind a per-collection lock, so after a transient error the same card is shown again and progress is kept.
             </change>
