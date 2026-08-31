@@ -348,17 +348,19 @@ impl Database {
         Ok(())
     }
 
-    /// Delete a card and its reviews.
+    /// Delete a card. The foreign-key cascade removes its reviews and
+    /// bookmarks in the same statement, so the deletion is atomic.
+    ///
+    /// Note that this permanently erases the card's review history; it does
+    /// not go through the `voided` audit-trail model that undo uses.
     ///
     /// If no card with the given hash exists, returns an error.
     pub fn delete_card(&self, card_hash: CardHash) -> Fallible<()> {
-        if !self.card_exists(card_hash)? {
+        let sql = "delete from cards where card_hash = ?;";
+        let rows = self.conn.execute(sql, params![card_hash])?;
+        if rows != 1 {
             return fail("Card not found");
         }
-        let sql = "delete from reviews where card_hash = ?;";
-        self.conn.execute(sql, params![card_hash])?;
-        let sql = "delete from cards where card_hash = ?;";
-        self.conn.execute(sql, params![card_hash])?;
         Ok(())
     }
 
@@ -920,6 +922,62 @@ mod tests {
             err.to_string(),
             format!("error: No performance data found for card with hash {card_hash}")
         );
+        Ok(())
+    }
+
+    /// A failed card deletion must not leave partial state behind.
+    ///
+    /// We force `delete from cards` to fail with a RESTRICT foreign key from a
+    /// scratch table; the card's reviews must survive the failed deletion.
+    /// The old implementation deleted reviews in a separate statement first,
+    /// so they were lost even though delete_card returned an error.
+    #[test]
+    fn test_delete_card_failure_leaves_no_partial_state() -> Fallible<()> {
+        let mut db = Database::new(":memory:")?;
+        let card_hash = CardHash::hash_bytes(b"a");
+        let now = Timestamp::now();
+        db.insert_card(card_hash, now)?;
+        let session_id = db.create_session(now)?;
+        let review = sample_review(card_hash, now, 2.0);
+        db.insert_review_and_update_performance(
+            session_id,
+            &review,
+            sample_performance(now, 2.0, 1),
+        )?;
+
+        // Block deletion of this card with a restricting reference.
+        db.conn.execute_batch(&format!(
+            "create table blocker (card_hash text references cards (card_hash) on delete restrict);
+             insert into blocker (card_hash) values ('{card_hash}');"
+        ))?;
+
+        let result = db.delete_card(card_hash);
+        assert!(result.is_err());
+
+        // The failed deletion must leave the card AND its reviews intact.
+        assert!(db.card_exists(card_hash)?);
+        assert_eq!(db.get_reviews_for_session(session_id)?.len(), 1);
+        Ok(())
+    }
+
+    /// Deleting a card removes its reviews via the FK cascade.
+    #[test]
+    fn test_delete_card_cascades_to_reviews() -> Fallible<()> {
+        let mut db = Database::new(":memory:")?;
+        let card_hash = CardHash::hash_bytes(b"a");
+        let now = Timestamp::now();
+        db.insert_card(card_hash, now)?;
+        let session_id = db.create_session(now)?;
+        let review = sample_review(card_hash, now, 2.0);
+        db.insert_review_and_update_performance(
+            session_id,
+            &review,
+            sample_performance(now, 2.0, 1),
+        )?;
+
+        db.delete_card(card_hash)?;
+        assert!(!db.card_exists(card_hash)?);
+        assert_eq!(db.get_reviews_for_session(session_id)?.len(), 0);
         Ok(())
     }
 
