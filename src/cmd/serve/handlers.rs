@@ -37,14 +37,14 @@ use crate::cmd::serve::browse::build_deck_tree;
 use crate::cmd::serve::browse::render_browse_page;
 use crate::cmd::serve::config::ResolvedCollection;
 use crate::cmd::serve::git::clone_or_pull;
-use crate::cmd::serve::hedgedoc::all_hedgedoc_entries;
 use crate::cmd::serve::hedgedoc::build_combined_infos;
 use crate::cmd::serve::hedgedoc::build_note;
 use crate::cmd::serve::hedgedoc::build_source;
+use crate::cmd::serve::hedgedoc::cleanup_after_delete;
 use crate::cmd::serve::hedgedoc::commit_add;
+use crate::cmd::serve::hedgedoc::commit_delete;
 use crate::cmd::serve::hedgedoc::create_minimal_config;
 use crate::cmd::serve::hedgedoc::normalize_hedgedoc_url;
-use crate::cmd::serve::hedgedoc::persist_hedgedoc_entries;
 use crate::cmd::serve::hedgedoc::source_uri_from_url;
 use crate::cmd::serve::hedgedoc::sync_source;
 use crate::cmd::serve::state::AppState;
@@ -787,54 +787,31 @@ pub async fn hedgedoc_delete_handler(
     State(state): State<AppState>,
     Form(form): Form<DeleteHedgedocForm>,
 ) -> Redirect {
-    // Phase 1: compute the post-deletion entries without mutating shared state.
-    let (remaining, new_sources) = {
-        let sources = state.hedgedoc_sources.lock();
-        let mut working = sources.clone();
-        for src in working.iter_mut() {
-            src.notes.retain(|n| n.url != form.url);
+    let maybe_config_path: Option<PathBuf> = state.config_path.lock().clone();
+    let sources_arc = state.hedgedoc_sources.clone();
+    let url = form.url.clone();
+    // BUG-39: mutation + persist under one lock (see commit_delete).
+    // BUG-42: on-disk cleanup runs in the same blocking task.
+    let (snapshot, message) = match tokio::task::spawn_blocking(move || {
+        let outcome = commit_delete(&sources_arc, maybe_config_path.as_deref(), &url)?;
+        let message = cleanup_after_delete(&outcome);
+        Ok::<_, ErrorReport>((outcome.snapshot, message))
+    })
+    .await
+    .map_err(|e| ErrorReport::new(format!("HedgeDoc delete task panicked: {e}")))
+    .and_then(|r| r)
+    {
+        Ok(pair) => pair,
+        Err(e) => {
+            log::error!("Failed to delete HedgeDoc source {}: {e}", form.url);
+            return Flash::error(e.to_string()).redirect("/hedgedoc");
         }
-        working.retain(|s| !s.notes.is_empty());
-        let entries = all_hedgedoc_entries(&working);
-        (entries, working)
     };
 
-    // Phase 2: persist to TOML if config file is available, via spawn_blocking.
-    // Extract config path before any await so the MutexGuard is dropped first.
-    let maybe_config_path: Option<std::path::PathBuf> = state.config_path.lock().clone();
-    let persist_result: Result<(), String> = if let Some(config_path) = maybe_config_path {
-        let remaining_for_persist = remaining.clone();
-        match tokio::task::spawn_blocking(move || {
-            persist_hedgedoc_entries(&config_path, &remaining_for_persist)
-        })
-        .await
-        {
-            Ok(Ok(())) => Ok(()),
-            Ok(Err(e)) => {
-                log::error!("Failed to persist HedgeDoc entries after deletion: {e}");
-                Err(e.to_string())
-            }
-            Err(e) => {
-                log::error!("Persist task panicked after deletion: {e}");
-                Err(e.to_string())
-            }
-        }
-    } else {
-        Ok(()) // no config file to persist to, treat as success
-    };
+    let combined = build_combined_infos(&state.config.collections, &snapshot);
+    *state.collections.write().await = combined;
 
-    // Only update in-memory state if persist succeeded (or was not needed).
-    match persist_result {
-        Ok(()) => {
-            *state.hedgedoc_sources.lock() = new_sources.clone();
-            let combined = build_combined_infos(&state.config.collections, &new_sources);
-            *state.collections.write().await = combined;
-            Flash::success("HedgeDoc source removed.").redirect("/hedgedoc")
-        }
-        Err(msg) => {
-            Flash::error(format!("Failed to remove HedgeDoc source: {msg}")).redirect("/hedgedoc")
-        }
-    }
+    Flash::success(message).redirect("/hedgedoc")
 }
 
 /// Manually re-sync all HedgeDoc sources.

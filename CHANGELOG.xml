@@ -2,6 +2,9 @@
     <unreleased>
         <fixed>
             <change author="claude">
+                Deleting a HedgeDoc source now also deletes its downloaded note files from disk. The review database is deliberately kept so review history survives re-adding the source; the confirmation message states exactly what was deleted and what was kept. (BUG-42)
+            </change>
+            <change author="claude">
                 Adding and deleting HedgeDoc sources is now atomic: the duplicate check, the in-memory change, and the config-file write happen under a single lock, so concurrent add/delete requests can no longer lose configured sources. Failures are reported to the user instead of only being logged. (BUG-39)
             </change>
             <change author="claude">

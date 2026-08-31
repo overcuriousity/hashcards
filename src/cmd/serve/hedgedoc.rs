@@ -425,6 +425,99 @@ pub fn commit_add(
     Ok(updated)
 }
 
+/// What a `commit_delete` removed. `removed_note` is the deleted note's file
+/// name with its collection; `removed_sources` lists collections whose source
+/// was removed entirely (no notes left). BUG-42 uses this to clean up
+/// on-disk data and tell the user what remains.
+pub struct DeleteOutcome {
+    pub snapshot: Vec<HedgedocSource>,
+    pub removed_note: Option<(String, ResolvedCollection)>,
+    pub removed_sources: Vec<ResolvedCollection>,
+}
+
+/// Atomically commit a HedgeDoc source/note deletion (BUG-39): mutate and
+/// persist under one lock acquisition, persisting from the post-mutation
+/// state. On any error the in-memory state is left unchanged.
+pub fn commit_delete(
+    sources: &Mutex<Vec<HedgedocSource>>,
+    config_path: Option<&Path>,
+    url: &str,
+) -> Fallible<DeleteOutcome> {
+    let mut guard = sources.lock();
+    let mut updated = guard.clone();
+    let mut removed_note = None;
+    for src in updated.iter_mut() {
+        if let Some(note) = src.notes.iter().find(|n| n.url == url) {
+            removed_note = Some((note.file_name.clone(), src.collection.clone()));
+        }
+        src.notes.retain(|n| n.url != url);
+    }
+    if removed_note.is_none() {
+        return fail(format!("No HedgeDoc source with this URL: {url}"));
+    }
+    let removed_sources: Vec<ResolvedCollection> = updated
+        .iter()
+        .filter(|s| s.notes.is_empty())
+        .map(|s| s.collection.clone())
+        .collect();
+    updated.retain(|s| !s.notes.is_empty());
+    if let Some(path) = config_path {
+        persist_hedgedoc_entries(path, &all_hedgedoc_entries(&updated))?;
+    }
+    *guard = updated.clone();
+    Ok(DeleteOutcome {
+        snapshot: updated,
+        removed_note,
+        removed_sources,
+    })
+}
+
+/// Clean up on-disk data after a committed delete (BUG-42) and build the
+/// user-facing message describing exactly what was deleted and what remains.
+/// The review database is kept deliberately, so review history survives if
+/// the source is re-added later. Cleanup failures are reported, not fatal:
+/// the source is already removed from config and memory at this point.
+pub fn cleanup_after_delete(outcome: &DeleteOutcome) -> String {
+    // Whole source removed: delete its note directory.
+    if let Some(rc) = outcome.removed_sources.first() {
+        if let Err(e) = std::fs::remove_dir_all(&rc.coll_dir) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                return format!(
+                    "Source removed, but its note directory {} could not be deleted: {e}. \
+                     The review database at {} was kept.",
+                    rc.coll_dir.display(),
+                    rc.db_path.display(),
+                );
+            }
+        }
+        return format!(
+            "Source removed. Its note directory {} was deleted. The review database at {} \
+             was kept, so your review history survives if you re-add this source.",
+            rc.coll_dir.display(),
+            rc.db_path.display(),
+        );
+    }
+    // Only one note of a multi-note source removed: delete just its file.
+    if let Some((file_name, rc)) = &outcome.removed_note {
+        let path = rc.coll_dir.join(file_name);
+        if let Err(e) = std::fs::remove_file(&path) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                return format!(
+                    "Note removed, but its file {} could not be deleted: {e}",
+                    path.display()
+                );
+            }
+        }
+        return format!(
+            "Note removed and its file {} deleted. The review database at {} was kept, \
+             so your review history survives if you re-add this note.",
+            path.display(),
+            rc.db_path.display(),
+        );
+    }
+    "Source removed.".to_string()
+}
+
 /// Compute `CollectionInfo` for a single HedgeDoc source.
 pub fn collection_info_for_source(source: &HedgedocSource) -> CollectionInfo {
     let (total_cards, due_today) =
@@ -985,5 +1078,133 @@ mod tests {
         for i in 0..=8 {
             assert!(content.contains(&format!("doc{i}")), "config lost doc{i}");
         }
+    }
+
+    #[test]
+    fn commit_delete_removes_note_and_persists() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("hashcards.toml");
+        write_toml(
+            &config_path,
+            "[[hedgedoc]]\nurl = \"https://n.example.com/doc1\"\n[server]\ndata_dir = \"/tmp\"\n",
+        );
+        let sources = Mutex::new(vec![test_source_for(
+            "https://n.example.com",
+            "https://n.example.com/doc1",
+        )]);
+
+        let outcome =
+            commit_delete(&sources, Some(&config_path), "https://n.example.com/doc1").unwrap();
+        // The note's source had no other notes, so the whole source is gone.
+        assert!(outcome.snapshot.is_empty());
+        assert_eq!(outcome.removed_sources.len(), 1);
+        assert!(outcome.removed_note.is_some());
+        assert!(sources.lock().is_empty());
+        let content = std::fs::read_to_string(&config_path).unwrap();
+        assert!(!content.contains("doc1"));
+    }
+
+    #[test]
+    fn commit_delete_unknown_url_is_an_error_and_changes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("hashcards.toml");
+        write_toml(&config_path, "[server]\ndata_dir = \"/tmp\"\n");
+        let sources = Mutex::new(vec![test_source_for(
+            "https://n.example.com",
+            "https://n.example.com/doc1",
+        )]);
+
+        let result = commit_delete(&sources, Some(&config_path), "https://n.example.com/other");
+        assert!(result.is_err());
+        assert_eq!(sources.lock().len(), 1);
+    }
+
+    /// Regression test (BUG-39): a failed persist must not desync memory from
+    /// the config file — the in-memory sources stay untouched.
+    #[test]
+    fn commit_delete_persist_failure_leaves_memory_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing_config = dir.path().join("no-such-dir").join("hashcards.toml");
+        let sources = Mutex::new(vec![test_source_for(
+            "https://n.example.com",
+            "https://n.example.com/doc1",
+        )]);
+
+        let result = commit_delete(
+            &sources,
+            Some(&missing_config),
+            "https://n.example.com/doc1",
+        );
+        assert!(result.is_err());
+        assert_eq!(sources.lock().len(), 1);
+        assert_eq!(sources.lock()[0].notes.len(), 1);
+    }
+
+    /// Regression test (BUG-42): deleting a source's last note must delete the
+    /// note directory, keep the review DB, and say so.
+    #[test]
+    fn cleanup_after_delete_removes_dir_and_keeps_db() {
+        let dir = tempfile::tempdir().unwrap();
+        let coll_dir = dir.path().join("hedgedoc").join("src");
+        let db_path = dir.path().join("db").join("hedgedoc-src.db");
+        std::fs::create_dir_all(&coll_dir).unwrap();
+        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+        std::fs::write(coll_dir.join("note.md"), "Q: q\nA: a\n").unwrap();
+        std::fs::write(&db_path, "not a real db").unwrap();
+
+        let rc = ResolvedCollection {
+            name: "src".to_string(),
+            slug: "hedgedoc-src".to_string(),
+            coll_dir: coll_dir.clone(),
+            db_path: db_path.clone(),
+        };
+        let outcome = DeleteOutcome {
+            snapshot: Vec::new(),
+            removed_note: Some(("note.md".to_string(), rc.clone())),
+            removed_sources: vec![rc],
+        };
+
+        let message = cleanup_after_delete(&outcome);
+        assert!(!coll_dir.exists(), "note directory must be deleted");
+        assert!(db_path.exists(), "review DB must be kept");
+        assert!(
+            message.contains("kept"),
+            "message must say the DB was kept: {message}"
+        );
+        assert!(
+            message.contains(&db_path.display().to_string()),
+            "message must name the kept DB: {message}"
+        );
+    }
+
+    /// When the source still has other notes, only the deleted note's file
+    /// goes; the directory (and the other notes' files) stay.
+    #[test]
+    fn cleanup_after_delete_note_only_removes_just_that_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let coll_dir = dir.path().join("hedgedoc").join("src");
+        std::fs::create_dir_all(&coll_dir).unwrap();
+        std::fs::write(coll_dir.join("gone.md"), "x").unwrap();
+        std::fs::write(coll_dir.join("stays.md"), "y").unwrap();
+
+        let rc = ResolvedCollection {
+            name: "src".to_string(),
+            slug: "hedgedoc-src".to_string(),
+            coll_dir: coll_dir.clone(),
+            db_path: dir.path().join("db").join("hedgedoc-src.db"),
+        };
+        let outcome = DeleteOutcome {
+            snapshot: Vec::new(), // irrelevant for cleanup
+            removed_note: Some(("gone.md".to_string(), rc)),
+            removed_sources: Vec::new(),
+        };
+
+        let message = cleanup_after_delete(&outcome);
+        assert!(!coll_dir.join("gone.md").exists());
+        assert!(coll_dir.join("stays.md").exists());
+        assert!(
+            message.contains("kept"),
+            "message must say what remains: {message}"
+        );
     }
 }
