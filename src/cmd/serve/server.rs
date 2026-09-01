@@ -28,6 +28,8 @@ use crate::cmd::serve::bookmarks::bookmark_delete_handler;
 use crate::cmd::serve::bookmarks::bookmark_list_handler;
 use crate::cmd::serve::bookmarks::bookmark_note_handler;
 use crate::cmd::serve::config::ResolvedCollection;
+use crate::cmd::serve::hedgedoc::check_startup_slug_collisions;
+use crate::db::Database;
 use crate::cmd::serve::config::ResolvedGit;
 use crate::cmd::serve::config::ResolvedServeConfig;
 use crate::cmd::serve::edit::edit_get_handler;
@@ -59,6 +61,43 @@ use crate::cmd::serve::stats::collection_stats_handler;
 use crate::cmd::signals::terminate_signal;
 use crate::error::Fallible;
 use crate::types::timestamp::Timestamp;
+
+/// Close session rows left dangling by a crash or restart, across every
+/// collection this server serves, and return the per-slug counts so the deck
+/// browser can report them once.
+///
+/// A collection whose database cannot be opened is skipped with a log line
+/// rather than failing startup: an unreadable database is the deck browser's
+/// problem to report, not a reason to refuse to serve everything else.
+fn sweep_dangling_sessions(
+    config: &ResolvedServeConfig,
+    hedgedoc_sources: &[HedgedocSource],
+) -> HashMap<String, usize> {
+    let mut counts = HashMap::new();
+    let collections = config
+        .collections
+        .iter()
+        .chain(hedgedoc_sources.iter().map(|s| &s.collection));
+    for rc in collections {
+        let Some(db_path) = rc.db_path.to_str() else {
+            log::error!("Database path is not valid UTF-8: {}", rc.db_path.display());
+            continue;
+        };
+        let closed = Database::new(db_path).and_then(|db| db.close_dangling_sessions());
+        match closed {
+            Ok(0) => {}
+            Ok(n) => {
+                log::info!("Closed {n} interrupted session(s) for collection '{}'", rc.slug);
+                counts.insert(rc.slug.clone(), n);
+            }
+            Err(e) => log::error!(
+                "Could not close interrupted sessions for collection '{}': {e}",
+                rc.slug
+            ),
+        }
+    }
+    counts
+}
 
 pub async fn start_serve(config: ResolvedServeConfig) -> Fallible<()> {
     // Git mode: clone/pull repo and create data directories
@@ -167,6 +206,18 @@ pub async fn start_serve(config: ResolvedServeConfig) -> Fallible<()> {
     } else {
         None
     };
+    // BUG-43: refuse to start if two collections share a URL slug. Routing
+    // prefers configured collections, so a collision silently addresses the
+    // wrong database rather than failing visibly.
+    check_startup_slug_collisions(&config.collections, &hedgedoc_sources_init)?;
+
+    // FEAT-03: close session rows left open by a crash or restart, once, at
+    // startup. They cannot be resumed (the card queue lives only in memory),
+    // so they are closed with all persisted reviews kept. This must not run
+    // per request: the predicate cannot distinguish a crashed session from a
+    // live one, and a CLI `drill` may be running against the same database.
+    let interrupted_closed = sweep_dangling_sessions(&config, &hedgedoc_sources_init);
+
     let hedgedoc_sources = Arc::new(Mutex::new(hedgedoc_sources_init));
     let hedgedoc_last_synced = Arc::new(Mutex::new(hedgedoc_last_synced_init));
 
@@ -180,6 +231,7 @@ pub async fn start_serve(config: ResolvedServeConfig) -> Fallible<()> {
         config_path,
         // Counts were just computed above, so the stamp starts fresh.
         counts_refreshed_at: Arc::new(Mutex::new(Some(Timestamp::now()))),
+        interrupted_closed: Arc::new(Mutex::new(interrupted_closed)),
     };
 
     spawn_session_eviction_task(state.sessions.clone(), config.session_timeout_minutes);

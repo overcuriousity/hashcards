@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -65,6 +66,35 @@ pub fn find_slug_collision<'a>(
     collections: &'a [ResolvedCollection],
 ) -> Option<&'a ResolvedCollection> {
     collections.iter().find(|c| c.slug == slug)
+}
+
+/// Reject a startup configuration in which two collections share a URL slug.
+///
+/// `find_slug_collision` covers the runtime "add a HedgeDoc source" path, but
+/// sources built from `[[hedgedoc]]` config entries never went through it,
+/// and two distinct source URIs can slugify to the same string. Because
+/// `find_collection` prefers configured collections, either case silently
+/// drills and edits against the wrong collection's database (BUG-43), so this
+/// refuses to start rather than serving the wrong data.
+pub fn check_startup_slug_collisions(
+    collections: &[ResolvedCollection],
+    sources: &[HedgedocSource],
+) -> Fallible<()> {
+    let mut seen: HashMap<&str, String> = HashMap::new();
+    for rc in collections {
+        seen.insert(rc.slug.as_str(), format!("collection '{}'", rc.name));
+    }
+    for source in sources {
+        let slug = source.collection.slug.as_str();
+        let owner = format!("HedgeDoc source '{}'", source.source_uri);
+        if let Some(first) = seen.get(slug) {
+            return fail(format!(
+                "configuration error: {first} and {owner} both map to the URL slug '{slug}'. Rename the collection or use a different HedgeDoc source URL so their slugs differ."
+            ));
+        }
+        seen.insert(slug, owner);
+    }
+    Ok(())
 }
 
 /// Validate that a HedgeDoc URL is safe to fetch (HTTPS only).
@@ -1284,6 +1314,56 @@ mod tests {
         let entries = all_hedgedoc_entries(&[source]);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].url, "not a valid url");
+    }
+
+    /// BUG-43 regression: a `[[hedgedoc]]` source configured at startup that
+    /// slugifies onto a configured collection must stop the server, not
+    /// silently route to the wrong database.
+    #[test]
+    fn test_startup_hedgedoc_slug_collision_is_rejected() {
+        let uri = "https://pad.example.com/notes";
+        let slug = slug_for_source_uri(uri);
+        let collections = vec![ResolvedCollection {
+            name: "Notes".to_string(),
+            slug: slug.clone(),
+            coll_dir: PathBuf::from("/tmp/notes"),
+            db_path: PathBuf::from("/tmp/notes.db"),
+        }];
+        let sources = vec![HedgedocSource {
+            source_uri: uri.to_string(),
+            collection: ResolvedCollection {
+                name: uri.to_string(),
+                slug,
+                coll_dir: PathBuf::from("/tmp/hedge"),
+                db_path: PathBuf::from("/tmp/hedge.db"),
+            },
+            notes: Vec::new(),
+        }];
+        assert!(check_startup_slug_collisions(&collections, &sources).is_err());
+        assert!(check_startup_slug_collisions(&collections, &[]).is_ok());
+    }
+
+    /// Two distinct source URIs that slugify identically collide with each
+    /// other, even though neither matches a configured collection.
+    #[test]
+    fn test_two_sources_slugifying_alike_are_rejected() {
+        let source = |uri: &str| HedgedocSource {
+            source_uri: uri.to_string(),
+            collection: ResolvedCollection {
+                name: uri.to_string(),
+                slug: slug_for_source_uri(uri),
+                coll_dir: PathBuf::from("/tmp/hedge"),
+                db_path: PathBuf::from("/tmp/hedge.db"),
+            },
+            notes: Vec::new(),
+        };
+        let a = source("https://pad.example.com/abc+1");
+        let b = source("https://pad.example.com/abc-1");
+        assert_eq!(
+            a.collection.slug, b.collection.slug,
+            "these URIs must slugify alike for this test to mean anything"
+        );
+        assert!(check_startup_slug_collisions(&[], &[a, b]).is_err());
     }
 
     /// BUG-43 regression: a configured collection whose slug equals a

@@ -14,7 +14,7 @@ use serde::Deserialize;
 
 use crate::cmd::drill::template::page_template;
 use crate::cmd::serve::handlers::find_collection;
-use crate::cmd::serve::handlers::run_blocking;
+use crate::cmd::run_blocking;
 use crate::cmd::serve::state::AppState;
 use crate::collection::Collection;
 use crate::db::Bookmark;

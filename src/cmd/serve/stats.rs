@@ -6,7 +6,7 @@ use maud::html;
 
 use crate::cmd::drill::template::page_template;
 use crate::cmd::serve::handlers::find_collection;
-use crate::cmd::serve::handlers::run_blocking;
+use crate::cmd::run_blocking;
 use crate::cmd::serve::state::AppState;
 use crate::cmd::stats_page::gather_stats;
 use crate::cmd::stats_page::render_stats_page;

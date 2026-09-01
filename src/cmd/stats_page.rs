@@ -46,7 +46,20 @@ pub struct CollectionStats {
 
 /// Collect all stats for one collection.
 pub fn gather_stats(db: &Database, cards: &[Card], today: Date) -> Fallible<CollectionStats> {
-    let by_due_date = db.count_cards_by_due_date()?;
+    // Both the forecast and the per-deck column are derived from the parsed
+    // collection, looked up in the DB. Aggregating the `cards` table directly
+    // gets this wrong in both directions: nothing inserts a card row before
+    // its first drill, so a never-drilled collection would report nothing due;
+    // and rows left behind by deleted cards would inflate the forecast while
+    // the per-deck column ignored them, so the two halves of the page could
+    // not be reconciled.
+    let due_dates = db.due_dates()?;
+    // A card with no row has never been seen by the scheduler, so it is new
+    // and therefore due today -- the same meaning `due_today` gives a row
+    // whose `due_date` is NULL.
+    let due_date_of = |card: &Card| due_dates.get(&card.hash()).copied().flatten();
+    let by_due_date: Vec<(Option<Date>, usize)> =
+        cards.iter().map(|card| (due_date_of(card), 1)).collect();
     let due_forecast = bucket_due_forecast(&by_due_date, today, FORECAST_DAYS)?;
 
     let since = today.sub_days(HISTORY_DAYS - 1)?;
@@ -58,14 +71,13 @@ pub fn gather_stats(db: &Database, cards: &[Card], today: Date) -> Fallible<Coll
 
     // Per-deck due/total comes from the parsed collection, since deck names
     // exist only on disk, not in the DB.
-    let due_hashes = db.due_today(today)?;
     let mut deck_counts: BTreeMap<String, (usize, usize)> = BTreeMap::new();
     for card in cards {
         let entry = deck_counts
             .entry(card.deck_name().clone())
             .or_insert((0, 0));
         entry.1 += 1;
-        if due_hashes.contains(&card.hash()) {
+        if due_date_of(card).is_none_or(|due| due <= today) {
             entry.0 += 1;
         }
     }
@@ -249,6 +261,7 @@ mod tests {
     use super::*;
     use crate::db::Database;
     use crate::types::card::CardContent;
+    use crate::types::card_hash::CardHash;
     use crate::types::timestamp::Timestamp;
 
     fn date(s: &str) -> Date {
@@ -262,6 +275,57 @@ mod tests {
             (1, 2),
             CardContent::new_basic(question, "answer"),
         )
+    }
+
+    /// Regression: due counts must come from the parsed collection, not from
+    /// whatever happens to be in the `cards` table. Nothing inserts card rows
+    /// outside the start-drill path, so a collection that has never been
+    /// drilled would otherwise report Due = 0 for every deck while showing a
+    /// full card total, and the forecast would disagree with the deck table.
+    #[test]
+    fn test_never_drilled_collection_counts_every_card_due() -> Fallible<()> {
+        let db = Database::new(":memory:")?;
+        let cards = vec![
+            make_card("Biology", "Q1"),
+            make_card("Biology", "Q2"),
+            make_card("Chemistry", "Q3"),
+        ];
+        // No card rows at all: this collection has never been drilled.
+        let today = date("2026-09-01");
+        let stats = gather_stats(&db, &cards, today)?;
+
+        assert_eq!(stats.decks.len(), 2);
+        for deck in &stats.decks {
+            assert_eq!(
+                deck.due, deck.total,
+                "every card in '{}' is new, so all are due",
+                deck.deck_name
+            );
+        }
+        // The forecast must agree with the deck table rather than showing 0.
+        assert_eq!(stats.due_forecast[0].1, 3);
+        let deck_due: usize = stats.decks.iter().map(|d| d.due).sum();
+        assert_eq!(deck_due, stats.due_forecast[0].1);
+        Ok(())
+    }
+
+    /// The forecast counts only cards the collection still contains: a row
+    /// left behind by a deleted card is an orphan, and counting it in the
+    /// forecast while the per-deck column ignores it makes the two halves of
+    /// the page irreconcilable.
+    #[test]
+    fn test_orphan_rows_are_excluded_from_the_forecast() -> Fallible<()> {
+        let db = Database::new(":memory:")?;
+        let cards = vec![make_card("Biology", "Q1")];
+        let now = Timestamp::now();
+        db.insert_card(cards[0].hash(), now)?;
+        // A row whose card no longer exists in any deck.
+        db.insert_card(CardHash::hash_bytes(b"deleted-card"), now)?;
+
+        let stats = gather_stats(&db, &cards, date("2026-09-01"))?;
+        let total: usize = stats.due_forecast.iter().map(|(_, n)| n).sum();
+        assert_eq!(total, 1, "the orphan row must not appear in the forecast");
+        Ok(())
     }
 
     #[test]

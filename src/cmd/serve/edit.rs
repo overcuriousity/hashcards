@@ -17,7 +17,7 @@ use serde::Deserialize;
 use crate::cmd::drill::template::page_template;
 use crate::cmd::serve::git::commit_edit;
 use crate::cmd::serve::handlers::find_collection;
-use crate::cmd::serve::handlers::run_blocking;
+use crate::cmd::run_blocking;
 use crate::cmd::serve::state::AppState;
 use crate::db::Database;
 use crate::error::ErrorReport;
@@ -235,10 +235,17 @@ fn edit_post_inner(
         }
     };
 
-    // Find new cards at the same start_line (ranges are absolute file lines, same as old).
+    // The splice replaced the old block with `new_text`, so the new block
+    // occupies exactly `new_text.lines().count()` lines starting at the same
+    // absolute line. Matching on the exact start line instead would miss the
+    // card whenever the edit adds a line above it (a heading, a blank line),
+    // planning no rename at all and silently orphaning its review history.
+    let new_block_end = range.0 + new_text.lines().count();
     let new_at_block: Vec<&Card> = new_cards
         .iter()
-        .filter(|c| c.file_path() == &file_path && c.range().0 == range.0)
+        .filter(|c| {
+            c.file_path() == &file_path && c.range().0 >= range.0 && c.range().0 < new_block_end
+        })
         .collect();
 
     let plan = plan_hash_migration(&old_cards, &new_at_block);
@@ -247,19 +254,22 @@ fn edit_post_inner(
         .db_path
         .to_str()
         .ok_or_else(|| ErrorReport::new("invalid db path"))?;
-    let db = Database::new(db_path)?;
+    let mut db = Database::new(db_path)?;
     let now = Timestamp::now();
 
-    for (old, new) in &plan.renames {
-        if db.card_exists(*old)? {
-            db.rename_card_hash(*old, *new)?;
-        } else {
-            db.insert_card_if_new(*new, now)?;
+    // One transaction, so a failure part-way through cannot leave the
+    // database half-migrated behind an already-rewritten file. If it fails
+    // anyway, put the file back the way it was.
+    let migrated = match db.apply_edit_migration(&plan.renames, &plan.fresh, now) {
+        Ok(migrated) => migrated,
+        Err(e) => {
+            revert_file(&file_path, &file_content)?;
+            return fail(format!("Edit reverted: the review history could not be updated: {e}"));
         }
-    }
-    for new in &plan.fresh {
-        db.insert_card_if_new(*new, now)?;
-    }
+    };
+    // A rename the database declined (its target hash already has history)
+    // leaves the old row unmatched, which the user should hear about.
+    let collided = plan.renames.len() - migrated;
 
     // FEAT-04: every successful web edit becomes a git commit, so git sync
     // keeps working and the collection gets versioned card history for free.
@@ -277,8 +287,8 @@ fn edit_post_inner(
     })?;
 
     Ok(EditOutcome {
-        migrated: plan.renames.len(),
-        skipped: plan.skipped,
+        migrated,
+        skipped: plan.skipped + collided,
         committed,
     })
 }
@@ -548,7 +558,118 @@ mod tests {
             hedgedoc_last_synced: Arc::new(Mutex::new(None)),
             config_path: Arc::new(Mutex::new(None)),
             counts_refreshed_at: Arc::new(Mutex::new(None)),
+            interrupted_closed: Arc::new(Mutex::new(HashMap::new())),
         })
+    }
+
+    /// Regression: an edit that makes a card identical to one that already
+    /// has history must not leave the file saved, the database half-migrated
+    /// and the user looking at a 500. `rename_card_hash` errors when the
+    /// target hash exists, and the migration used to run unguarded, one
+    /// statement at a time, after the file had already been written.
+    #[test]
+    fn test_edit_colliding_with_existing_card_does_not_corrupt() -> Fallible<()> {
+        let dir = tempfile::tempdir()?;
+        let coll_dir = dir.path().canonicalize()?;
+        let file = coll_dir.join("Deck.md");
+        // Two distinct cards, both with history.
+        std::fs::write(&file, "Q: One\nA: 1\n\n---\n\nQ: Two\nA: 2\n")?;
+
+        let state = test_state(&coll_dir)?;
+        let slug = state.config.collections[0].slug.clone();
+        let db_path = state.config.collections[0].db_path.clone();
+        let db_str = db_path
+            .to_str()
+            .ok_or_else(|| ErrorReport::new("non-utf8 db path"))?;
+
+        let old_cards = parse_deck(&coll_dir)?.cards;
+        assert_eq!(old_cards.len(), 2);
+        {
+            let db = Database::new(db_str)?;
+            let now = Timestamp::now();
+            for c in &old_cards {
+                db.insert_card_if_new(c.hash(), now)?;
+            }
+        }
+
+        // Edit the first card into a byte-identical copy of the second, whose
+        // hash already exists in the database.
+        let mtime = file_mtime_ms(&file)?;
+        let outcome = edit_post_inner(
+            &state,
+            &slug,
+            &old_cards[0].hash().to_hex(),
+            EditForm {
+                new_text: "Q: Two\nA: 2".to_string(),
+                mtime_ms: mtime.to_string(),
+            },
+        )?;
+
+        // The collision is reported, not raised as a 500.
+        assert_eq!(outcome.migrated, 0);
+        assert_eq!(outcome.skipped, 1);
+
+        // The second card keeps its history, and nothing was left dangling.
+        let db = Database::new(db_str)?;
+        assert!(db.card_exists(old_cards[1].hash())?);
+        Ok(())
+    }
+
+    /// Regression: adding a line above the card's own `Q:` shifts the card
+    /// down inside the edited block. Matching new cards by exact start line
+    /// then found nothing, so no rename was planned, `skipped` stayed 0, and
+    /// the user was told "Card saved." while the FSRS history was silently
+    /// orphaned to the old hash.
+    #[test]
+    fn test_edit_prepending_a_line_still_migrates_history() -> Fallible<()> {
+        let dir = tempfile::tempdir()?;
+        let coll_dir = dir.path().canonicalize()?;
+        let file = coll_dir.join("Deck.md");
+        std::fs::write(&file, "Q: Capital of France?\nA: Paris\n")?;
+
+        let state = test_state(&coll_dir)?;
+        let slug = state.config.collections[0].slug.clone();
+        let db_path = state.config.collections[0].db_path.clone();
+
+        let old_cards = parse_deck(&coll_dir)?.cards;
+        assert_eq!(old_cards.len(), 1);
+        let old_hash = old_cards[0].hash();
+        let hash_hex = old_hash.to_hex();
+
+        let db_str = db_path
+            .to_str()
+            .ok_or_else(|| ErrorReport::new("non-utf8 db path"))?;
+        {
+            let db = Database::new(db_str)?;
+            db.insert_card_if_new(old_hash, Timestamp::now())?;
+        }
+
+        // A prose line above the Q: pushes the card one line down.
+        let mtime = file_mtime_ms(&file)?;
+        let outcome = edit_post_inner(
+            &state,
+            &slug,
+            &hash_hex,
+            EditForm {
+                new_text: "## Geography\nQ: Capital of France?\nA: Paris, France".to_string(),
+                mtime_ms: mtime.to_string(),
+            },
+        )?;
+        assert_eq!(
+            outcome.migrated, 1,
+            "the shifted card must still be matched to its history"
+        );
+        assert_eq!(outcome.skipped, 0);
+
+        let new_cards = parse_deck(&coll_dir)?.cards;
+        assert_eq!(new_cards.len(), 1);
+        let db = Database::new(db_str)?;
+        assert!(
+            db.card_exists(new_cards[0].hash())?,
+            "history must have followed the card to its new hash"
+        );
+        assert!(!db.card_exists(old_hash)?, "the old row must not linger");
+        Ok(())
     }
 
     /// Regression test for BUG-35, end to end: reordering the deletions of a

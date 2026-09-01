@@ -363,7 +363,11 @@ impl LineReader {
         LineReader { fence: None }
     }
 
-    fn read(&mut self, line: &str) -> Line {
+    /// `definition_expected` says whether the state machine is currently
+    /// reading a term, which is the only place a `D:` line is a tag. An
+    /// answer that merely begins with `D:` is ordinary text (BUG: it used to
+    /// fail the whole collection load).
+    fn read(&mut self, line: &str, definition_expected: bool) -> Line {
         let trimmed = line.trim_start();
         match self.fence {
             Some(FenceKind::Backtick) => {
@@ -380,7 +384,7 @@ impl LineReader {
             }
             None => {}
         }
-        if trimmed.starts_with("```") {
+        if opens_backtick_fence(trimmed) {
             self.fence = Some(FenceKind::Backtick);
             return Line::Text(line.to_string());
         }
@@ -396,7 +400,7 @@ impl LineReader {
             Line::StartCloze(trim(line))
         } else if is_term(line) {
             Line::StartTerm(trim(line))
-        } else if is_definition(line) {
+        } else if definition_expected && is_definition(line) {
             Line::StartDefinition(trim(line))
         } else if is_separator(line) {
             Line::Separator
@@ -404,6 +408,22 @@ impl LineReader {
             Line::Text(line.to_string())
         }
     }
+}
+
+/// Does this line open a backtick code fence?
+///
+/// A fence opener is a run of at least three backticks whose info string
+/// contains no backtick (CommonMark). Without that second condition a line
+/// like ```` ```code``` ```` -- an inline code span -- opens a fence that is
+/// never closed, silently swallowing every card after it in the file.
+fn opens_backtick_fence(trimmed: &str) -> bool {
+    let run = trimmed.chars().take_while(|c| *c == '`').count();
+    run >= 3 && !trimmed[run..].contains('`')
+}
+
+/// Is the parser in the one state where a `D:` line is a definition tag?
+fn definition_expected(state: &State) -> bool {
+    matches!(state, State::ReadingTerm { .. })
 }
 
 fn is_question(line: &str) -> bool {
@@ -440,11 +460,23 @@ fn trim(line: &str) -> String {
 fn is_markdown_link_open(text: &str, open_pos: usize) -> bool {
     let bytes = text.as_bytes();
     let mut i = open_pos + 1;
+    // A CommonMark link label may contain balanced nested brackets, so track
+    // depth rather than giving up on the first inner `[`.
+    let mut depth: usize = 0;
     while i < bytes.len() {
         match bytes[i] {
             b'\\' => i += 2,
-            b'[' => return false,
-            b']' => return bytes.get(i + 1) == Some(&b'('),
+            b'[' => {
+                depth += 1;
+                i += 1;
+            }
+            b']' => {
+                if depth == 0 {
+                    return bytes.get(i + 1) == Some(&b'(');
+                }
+                depth -= 1;
+                i += 1;
+            }
             _ => i += 1,
         }
     }
@@ -480,7 +512,7 @@ impl Parser {
         let lines: Vec<&str> = text.lines().collect();
         let last_line = if lines.is_empty() { 0 } else { lines.len() - 1 };
         for (line_num, line) in lines.iter().enumerate() {
-            let line = reader.read(line);
+            let line = reader.read(line, definition_expected(&state));
             state = self.parse_line(state, line, line_num + self.line_offset, &mut cards)?;
         }
         self.parse_line(state, Line::Eof, last_line + self.line_offset, &mut cards)?;
@@ -880,7 +912,10 @@ impl Parser {
             // Set when the preceeding byte indicates it should be evaluated as
             // markdown and not part of the cloze and therefore added to clean_text.
             let mut image_mode = false; // ![
-            let mut link_mode = false; // [text](url)
+            // Nesting depth inside a `[text](url)` label. A label may contain
+            // balanced brackets, so a single flag would close at the first
+            // inner `]` and drop the label's real closing bracket.
+            let mut link_depth: usize = 0;
             let mut escape_mode = false; // \[ and \]
             // We use `bytes` rather than `chars` because the cloze start/end
             // positions are byte positions, not character positions. This
@@ -888,14 +923,18 @@ impl Parser {
             // are a vague abstract concept.
             for (bytepos, c) in text.bytes().enumerate() {
                 if c == b'[' {
-                    if image_mode || link_mode {
+                    if image_mode {
+                        clean_text.push(c);
+                    } else if link_depth > 0 {
+                        // A balanced bracket inside a link label.
+                        link_depth += 1;
                         clean_text.push(c);
                     } else if escape_mode {
                         escape_mode = false;
                         clean_text.push(c);
                     } else if is_markdown_link_open(text, bytepos) {
                         // This bracket opens a markdown link; keep it verbatim.
-                        link_mode = true;
+                        link_depth = 1;
                         clean_text.push(c);
                     }
                 } else if c == b']' {
@@ -904,9 +943,9 @@ impl Parser {
                         // part of a Markdown image.
                         image_mode = false;
                         clean_text.push(c);
-                    } else if link_mode {
-                        // Closing bracket of a markdown link.
-                        link_mode = false;
+                    } else if link_depth > 0 {
+                        // Closing bracket inside or at the end of a link label.
+                        link_depth -= 1;
                         clean_text.push(c);
                     } else if escape_mode {
                         // We are in escape mode, so this closing bracket is
@@ -962,18 +1001,23 @@ impl Parser {
         let mut start = None;
         let mut index = 0;
         let mut image_mode = false;
-        let mut link_mode = false;
+        // See the matching counter in the clean_text pass above.
+        let mut link_depth: usize = 0;
         let mut escape_mode = false;
         for (bytepos, c) in text.bytes().enumerate() {
             if c == b'[' {
-                if image_mode || link_mode {
+                if image_mode {
+                    index += 1;
+                } else if link_depth > 0 {
+                    // A balanced bracket inside a link label, not a cloze.
+                    link_depth += 1;
                     index += 1;
                 } else if escape_mode {
                     index += 1;
                     escape_mode = false;
                 } else if is_markdown_link_open(text, bytepos) {
                     // This bracket opens a markdown link; it stays in the text.
-                    link_mode = true;
+                    link_depth = 1;
                     index += 1;
                 } else if start.is_some() {
                     return Err(ParserError::new(
@@ -988,8 +1032,8 @@ impl Parser {
                 if image_mode {
                     image_mode = false;
                     index += 1;
-                } else if link_mode {
-                    link_mode = false;
+                } else if link_depth > 0 {
+                    link_depth -= 1;
                     index += 1;
                 } else if escape_mode {
                     escape_mode = false;
@@ -1983,6 +2027,84 @@ A: Genetic material."#,
         Ok(())
     }
 
+    /// Regression: `D:` is the definition tag only while a term is being
+    /// read. An answer line that merely begins with `D:` is ordinary text,
+    /// not a tag, and must not fail the whole collection load.
+    #[test]
+    fn test_definition_prefix_in_answer_is_plain_text() -> Result<(), ParserError> {
+        let input = "Q: What is the genotype?\nA: Aa\nD: dominant allele shown";
+        let parser = make_test_parser();
+        let cards = parser.parse(input)?;
+        assert_eq!(cards.len(), 1);
+        assert!(matches!(
+            &cards[0].content(),
+            CardContent::Basic { question, answer }
+                if question == "What is the genotype?"
+                && answer == "Aa\nD: dominant allele shown"
+        ));
+        Ok(())
+    }
+
+    /// A `D:` line still forms a term-definition pair directly under a `T:`.
+    #[test]
+    fn test_definition_after_term_is_still_a_tag() -> Result<(), ParserError> {
+        let input = "T: Monoid\nD: A semigroup with an identity element.";
+        let parser = make_test_parser();
+        assert_eq!(parser.parse(input)?.len(), 2);
+        Ok(())
+    }
+
+    /// Regression: a line like ```` ```code``` ```` is inline code under
+    /// CommonMark, not a fence opener -- a backtick fence's info string may
+    /// not contain backticks. Treating it as an opener swallows every card
+    /// after it in the file.
+    #[test]
+    fn test_inline_code_span_does_not_open_a_fence() -> Result<(), ParserError> {
+        let input = "Q: First\n\
+                     A: Its literal form is\n\
+                     ```code``` and nothing more\n\
+                     \n\
+                     ---\n\
+                     \n\
+                     Q: Second\n\
+                     A: Still parsed";
+        let parser = make_test_parser();
+        let cards = parser.parse(input)?;
+        assert_eq!(
+            cards.len(),
+            2,
+            "an inline code span must not swallow later cards"
+        );
+        Ok(())
+    }
+
+    /// A real fence still suppresses card tags inside it.
+    #[test]
+    fn test_real_fence_still_suppresses_tags() -> Result<(), ParserError> {
+        let input = "Q: First\n\
+                     A: See below\n\
+                     ```\n\
+                     Q: not a card\n\
+                     ```";
+        let parser = make_test_parser();
+        let cards = parser.parse(input)?;
+        assert_eq!(cards.len(), 1);
+        Ok(())
+    }
+
+    /// Regression: a markdown link label may contain balanced nested
+    /// brackets. Those belong to the link, not to a cloze deletion, and must
+    /// not trip the nested-bracket guard.
+    #[test]
+    fn test_nested_brackets_in_link_label() -> Result<(), ParserError> {
+        let input = "C: See [the [inner] docs](http://x) for [answer]";
+        let parser = make_test_parser();
+        let cards = parser.parse(input)?;
+        assert_eq!(cards.len(), 1, "only [answer] is a cloze deletion");
+        assert_cloze(&cards, "See [the [inner] docs](http://x) for answer", &[(37, 42)]);
+        Ok(())
+    }
+
     #[test]
     fn test_term_definition_hashes_match_handwritten_cards() -> Result<(), ParserError> {
         let shorthand = "T: Monoid\nD: A semigroup with an identity element.";
@@ -2025,17 +2147,15 @@ A: Genetic material."#,
         Ok(())
     }
 
+    /// `D:` is a tag only directly under a `T:`. A `D:` line with no term
+    /// above it is ordinary prose, exactly as it was before the T:/D:
+    /// shorthand existed, and is skipped rather than failing the load.
     #[test]
-    fn test_definition_without_term_errors() {
+    fn test_definition_without_term_is_prose() -> Result<(), ParserError> {
         let input = "D: A semigroup with an identity element.";
         let parser = make_test_parser();
-        let result = parser.parse(input);
-        assert!(result.is_err());
-        let message = result.err().map(|e| e.to_string()).unwrap_or_default();
-        assert!(
-            message.contains("definition tag without a term"),
-            "message was: {message}"
-        );
+        assert!(parser.parse(input)?.is_empty());
+        Ok(())
     }
 
     #[test]
@@ -2107,10 +2227,20 @@ A: Genetic material."#,
         Ok(())
     }
 
+    /// A second `D:` under the same term continues the definition as text
+    /// rather than erroring: the parser is reading a definition, not a term,
+    /// so the prefix is no longer a tag.
     #[test]
-    fn test_definition_inside_definition_errors() {
+    fn test_second_definition_line_continues_the_definition() -> Result<(), ParserError> {
         let input = "T: Monoid\nD: first\nD: second";
         let parser = make_test_parser();
-        assert!(parser.parse(input).is_err());
+        let cards = parser.parse(input)?;
+        assert_eq!(cards.len(), 2);
+        assert!(matches!(
+            &cards[0].content(),
+            CardContent::Basic { question, answer }
+                if question == "Define: Monoid" && answer == "first\nD: second"
+        ));
+        Ok(())
     }
 }

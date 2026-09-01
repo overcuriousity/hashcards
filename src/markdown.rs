@@ -78,7 +78,12 @@ pub fn markdown_to_html(config: &MarkdownRenderConfig, markdown: &str) -> Fallib
                     Event::Html(CowStr::Boxed(
                         format!(
                             r#"<audio controls src="{}" title="{}"></audio>"#,
-                            url,
+                            // BUG-23: `PATH_SEGMENT` does not encode `"`, so
+                            // the URL needs attribute escaping just as much as
+                            // the title does. Without it a media file whose
+                            // name contains a quote closes `src` early and
+                            // injects arbitrary attributes.
+                            escape_attribute(&url),
                             escape_attribute(&title)
                         )
                         .into_boxed_str(),
@@ -187,6 +192,33 @@ mod tests {
         assert_eq!(
             html,
             "<p><img src=\"http://localhost:1234/file/image.png\" alt=\"alt\" /></p>\n"
+        );
+        Ok(())
+    }
+
+    /// Regression: a media filename containing a double quote must not be
+    /// able to close the `src` attribute and inject further attributes into
+    /// the generated `<audio>` element.
+    #[test]
+    fn test_audio_url_is_attribute_escaped() -> Fallible<()> {
+        let coll_path: PathBuf = create_tmp_directory()?;
+        let abs_deck_path: PathBuf = coll_path.join("deck.md");
+        let evil_name = r#"x" onerror="alert(1).mp3"#;
+        std::fs::write(&abs_deck_path, "")?;
+        std::fs::write(coll_path.join(evil_name), "")?;
+        let config = MarkdownRenderConfig {
+            resolver: MediaResolverBuilder::new()
+                .with_collection_path(coll_path)?
+                .with_deck_path(PathBuf::from("deck.md"))?
+                .build()?,
+            file_url_prefix: "http://localhost:1234/file".to_string(),
+        };
+        // Angle-bracket destinations let a name with quotes and spaces
+        // through CommonMark's inline-image syntax.
+        let html = markdown_to_html(&config, &format!("![](<@/{evil_name}>)"))?;
+        assert!(
+            !html.contains(r#"onerror="alert(1)"#),
+            "attribute injection through the audio src: {html}"
         );
         Ok(())
     }

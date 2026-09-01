@@ -2,10 +2,43 @@
     <unreleased>
         <breaking>
             <change author="mstoeck3">
-                Cloze card hashes are now derived from the card's text, the deleted substring, and an occurrence index, instead of the deletion's raw byte offsets. Card identity no longer depends on CPU endianness or pointer width, so a hashcards.db can move between machines. On first load with this version, an existing database is upgraded automatically in a single transaction: every cloze card's reviews, performance data, and bookmarks are re-linked to its new hash. Cards no longer present in the deck keep their old hashes and remain visible to the orphans command. An upgraded database is rejected by the immediately-preceding hashcards versions (which check the schema version); versions older than that would treat all cloze history as orphaned — do not open an upgraded database with an old hashcards. (BUG-27)
+                Cloze card hashes are now derived from the card's text, the deleted substring, and an occurrence index, instead of the deletion's raw byte offsets. Card identity no longer depends on CPU endianness or pointer width, so a hashcards.db can move between machines. There is no automatic upgrade path: a database written by an older version keeps its old cloze hashes, which this version sees as orphans (visible to the orphans command) while the cloze cards themselves start fresh. (BUG-27)
             </change>
         </breaking>
         <fixed>
+            <change author="claude">
+                Serve mode no longer deadlocks when a grade is submitted while the idle-session sweep or the collection list is running. The three code paths took the session map lock and a session's own lock in opposite orders; with no lock timeout this hung the server outright.
+            </change>
+            <change author="claude">
+                A line beginning with `D:` inside an answer is now ordinary text again. The new term/definition shorthand treated `D:` as a tag wherever it appeared, so an answer such as "D: dominant allele shown" failed the entire collection load. `D:` is a tag only directly below a `T:` line.
+            </change>
+            <change author="claude">
+                A line such as ```` ```code``` ```` no longer opens a code fence that is never closed, which silently swallowed every card below it in the file. A backtick fence's info string may not itself contain backticks.
+            </change>
+            <change author="claude">
+                A markdown link whose text contains brackets, for example `[the [inner] docs](url)`, no longer fails the deck with "Nested cloze brackets". Link labels may contain balanced brackets and are left to the link.
+            </change>
+            <change author="claude">
+                A cloze card with a malformed deletion range now reports a clear error instead of panicking while rendering.
+            </change>
+            <change author="claude">
+                Editing a card in the browser now keeps its review history when the edit adds a line above the card's own `Q:`. The new card was previously matched by its exact starting line, so shifting it down orphaned its history while still reporting "Card saved."
+            </change>
+            <change author="claude">
+                A browser edit's hash migration now runs in a single transaction, and an edit that makes a card identical to an existing one is reported instead of failing with a server error part-way through. Previously such an edit left the file saved, the database half-migrated and the working tree dirty.
+            </change>
+            <change author="claude">
+                Two Undo requests arriving together (a double click, or key auto-repeat) now void one review instead of two. Undo carries the review it means to void, the same guard grades already had.
+            </change>
+            <change author="claude">
+                Sessions left open by a crash or restart are now closed once, when the server starts, instead of on every visit to a collection. Closing them per request stamped an end time on sessions that were still live in a concurrent `drill`, and re-reported the same sessions forever.
+            </change>
+            <change author="claude">
+                Database connections now wait for a lock held by another connection rather than failing immediately, and the drill stats page is rendered off the async runtime. Opening `/stats` while a grade was being written could return a server error.
+            </change>
+            <change author="claude">
+                Stats now count due cards from the parsed collection rather than the card table, which nothing populates before a collection's first drill. A collection that had never been drilled reported no cards due at all, and the due forecast counted orphaned rows that the per-deck column did not, so the two halves of the page disagreed.
+            </change>
             <change author="mstoeck3">
                 Session completion stats are now computed from the session's persisted reviews: distinct cards and total reviews (including repeats) are reported separately, and the slowest-card row shows the card's question preview instead of its deck name. (BUG-13)
             </change>
@@ -31,7 +64,7 @@
                 Serve mode now runs collection parsing and database work on a blocking thread pool instead of the async runtime, so one slow request no longer stalls every other request. (BUG-44)
             </change>
             <change author="mstoeck3">
-                Serve mode now detects URL slug collisions between collections (e.g. paths `a/b` and `a-b`, or a configured collection shadowing a HedgeDoc source) at config load and when adding a HedgeDoc source, failing with a message naming both colliding collections. Previously one collection was silently routed to the other's database. (BUG-43)
+                Serve mode now detects URL slug collisions between collections (e.g. paths `a/b` and `a-b`, or a configured collection shadowing a HedgeDoc source) at config load, at server startup, and when adding a HedgeDoc source, failing with a message naming both colliding collections. The startup check also covers sources configured in the config file and two source URLs that reduce to the same slug, neither of which was validated before. Previously one collection was silently routed to the other's database. (BUG-43)
             </change>
             <change author="claude">
                 HedgeDoc sources that fail to initialize at server startup (for example while the HedgeDoc instance is unreachable) are no longer silently dropped from the configuration. They now appear with an "Error" status, are retried on every sync, and are only removed when explicitly deleted. (BUG-40)
@@ -152,6 +185,12 @@
             </change>
         </fixed>
         <security>
+            <change author="claude">
+                The URL of an audio media reference is now HTML-escaped before being embedded in the audio element, alongside its title. Percent-encoding leaves the double-quote character intact, so a media file whose name contained a quote could close the `src` attribute and inject arbitrary attributes into the page.
+            </change>
+            <change author="claude">
+                `hashcards stats --format html` now writes to a randomly named, owner-only file instead of a fixed path in the shared temporary directory. The old fixed name let any other local user pre-create it as a symlink and have a file the invoking user can write truncated, and left review statistics world-readable at a guessable path.
+            </change>
             <change author="claude">
                 Titles of audio media references are now HTML-escaped before being embedded in the audio element, preventing HTML injection through a crafted markdown title.
             </change>

@@ -12,10 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::env::temp_dir;
 use std::fmt::Display;
 use std::fmt::Formatter;
-use std::fs::write;
+use std::io::Write;
+use std::path::PathBuf;
 
 use clap::ValueEnum;
 use serde::Serialize;
@@ -23,6 +23,7 @@ use serde::Serialize;
 use crate::cmd::stats_page::gather_stats;
 use crate::cmd::stats_page::render_stats_page;
 use crate::collection::Collection;
+use crate::error::ErrorReport;
 use crate::error::Fallible;
 use crate::types::date::Date;
 
@@ -47,8 +48,7 @@ pub fn print_stats(directory: Option<String>, format: StatsFormat) -> Fallible<(
     match format {
         StatsFormat::Html => {
             let html = stats_html(directory)?;
-            let path = temp_dir().join("hashcards-stats.html");
-            write(&path, html)?;
+            let path = write_stats_html(&html)?;
             println!("Stats page written to {}", path.display());
             if let Err(e) = open::that(&path) {
                 eprintln!("Could not open the browser automatically: {e}");
@@ -61,6 +61,28 @@ pub fn print_stats(directory: Option<String>, format: StatsFormat) -> Fallible<(
         }
     }
     Ok(())
+}
+
+/// Write the stats page to a fresh file in the temp directory and return its
+/// path.
+///
+/// The name is randomized and the file is created exclusively with owner-only
+/// permissions. A fixed name in a world-writable directory would let any
+/// other local user pre-create it as a symlink and have an arbitrary file the
+/// invoking user can write truncated, and would publish the collection's
+/// review statistics at a guessable path.
+fn write_stats_html(html: &str) -> Fallible<PathBuf> {
+    let file = tempfile::Builder::new()
+        .prefix("hashcards-stats-")
+        .suffix(".html")
+        .rand_bytes(12)
+        .tempfile()?;
+    let (mut file, path) = file.keep().map_err(|e| {
+        ErrorReport::new(format!("Could not write the stats page to a temporary file: {e}"))
+    })?;
+    file.write_all(html.as_bytes())?;
+    file.flush()?;
+    Ok(path)
 }
 
 /// Render the stats page as a standalone HTML document. The stylesheet is
@@ -108,6 +130,31 @@ fn get_stats(directory: Option<String>) -> Fallible<Stats> {
 mod tests {
     use super::*;
     use crate::helper::create_tmp_copy_of_test_directory;
+
+    /// Regression: the stats page must not land on a fixed, world-readable
+    /// path in a shared temp directory. A predictable name lets another
+    /// local user pre-create it as a symlink (truncating a file the invoking
+    /// user can write) and exposes review statistics to everyone on the box.
+    #[test]
+    fn test_stats_html_goes_to_a_private_unpredictable_file() -> Fallible<()> {
+        let first = write_stats_html("<p>one</p>")?;
+        let second = write_stats_html("<p>two</p>")?;
+
+        assert_ne!(first, second, "the file name must not be fixed");
+        assert_eq!(std::fs::read_to_string(&first)?, "<p>one</p>");
+        assert_eq!(std::fs::read_to_string(&second)?, "<p>two</p>");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&first)?.permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "stats page must be owner-only, was {mode:o}");
+        }
+
+        std::fs::remove_file(&first)?;
+        std::fs::remove_file(&second)?;
+        Ok(())
+    }
 
     #[test]
     fn test_display_stats_format() {

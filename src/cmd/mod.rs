@@ -20,3 +20,21 @@ pub mod serve;
 pub mod signals;
 pub mod stats;
 pub mod stats_page;
+
+use crate::error::ErrorReport;
+use crate::error::Fallible;
+
+/// Run a blocking closure on tokio's blocking pool.
+///
+/// Command handlers routinely parse decks, validate media and talk to SQLite.
+/// Doing that directly inside an async handler blocks a tokio worker for the
+/// whole operation, so it belongs here instead.
+pub async fn run_blocking<T, F>(f: F) -> Fallible<T>
+where
+    F: FnOnce() -> Fallible<T> + Send + 'static,
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(|e| ErrorReport::new(format!("Internal error: a background task failed: {e}")))?
+}

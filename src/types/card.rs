@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::ops::Range;
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -20,6 +21,7 @@ use maud::PreEscaped;
 use maud::html;
 
 use crate::error::Fallible;
+use crate::error::fail;
 use crate::markdown::MarkdownRenderConfig;
 use crate::markdown::markdown_to_html;
 use crate::markdown::markdown_to_html_inline;
@@ -113,11 +115,6 @@ impl Card {
 
     pub fn family_hash(&self) -> Option<CardHash> {
         self.content.family_hash()
-    }
-
-    /// See [`CardContent::legacy_hash`].
-    pub fn legacy_hash(&self) -> Option<CardHash> {
-        self.content.legacy_hash()
     }
 
     /// Return the absolute path of the file this card was parsed from.
@@ -223,26 +220,6 @@ impl CardContent {
         hasher.finalize()
     }
 
-    /// The hash this content had under the legacy (pre-v2) cloze scheme,
-    /// which mixed the deletion's byte offsets into the hash as
-    /// platform-dependent `usize::to_le_bytes()`. Used only to re-link rows
-    /// in databases written by older versions of hashcards — the
-    /// `to_le_bytes` here intentionally reproduces what this machine wrote.
-    /// `None` for basic cards, whose scheme never changed.
-    pub fn legacy_hash(&self) -> Option<CardHash> {
-        match &self {
-            CardContent::Basic { .. } => None,
-            CardContent::Cloze { text, start, end } => {
-                let mut hasher = Hasher::new();
-                hasher.update(b"Cloze");
-                hasher.update(text.as_bytes());
-                hasher.update(&start.to_le_bytes());
-                hasher.update(&end.to_le_bytes());
-                Some(hasher.finalize())
-            }
-        }
-    }
-
     /// All cloze cards derived from the same text have the same family hash.
     ///
     /// For basic cards, this is `None`.
@@ -266,9 +243,10 @@ impl CardContent {
                 }
             }
             CardContent::Cloze { text, start, end } => {
+                let range = deletion_range(text, *start, *end)?;
                 let marker = cloze_marker(text);
                 let mut text_bytes: Vec<u8> = text.as_bytes().to_owned();
-                text_bytes.splice(*start..*end + 1, marker.bytes());
+                text_bytes.splice(range, marker.bytes());
                 let text: String = String::from_utf8(text_bytes)?;
                 let text: String = markdown_to_html(config, &text)?;
                 let text: String =
@@ -289,12 +267,13 @@ impl CardContent {
                 }
             }
             CardContent::Cloze { text, start, end } => {
+                let range = deletion_range(text, *start, *end)?;
                 let marker = cloze_marker(text);
                 let mut text_bytes: Vec<u8> = text.as_bytes().to_owned();
-                let deleted_text: Vec<u8> = text_bytes[*start..*end + 1].to_owned();
+                let deleted_text: Vec<u8> = text_bytes[range.clone()].to_owned();
                 let deleted_text: String = String::from_utf8(deleted_text)?;
                 let deleted_text: String = markdown_to_html_inline(config, &deleted_text)?;
-                text_bytes.splice(*start..*end + 1, marker.bytes());
+                text_bytes.splice(range, marker.bytes());
                 let text: String = String::from_utf8(text_bytes)?;
                 let text = markdown_to_html(config, &text)?;
                 let text = text.replace(
@@ -308,6 +287,24 @@ impl CardContent {
         };
         Ok(html)
     }
+}
+
+/// Validate a cloze deletion's inclusive byte range against its text.
+///
+/// Positions are byte positions (see CLAUDE.md), so this is a byte-wise
+/// check. `hash()` cannot fail and degrades to an empty deletion, but the
+/// render paths return `Fallible` and must report a malformed range rather
+/// than index out of bounds.
+fn deletion_range(text: &str, start: usize, end: usize) -> Fallible<Range<usize>> {
+    if start > end || end >= text.len() {
+        return fail(format!(
+            "This cloze card has a deletion covering bytes {start}..={end}, \
+             which does not fit its {} bytes of text. The card is corrupt; \
+             re-saving the deck it came from will rebuild it.",
+            text.len()
+        ));
+    }
+    Ok(start..end + 1)
 }
 
 /// The number of occurrences of `deletion` that begin before byte position
@@ -342,6 +339,34 @@ mod tests {
         let a = CardContent::new_cloze("The capital of France is Paris", 0, 1);
         let b = CardContent::new_cloze("The capital of France is Paris", 0, 2);
         assert_eq!(a.family_hash(), b.family_hash());
+    }
+
+    /// A malformed cloze range must not panic. `hash()` already degrades to
+    /// an empty deletion; the render paths return `Fallible`, so they must
+    /// report the problem rather than index out of bounds.
+    #[test]
+    fn test_malformed_cloze_range_does_not_panic() -> Fallible<()> {
+        let coll_path = crate::helper::create_tmp_directory()?;
+        std::fs::write(coll_path.join("deck.md"), "")?;
+        let config = MarkdownRenderConfig {
+            resolver: crate::media::resolve::MediaResolverBuilder::new()
+                .with_collection_path(coll_path)?
+                .with_deck_path(std::path::PathBuf::from("deck.md"))?
+                .build()?,
+            file_url_prefix: "/file".to_string(),
+        };
+        // `end` is past the end of a 5-byte text.
+        let content = CardContent::new_cloze("hello", 0, 99);
+        let _ = content.hash();
+        assert!(content.html_front(&config).is_err());
+        assert!(content.html_back(&config).is_err());
+
+        // `start` past `end` is malformed too.
+        let inverted = CardContent::new_cloze("hello", 4, 1);
+        let _ = inverted.hash();
+        assert!(inverted.html_front(&config).is_err());
+        assert!(inverted.html_back(&config).is_err());
+        Ok(())
     }
 
     #[test]
@@ -504,26 +529,23 @@ mod tests {
         assert_eq!(content.hash(), hasher.finalize());
     }
 
-    /// BUG-27 regression: the old offset-based algorithm is no longer the
-    /// hash, but is still reproducible via legacy_hash() for DB migration.
+    /// BUG-27 regression: the cloze hash must not mix in byte offsets, which
+    /// were platform-dependent (`usize::to_le_bytes`).
     #[test]
     fn test_cloze_hash_no_longer_uses_offsets() {
         let content = CardContent::new_cloze("The capital of France is Paris", 25, 29);
-        let mut legacy: Vec<u8> = Vec::new();
-        legacy.extend_from_slice(b"Cloze");
-        legacy.extend_from_slice(b"The capital of France is Paris");
-        legacy.extend_from_slice(&25usize.to_le_bytes());
-        legacy.extend_from_slice(&29usize.to_le_bytes());
-        let legacy = CardHash::hash_bytes(&legacy);
-        assert_ne!(content.hash(), legacy);
-        assert_eq!(content.legacy_hash(), Some(legacy));
+        let mut offset_based: Vec<u8> = Vec::new();
+        offset_based.extend_from_slice(b"Cloze");
+        offset_based.extend_from_slice(b"The capital of France is Paris");
+        offset_based.extend_from_slice(&25usize.to_le_bytes());
+        offset_based.extend_from_slice(&29usize.to_le_bytes());
+        assert_ne!(content.hash(), CardHash::hash_bytes(&offset_based));
     }
 
-    /// Basic cards have no legacy hash: their scheme never changed.
+    /// The basic-card hash is unchanged: only the cloze scheme moved.
     #[test]
-    fn test_basic_card_has_no_legacy_hash() {
+    fn test_basic_card_hash_is_stable() {
         let content = CardContent::new_basic("Q", "A");
-        assert_eq!(content.legacy_hash(), None);
         // And the basic hash itself is unchanged from the old scheme.
         let mut hasher = Hasher::new();
         hasher.update(b"Basic");

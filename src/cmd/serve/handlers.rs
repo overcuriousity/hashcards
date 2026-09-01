@@ -35,6 +35,7 @@ use crate::cmd::drill::template::page_template;
 use crate::cmd::drill::template::page_template_with_script;
 use crate::cmd::serve::browse::build_deck_tree;
 use crate::cmd::serve::browse::render_browse_page;
+use crate::cmd::run_blocking;
 use crate::cmd::serve::config::ResolvedCollection;
 use crate::cmd::serve::git::clone_or_pull;
 use crate::cmd::serve::hedgedoc::build_combined_infos;
@@ -71,16 +72,6 @@ use crate::types::timestamp::Timestamp;
 /// Serve handlers parse collections from disk and touch SQLite; doing that
 /// on the async executor stalls every other request (BUG-44). Pattern as in
 /// `git.rs` (`spawn_blocking` in `spawn_sync_task`).
-pub(super) async fn run_blocking<T, F>(f: F) -> Fallible<T>
-where
-    F: FnOnce() -> Fallible<T> + Send + 'static,
-    T: Send + 'static,
-{
-    tokio::task::spawn_blocking(f)
-        .await
-        .map_err(|e| ErrorReport::new(format!("Internal error: a background task failed: {e}")))?
-}
-
 pub async fn collection_get_handler(
     State(state): State<AppState>,
     Path(slug): Path<String>,
@@ -154,15 +145,13 @@ fn collection_get_inner(state: &AppState, slug: &str, flash: Option<Flash>) -> F
             ))
         })?;
         let db = Database::new(db_path)?;
-        // FEAT-03: close session rows left open by a crash or restart. They
-        // cannot be resumed — the card queue only exists in memory — so
-        // close them (keeping all persisted reviews) and tell the user.
-        let interrupted_closed = db.close_dangling_sessions()?;
-        if interrupted_closed > 0 {
-            log::info!(
-                "Closed {interrupted_closed} interrupted session(s) for collection '{slug}'"
-            );
-        }
+        // FEAT-03: report the session rows the startup sweep closed. The
+        // sweep itself runs once, at startup: it cannot tell a crashed
+        // session from a live one, and `serve` may share a database with a
+        // running CLI `drill`, so doing it per request would stamp
+        // `ended_at` on a session that is still going. Taking the entry also
+        // means the notice appears once instead of on every visit.
+        let interrupted_closed = state.interrupted_closed.lock().remove(slug).unwrap_or(0);
         let bookmark_count = db.count_bookmarks()?;
         let html = render_browse_page(
             &rc.name,
@@ -308,7 +297,9 @@ fn collection_start_inner(
             }
         }
         // Finished sessions are replaced.
-        sessions.remove(slug);
+        if let Some(previous) = sessions.remove(slug) {
+            previous.lock().detach();
+        }
     }
 
     // Create the session outside the lock (may do filesystem/DB work).
@@ -449,6 +440,7 @@ pub async fn collection_post_handler(
 
 fn collection_post_inner(state: &AppState, slug: &str, form: FormData) -> Fallible<Redirect> {
     let action = form.action;
+    let submitted_undo: Option<i64> = form.undo_review;
     let submitted_card: Option<CardHash> = match form.card.as_deref() {
         Some(hex) => match CardHash::from_hex(hex) {
             Ok(hash) => Some(hash),
@@ -467,7 +459,8 @@ fn collection_post_inner(state: &AppState, slug: &str, form: FormData) -> Fallib
     if matches!(action, Action::Home) {
         let session = state.sessions.lock().remove(slug);
         if let Some(s) = session {
-            let s = s.lock();
+            let mut s = s.lock();
+            s.detach();
             if s.mutable.finished_at.is_none() {
                 if let Err(e) = s
                     .mutable
@@ -515,16 +508,16 @@ fn collection_post_inner(state: &AppState, slug: &str, form: FormData) -> Fallib
 
     // Re-check that this is still the session the map holds for `slug`: a
     // concurrent Home request may have removed it (and closed its DB row)
-    // while we were waiting for the session lock, or a concurrent start may
-    // have replaced it with a new drill. Take the map lock in its own scoped
-    // block so it is never held while the session lock is held for longer
-    // than this check (Home never holds the two locks together either, so
-    // this ordering can't deadlock against it).
-    let still_current = {
-        let map = state.sessions.lock();
-        matches!(map.get(slug), Some(current) if Arc::ptr_eq(&session, current))
-    };
-    if !still_current {
+    // while we were waiting for the session lock, a concurrent start may have
+    // replaced it with a new drill, or the idle sweep may have evicted it.
+    //
+    // This must not re-read the sessions map: taking the map lock here, while
+    // the session lock is held, inverts the global order (map, then session)
+    // that `evict_idle_sessions` and the landing page follow, and two
+    // `parking_lot` mutexes with no timeout deadlock the server outright.
+    // Every removal marks the session instead, under the map lock, so the
+    // flag is all we need.
+    if guard.is_detached() {
         return Ok(
             Flash::error("The session has ended, so that action was ignored.")
                 .redirect(&format!("/collection/{slug}")),
@@ -539,7 +532,7 @@ fn collection_post_inner(state: &AppState, slug: &str, form: FormData) -> Fallib
     // `handle_action` yields `ActionResult::Home`. Every action reaching here
     // leaves the session running; the only result needing dispatch is
     // `ContinueWithFlash`, which carries a one-shot message for the user.
-    let result = handle_action(&mut session.mutable, action, submitted_card)?;
+    let result = handle_action(&mut session.mutable, action, submitted_card, submitted_undo)?;
 
     // BUG-45: a finished session changes due counts; refresh them in the
     // background so the landing page is up to date.

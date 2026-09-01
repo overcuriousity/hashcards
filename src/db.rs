@@ -12,7 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::collections::HashSet;
+
+use std::time::Duration;
 
 use rusqlite::Connection;
 use rusqlite::Transaction;
@@ -76,17 +79,19 @@ pub struct Bookmark {
 /// migration number `migrate` knows how to apply.
 const SCHEMA_VERSION: i64 = 6;
 
-/// Cloze hash schemes, stored in meta('cloze_hash_scheme'). Scheme 1 mixed
-/// the deletion's byte offsets into the hash (platform-dependent); scheme 2
-/// hashes the deletion's content and occurrence index instead. The upgrade
-/// from 1 to 2 happens at collection load, not here: it needs parsed cards.
-pub const CLOZE_HASH_SCHEME_LEGACY: i64 = 1;
-pub const CLOZE_HASH_SCHEME_CURRENT: i64 = 2;
+/// How long a connection waits for a lock held by another connection before
+/// giving up with SQLITE_BUSY.
+const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 impl Database {
     pub fn new(database_path: &str) -> Fallible<Self> {
         let mut conn = Connection::open(database_path)?;
         conn.set_db_config(DbConfig::SQLITE_DBCONFIG_ENABLE_FKEY, true)?;
+        // `serve` opens a second connection per stats request while a drill
+        // session holds its own, and a CLI `drill` may share the file. Without
+        // a busy timeout, a read landing during another connection's write
+        // returns SQLITE_BUSY immediately and surfaces as a 500.
+        conn.busy_timeout(BUSY_TIMEOUT)?;
         {
             let tx = conn.transaction()?;
             if !probe_schema_exists(&tx)? {
@@ -388,20 +393,29 @@ impl Database {
 
     /// Count cards grouped by due date. `None` means never reviewed (due
     /// immediately). Ordered with `None` first, then ascending date.
-    pub fn count_cards_by_due_date(&self) -> Fallible<Vec<(Option<Date>, usize)>> {
-        let sql = "select due_date, count(*) from cards group by due_date order by due_date;";
+    /// The due date recorded for every card row, by hash. `None` means the
+    /// card exists but has never been reviewed.
+    ///
+    /// Callers that report on a collection should look each *parsed* card up
+    /// here rather than aggregating the table directly: a card the collection
+    /// contains may have no row yet (nothing inserts one before the first
+    /// drill), and a row may survive a card that was deleted from the deck.
+    pub fn due_dates(&self) -> Fallible<HashMap<CardHash, Option<Date>>> {
+        let sql = "select card_hash, due_date from cards;";
         let mut stmt = self.conn.prepare(sql)?;
         let rows = stmt.query_map([], |row| {
-            let due_date: Option<Date> = row.get(0)?;
-            let count: i64 = row.get(1)?;
-            Ok((due_date, count as usize))
+            let hash: CardHash = row.get(0)?;
+            let due: Option<Date> = row.get(1)?;
+            Ok((hash, due))
         })?;
-        let mut result = Vec::new();
+        let mut result = HashMap::new();
         for row in rows {
-            result.push(row?);
+            let (hash, due) = row?;
+            result.insert(hash, due);
         }
         Ok(result)
     }
+
 
     /// Count non-voided reviews per day from `since` (inclusive) onward,
     /// ascending. Days with no reviews are absent. Range-scans the indexed
@@ -462,62 +476,6 @@ impl Database {
         }
     }
 
-    /// Which cloze hash scheme this database's card hashes were written
-    /// with. See CLOZE_HASH_SCHEME_LEGACY / CLOZE_HASH_SCHEME_CURRENT.
-    pub fn cloze_hash_scheme(&self) -> Fallible<i64> {
-        let value: String = self.conn.query_row(
-            "select value from meta where key = 'cloze_hash_scheme';",
-            [],
-            |row| row.get(0),
-        )?;
-        match value.as_str() {
-            "1" => Ok(CLOZE_HASH_SCHEME_LEGACY),
-            "2" => Ok(CLOZE_HASH_SCHEME_CURRENT),
-            other => fail(format!(
-                "This database records an unknown cloze hash scheme ('{other}'). It was probably created by a newer version of hashcards. Please upgrade hashcards."
-            )),
-        }
-    }
-
-    /// One-time upgrade of legacy (offset-based) cloze card hashes to the
-    /// content-based scheme. For each (legacy, new) pair, rewrites the card
-    /// row's hash in place; the reviews and bookmarks referencing it follow
-    /// via ON UPDATE CASCADE, and the card's performance columns live in the
-    /// renamed row itself. Cards absent from `renames` are left untouched
-    /// (they are orphans, exactly as `hashcards orphans` understands them).
-    /// The whole upgrade — every rename plus the scheme stamp — is ONE
-    /// transaction, so a crash can never leave the database half-migrated.
-    /// Returns the number of cards renamed.
-    pub fn migrate_cloze_hashes(&mut self, renames: &[(CardHash, CardHash)]) -> Fallible<usize> {
-        let tx = self.conn.transaction()?;
-        let mut renamed: usize = 0;
-        for (legacy, new) in renames {
-            let target_exists: i64 = tx.query_row(
-                "select count(*) from cards where card_hash = ?;",
-                params![new],
-                |row| row.get(0),
-            )?;
-            if target_exists > 0 {
-                // The new hash is already present; leave the legacy row
-                // behind as an orphan rather than destroy either row.
-                continue;
-            }
-            let rows = tx.execute(
-                "update cards set card_hash = ? where card_hash = ?;",
-                params![new, legacy],
-            )?;
-            if rows == 1 {
-                renamed += 1;
-            }
-        }
-        tx.execute(
-            "update meta set value = '2' where key = 'cloze_hash_scheme';",
-            [],
-        )?;
-        tx.commit()?;
-        Ok(renamed)
-    }
-
     /// Close sessions left dangling by a crash or restart.
     ///
     /// `create_session` writes `ended_at = started_at` as a placeholder, so
@@ -534,6 +492,60 @@ impl Database {
         let sql = "update sessions set ended_at = coalesce((select max(reviewed_at) from reviews where reviews.session_id = sessions.session_id and reviews.voided = 0), started_at) where ended_at = started_at;";
         let rows = self.conn.execute(sql, [])?;
         Ok(rows)
+    }
+
+    /// Apply a web edit's hash migration in a single transaction.
+    ///
+    /// Each rename moves a card row in place; its reviews and bookmarks
+    /// follow via ON UPDATE CASCADE, and the performance columns ride along
+    /// in the row itself. A rename whose target hash already exists is
+    /// skipped rather than failing: the edited card is now byte-identical to
+    /// another card that has its own history, and neither row may be
+    /// destroyed. The old row stays behind as an orphan, exactly as
+    /// `hashcards orphans` understands one, and the caller reports it.
+    ///
+    /// Doing this one statement at a time left the database half-migrated
+    /// when a later rename failed, with the source file already rewritten.
+    ///
+    /// Returns the number of rows actually renamed.
+    pub fn apply_edit_migration(
+        &mut self,
+        renames: &[(CardHash, CardHash)],
+        fresh: &[CardHash],
+        now: Timestamp,
+    ) -> Fallible<usize> {
+        let tx = self.conn.transaction()?;
+        let exists = |tx: &Transaction, hash: &CardHash| -> Fallible<bool> {
+            let count: i64 = tx.query_row(
+                "select count(*) from cards where card_hash = ?;",
+                params![hash],
+                |row| row.get(0),
+            )?;
+            Ok(count > 0)
+        };
+        let insert = "insert into cards (card_hash, added_at, review_count) values (?, ?, 0) on conflict (card_hash) do nothing;";
+        let mut renamed: usize = 0;
+        for (old, new) in renames {
+            if exists(&tx, new)? {
+                // The new content already has history of its own.
+                continue;
+            }
+            if !exists(&tx, old)? {
+                // Nothing to carry over; just record the new card.
+                tx.execute(insert, params![new, now])?;
+                continue;
+            }
+            tx.execute(
+                "update cards set card_hash = ? where card_hash = ?;",
+                params![new, old],
+            )?;
+            renamed += 1;
+        }
+        for new in fresh {
+            tx.execute(insert, params![new, now])?;
+        }
+        tx.commit()?;
+        Ok(renamed)
     }
 
     /// Delete a card. The foreign-key cascade removes its reviews and
@@ -567,18 +579,6 @@ impl Database {
         Ok(())
     }
 
-    /// Rename a card hash in-place. Updates `reviews` and `bookmarks` via ON UPDATE CASCADE.
-    pub fn rename_card_hash(&self, old_hash: CardHash, new_hash: CardHash) -> Fallible<()> {
-        if !self.card_exists(old_hash)? {
-            return fail("Original card not found");
-        }
-        if self.card_exists(new_hash)? {
-            return fail("A card with the new content already exists");
-        }
-        let sql = "update cards set card_hash = ? where card_hash = ?;";
-        self.conn.execute(sql, params![new_hash, old_hash])?;
-        Ok(())
-    }
 
     /// Does a bookmark for this card hash exist?
     pub fn bookmark_exists(&self, card_hash: CardHash) -> Fallible<bool> {
@@ -873,21 +873,13 @@ fn probe_schema_exists(tx: &Transaction) -> Fallible<bool> {
     Ok(count > 0)
 }
 
-/// Migration 6: a generic key/value meta table. Databases that exist before
-/// this migration were written with the legacy (offset-based) cloze hash
-/// scheme, so they are stamped scheme 1; the load-time rehash upgrades them
-/// to scheme 2. Fresh databases are seeded at scheme 2 by schema.sql.
+/// Migration 6: a generic key/value meta table for schema-adjacent settings.
 fn migrate_add_meta(tx: &Transaction) -> Fallible<()> {
     tx.execute_batch(
         "create table if not exists meta (
             key text primary key,
             value text not null
         ) strict;",
-    )?;
-    tx.execute(
-        "insert into meta (key, value) values ('cloze_hash_scheme', '1')
-         on conflict (key) do nothing;",
-        [],
     )?;
     Ok(())
 }
@@ -1605,16 +1597,16 @@ mod tests {
         Ok(())
     }
 
-    /// rename_card_hash migrates the bookmark FK via ON UPDATE CASCADE.
+    /// A migrated rename carries the bookmark FK via ON UPDATE CASCADE.
     #[test]
-    fn test_rename_card_hash_cascades_bookmark() -> Fallible<()> {
-        let db = Database::new(":memory:")?;
+    fn test_edit_migration_cascades_bookmark() -> Fallible<()> {
+        let mut db = Database::new(":memory:")?;
         let old_hash = CardHash::hash_bytes(b"old");
         let new_hash = CardHash::hash_bytes(b"new");
         let now = Timestamp::now();
         db.insert_card(old_hash, now)?;
         db.insert_bookmark(old_hash, Some("note".to_string()), now)?;
-        db.rename_card_hash(old_hash, new_hash)?;
+        assert_eq!(db.apply_edit_migration(&[(old_hash, new_hash)], &[], now)?, 1);
         assert!(!db.bookmark_exists(old_hash)?);
         assert!(db.bookmark_exists(new_hash)?);
         let bm = db.get_bookmark(new_hash)?.unwrap();
@@ -1622,17 +1614,38 @@ mod tests {
         Ok(())
     }
 
-    /// rename_card_hash fails when the new hash already exists.
+    /// A rename whose target already has history is skipped, not an error:
+    /// destroying either row would lose review data. Both rows survive and
+    /// the caller sees that the rename did not happen.
     #[test]
-    fn test_rename_card_hash_conflict() -> Fallible<()> {
-        let db = Database::new(":memory:")?;
+    fn test_edit_migration_skips_existing_target() -> Fallible<()> {
+        let mut db = Database::new(":memory:")?;
         let hash_a = CardHash::hash_bytes(b"a");
         let hash_b = CardHash::hash_bytes(b"b");
         let now = Timestamp::now();
         db.insert_card(hash_a, now)?;
         db.insert_card(hash_b, now)?;
-        let result = db.rename_card_hash(hash_a, hash_b);
-        assert!(result.is_err());
+        assert_eq!(db.apply_edit_migration(&[(hash_a, hash_b)], &[], now)?, 0);
+        assert!(db.card_exists(hash_a)?);
+        assert!(db.card_exists(hash_b)?);
+        Ok(())
+    }
+
+    /// Renames and fresh inserts are applied together in one call, and a
+    /// fresh insert naming a hash the batch just renamed onto is a no-op
+    /// rather than a conflict.
+    #[test]
+    fn test_edit_migration_renames_and_inserts_together() -> Fallible<()> {
+        let mut db = Database::new(":memory:")?;
+        let a = CardHash::hash_bytes(b"a");
+        let b = CardHash::hash_bytes(b"b");
+        let c = CardHash::hash_bytes(b"c");
+        let now = Timestamp::now();
+        db.insert_card(a, now)?;
+        assert_eq!(db.apply_edit_migration(&[(a, b)], &[b, c], now)?, 1);
+        assert!(!db.card_exists(a)?);
+        assert!(db.card_exists(b)?);
+        assert!(db.card_exists(c)?);
         Ok(())
     }
 
@@ -1817,138 +1830,5 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn test_count_cards_by_due_date() -> Fallible<()> {
-        let db = Database::new(":memory:")?;
-        let now = Timestamp::now();
-        let a = CardHash::hash_bytes(b"a");
-        let b = CardHash::hash_bytes(b"b");
-        let c = CardHash::hash_bytes(b"c");
-        db.insert_card(a, now)?;
-        db.insert_card(b, now)?;
-        db.insert_card(c, now)?; // stays new: due_date null
-        let due = |d: &str| -> Fallible<Performance> {
-            Ok(Performance::Reviewed(ReviewedPerformance {
-                last_reviewed_at: now,
-                stability: 2.0,
-                difficulty: 2.0,
-                interval_raw: 1.0,
-                interval_days: 1,
-                due_date: Date::try_from(d.to_string())?,
-                review_count: 1,
-            }))
-        };
-        db.update_card_performance(a, due("2026-09-05")?)?;
-        db.update_card_performance(b, due("2026-09-01")?)?;
-        let by_due = db.count_cards_by_due_date()?;
-        assert_eq!(
-            by_due,
-            vec![
-                (None, 1),
-                (Some(Date::try_from("2026-09-01".to_string())?), 1),
-                (Some(Date::try_from("2026-09-05".to_string())?), 1),
-            ]
-        );
-        Ok(())
-    }
 
-    /// A freshly created database is already on the current cloze hash
-    /// scheme: no load-time rehash will ever run on it.
-    #[test]
-    fn test_fresh_db_has_current_cloze_hash_scheme() -> Fallible<()> {
-        let db = Database::new(":memory:")?;
-        assert_eq!(db.cloze_hash_scheme()?, CLOZE_HASH_SCHEME_CURRENT);
-        Ok(())
-    }
-
-    /// A pre-existing database is stamped with the LEGACY scheme by SQL
-    /// migration 6, so the load-time rehash knows it has work to do.
-    #[test]
-    fn test_legacy_db_is_stamped_with_legacy_scheme() -> Fallible<()> {
-        let dir = tempfile::TempDir::new().unwrap();
-        let path = dir.path().join("legacy.db");
-        let path = path.to_str().unwrap();
-        {
-            let conn = Connection::open(path)?;
-            conn.execute_batch(OLD_SCHEMA)?;
-        }
-        let db = Database::new(path)?;
-        assert_eq!(db.cloze_hash_scheme()?, CLOZE_HASH_SCHEME_LEGACY);
-        Ok(())
-    }
-
-    /// migrate_cloze_hashes rewrites the card row; reviews and bookmarks
-    /// follow via ON UPDATE CASCADE; performance columns ride along in the
-    /// cards row; rows with no rename entry are untouched; the scheme is
-    /// stamped current — all in one transaction.
-    #[test]
-    fn test_migrate_cloze_hashes_rewrites_all_references() -> Fallible<()> {
-        let mut db = Database::new(":memory:")?;
-        let legacy = CardHash::hash_bytes(b"legacy");
-        let new = CardHash::hash_bytes(b"new");
-        let orphan = CardHash::hash_bytes(b"orphan");
-        let now = Timestamp::now();
-        db.insert_card(legacy, now)?;
-        db.insert_card(orphan, now)?;
-        let session_id = db.create_session(now)?;
-        db.insert_review_and_update_performance(
-            session_id,
-            &sample_review(legacy, now, 2.0),
-            sample_performance(now, 2.0, 1),
-        )?;
-        db.insert_review_and_update_performance(
-            session_id,
-            &sample_review(orphan, now, 3.0),
-            sample_performance(now, 3.0, 1),
-        )?;
-        db.insert_bookmark(legacy, Some("note".to_string()), now)?;
-        // Simulate a legacy-scheme DB (a fresh one is stamped '2').
-        db.conn.execute(
-            "update meta set value = '1' where key = 'cloze_hash_scheme';",
-            [],
-        )?;
-
-        let renamed = db.migrate_cloze_hashes(&[(legacy, new)])?;
-        assert_eq!(renamed, 1);
-        assert_eq!(db.cloze_hash_scheme()?, CLOZE_HASH_SCHEME_CURRENT);
-        assert!(!db.card_exists(legacy)?);
-        assert!(db.card_exists(new)?);
-        // Performance followed the rename.
-        assert!(matches!(
-            db.get_card_performance(new)?,
-            Performance::Reviewed(_)
-        ));
-        // Reviews followed via the cascade; the orphan's review is untouched.
-        let hashes: Vec<CardHash> = db
-            .get_reviews_for_session(session_id)?
-            .iter()
-            .map(|r| r.data.card_hash)
-            .collect();
-        assert!(hashes.contains(&new));
-        assert!(!hashes.contains(&legacy));
-        assert!(hashes.contains(&orphan));
-        // The bookmark followed via the cascade.
-        assert!(db.get_bookmark(new)?.is_some());
-        // The card with no rename entry is untouched.
-        assert!(db.card_exists(orphan)?);
-        Ok(())
-    }
-
-    /// If the target hash already exists (only possible if the DB somehow
-    /// already saw the new scheme), the rename is skipped: no data loss,
-    /// the legacy row simply stays behind as an orphan.
-    #[test]
-    fn test_migrate_cloze_hashes_skips_when_target_exists() -> Fallible<()> {
-        let mut db = Database::new(":memory:")?;
-        let legacy = CardHash::hash_bytes(b"legacy");
-        let new = CardHash::hash_bytes(b"new");
-        let now = Timestamp::now();
-        db.insert_card(legacy, now)?;
-        db.insert_card(new, now)?;
-        let renamed = db.migrate_cloze_hashes(&[(legacy, new)])?;
-        assert_eq!(renamed, 0);
-        assert!(db.card_exists(legacy)?);
-        assert!(db.card_exists(new)?);
-        Ok(())
-    }
 }

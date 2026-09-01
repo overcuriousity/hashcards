@@ -65,6 +65,10 @@ pub struct FormData {
     /// Hex hash of the card the client believes it is grading. Grades whose
     /// hash does not match the head of the queue are ignored (BUG-06).
     pub card: Option<String>,
+    /// Id of the review the client believes Undo will void. An Undo naming a
+    /// review that is no longer the most recent one is a double submit and is
+    /// ignored, exactly as a stale grade is.
+    pub undo_review: Option<i64>,
 }
 
 /// Result of handling an action on the drill session.
@@ -112,7 +116,7 @@ async fn action_handler(state: ServerState, form: FormData) -> Fallible<Option<F
         None => None,
     };
     let mut mutable = state.mutable.lock();
-    let result = handle_action(&mut mutable, form.action, submitted_card)?;
+    let result = handle_action(&mut mutable, form.action, submitted_card, form.undo_review)?;
     match result {
         ActionResult::Shutdown => {
             // Release the lock before sending shutdown signal.
@@ -135,10 +139,16 @@ async fn action_handler(state: ServerState, form: FormData) -> Fallible<Option<F
 /// grade for a card that is no longer at the head of the queue (stale page,
 /// double submit, key auto-repeat) is ignored. `None` (e.g. non-grade
 /// actions) skips the check.
+///
+/// `submitted_undo` is the review id the client's Undo button carried, and
+/// plays the same role for Undo: two Undo POSTs racing a redirect would
+/// otherwise void two reviews and requeue two cards, discarding a grade the
+/// user meant to keep.
 pub fn handle_action(
     mutable: &mut MutableState,
     action: Action,
     submitted_card: Option<CardHash>,
+    submitted_undo: Option<i64>,
 ) -> Fallible<ActionResult> {
     match action {
         Action::Reveal => {
@@ -156,6 +166,21 @@ pub fn handle_action(
             let Some(last_review) = mutable.reviews.last().cloned() else {
                 return Ok(ActionResult::Continue);
             };
+            if let Some(submitted) = submitted_undo {
+                if submitted != last_review.review_id {
+                    // Stale Undo: the review it names has already been voided
+                    // (double submit or key auto-repeat). Undoing the review
+                    // behind it would silently discard a grade the user kept.
+                    log::debug!(
+                        "ignoring stale undo for review {submitted}: most recent is {}",
+                        last_review.review_id
+                    );
+                    return Ok(ActionResult::Ignored(
+                        "That undo was already applied, so the repeated undo was ignored."
+                            .to_string(),
+                    ));
+                }
+            }
             let hash: CardHash = last_review.card.hash();
             // If the session had finished, its DB row was closed; reopen it
             // in the same transaction as the void (BUG-04).
@@ -406,7 +431,7 @@ mod tests {
     #[test]
     fn test_undo_with_no_reviews_is_noop() {
         let mut mutable = make_mutable();
-        let result = handle_action(&mut mutable, Action::Undo, None).unwrap();
+        let result = handle_action(&mut mutable, Action::Undo, None, None).unwrap();
         assert!(matches!(result, ActionResult::Continue));
         assert!(mutable.reviews.is_empty());
         assert!(mutable.cards.is_empty());
@@ -430,7 +455,7 @@ mod tests {
     #[test]
     fn test_home_returns_home() {
         let mut mutable = make_mutable();
-        let result = handle_action(&mut mutable, Action::Home, None).unwrap();
+        let result = handle_action(&mut mutable, Action::Home, None, None).unwrap();
         assert!(matches!(result, ActionResult::Home));
     }
 
@@ -438,7 +463,7 @@ mod tests {
     fn test_shutdown_before_finish_flashes_explanation() {
         let mut mutable = make_mutable();
         assert!(mutable.finished_at.is_none());
-        let result = handle_action(&mut mutable, Action::Shutdown, None).unwrap();
+        let result = handle_action(&mut mutable, Action::Shutdown, None, None).unwrap();
         match result {
             ActionResult::ContinueWithFlash(flash) => {
                 assert_eq!(flash.kind, FlashKind::Error);
@@ -452,7 +477,7 @@ mod tests {
     fn test_reveal_sets_flag() {
         let mut mutable = make_mutable();
         assert!(!mutable.reveal);
-        let result = handle_action(&mut mutable, Action::Reveal, None).unwrap();
+        let result = handle_action(&mut mutable, Action::Reveal, None, None).unwrap();
         assert!(matches!(result, ActionResult::Continue));
         assert!(mutable.reveal);
     }
@@ -460,7 +485,7 @@ mod tests {
     #[test]
     fn test_end_finishes_session() {
         let mut mutable = make_mutable();
-        let result = handle_action(&mut mutable, Action::End, None).unwrap();
+        let result = handle_action(&mut mutable, Action::End, None, None).unwrap();
         assert!(matches!(result, ActionResult::SessionFinished));
         assert!(mutable.finished_at.is_some());
     }
@@ -487,7 +512,7 @@ mod tests {
             jitter: Jitter::none(),
             rng: TinyRng::from_seed(1),
         };
-        let result = handle_action(&mut mutable, Action::Good, None);
+        let result = handle_action(&mut mutable, Action::Good, None, None);
         assert!(result.is_err(), "the injected DB failure must propagate");
         // On error, in-memory state must be completely unchanged.
         assert_eq!(mutable.cards.len(), 1, "card must still be in the queue");
@@ -527,14 +552,14 @@ mod tests {
         let card_a = make_card("QA");
         let card_b = make_card("QB");
         let mut mutable = make_state_with_cards(vec![card_a.clone(), card_b.clone()]);
-        handle_action(&mut mutable, Action::Reveal, None).unwrap();
-        handle_action(&mut mutable, Action::Good, None).unwrap();
+        handle_action(&mut mutable, Action::Reveal, None, None).unwrap();
+        handle_action(&mut mutable, Action::Good, None, None).unwrap();
         assert_eq!(mutable.cards.len(), 1);
         assert_eq!(mutable.reviews.len(), 1);
         // Inject a DB failure into the undo: point the recorded review at a
         // nonexistent row, so the void update matches zero rows and errors.
         mutable.reviews[0].review_id = 999_999;
-        let result = handle_action(&mut mutable, Action::Undo, None);
+        let result = handle_action(&mut mutable, Action::Undo, None, None);
         assert!(result.is_err(), "the injected DB failure must propagate");
         // On error, in-memory state must be completely unchanged: no duplicate
         // card in the queue, undo stack intact.
@@ -553,7 +578,7 @@ mod tests {
         let card = make_card("Q1");
         let mut mutable = make_state_with_cards(vec![card.clone()]);
         // No Reveal has happened; a grade POST (e.g. from a stale page) arrives.
-        let result = handle_action(&mut mutable, Action::Good, None).unwrap();
+        let result = handle_action(&mut mutable, Action::Good, None, None).unwrap();
         assert!(
             matches!(result, ActionResult::Ignored(_)),
             "a grade without a prior reveal must be reported as ignored"
@@ -575,15 +600,15 @@ mod tests {
         let card_b = make_card("QB");
         let mut mutable = make_state_with_cards(vec![card_a.clone(), card_b.clone()]);
         // First grade of card A, carrying its hash: accepted.
-        handle_action(&mut mutable, Action::Reveal, None).unwrap();
-        let result = handle_action(&mut mutable, Action::Good, Some(card_a.hash())).unwrap();
+        handle_action(&mut mutable, Action::Reveal, None, None).unwrap();
+        let result = handle_action(&mut mutable, Action::Good, Some(card_a.hash()), None).unwrap();
         assert!(matches!(result, ActionResult::Continue));
         assert_eq!(mutable.cards.len(), 1);
         assert_eq!(mutable.cards[0].hash(), card_b.hash());
         // Card B is revealed, then the SAME grade POST for card A arrives again
         // (key auto-repeat / double submit): it must be a no-op.
-        handle_action(&mut mutable, Action::Reveal, None).unwrap();
-        let result = handle_action(&mut mutable, Action::Good, Some(card_a.hash())).unwrap();
+        handle_action(&mut mutable, Action::Reveal, None, None).unwrap();
+        let result = handle_action(&mut mutable, Action::Good, Some(card_a.hash()), None).unwrap();
         assert!(
             matches!(result, ActionResult::Ignored(_)),
             "a grade whose card hash does not match the queue head must be ignored"
@@ -598,6 +623,42 @@ mod tests {
                 .len(),
             1,
             "exactly one review row must exist"
+        );
+    }
+
+    /// Regression: two Undo POSTs racing the redirect must void one review,
+    /// not two. Without the guard the second Undo silently discards a grade
+    /// the user meant to keep and requeues a second card.
+    #[test]
+    fn test_double_undo_post_is_a_no_op() {
+        let card_a = make_card("QA");
+        let card_b = make_card("QB");
+        let mut mutable = make_state_with_cards(vec![card_a.clone(), card_b.clone()]);
+
+        // Grade both cards.
+        handle_action(&mut mutable, Action::Reveal, None, None).unwrap();
+        handle_action(&mut mutable, Action::Good, Some(card_a.hash()), None).unwrap();
+        handle_action(&mut mutable, Action::Reveal, None, None).unwrap();
+        handle_action(&mut mutable, Action::Good, Some(card_b.hash()), None).unwrap();
+        assert_eq!(mutable.reviews.len(), 2);
+        let latest = mutable.reviews[1].review_id;
+
+        // The page named review `latest`; the first Undo voids it.
+        let result = handle_action(&mut mutable, Action::Undo, None, Some(latest)).unwrap();
+        assert!(matches!(result, ActionResult::Continue));
+        assert_eq!(mutable.reviews.len(), 1);
+
+        // The duplicate POST carries the same review id and must be ignored,
+        // leaving card A's grade intact.
+        let result = handle_action(&mut mutable, Action::Undo, None, Some(latest)).unwrap();
+        assert!(
+            matches!(result, ActionResult::Ignored(_)),
+            "an undo naming an already-voided review must be ignored"
+        );
+        assert_eq!(
+            mutable.reviews.len(),
+            1,
+            "the second undo must not void card A's review"
         );
     }
 
@@ -626,12 +687,12 @@ mod tests {
             rng: TinyRng::from_seed(1),
         };
         // Grade the only card: the session finishes and the DB row is closed.
-        handle_action(&mut mutable, Action::Reveal, None).unwrap();
-        let result = handle_action(&mut mutable, Action::Good, None).unwrap();
+        handle_action(&mut mutable, Action::Reveal, None, None).unwrap();
+        let result = handle_action(&mut mutable, Action::Good, None, None).unwrap();
         assert!(matches!(result, ActionResult::SessionFinished));
         assert!(mutable.finished_at.is_some());
         // Undo must reopen the DB session row, not just the in-memory flag.
-        handle_action(&mut mutable, Action::Undo, None).unwrap();
+        handle_action(&mut mutable, Action::Undo, None, None).unwrap();
         assert!(mutable.finished_at.is_none());
         let sessions = mutable.db.get_all_sessions().unwrap();
         assert_eq!(sessions.len(), 1);
@@ -663,7 +724,7 @@ mod tests {
         let mut mutable = make_mutable();
         mutable.cards.push(sample_card());
         mutable.card_shown_at = Some(past_timestamp());
-        handle_action(&mut mutable, Action::Reveal, None)?;
+        handle_action(&mut mutable, Action::Reveal, None, None)?;
         assert!(mutable.reveal);
         assert_eq!(mutable.card_shown_at, Some(past_timestamp()));
         Ok(())

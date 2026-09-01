@@ -122,6 +122,9 @@ pub fn progress_text(first_graded: usize, total_cards: usize, repeats: usize) ->
 
 pub fn render_session_page(ctx: &RenderContext, mutable: &MutableState) -> Fallible<Markup> {
     let undo_disabled = mutable.reviews.is_empty();
+    // BUG: name the review Undo would void, so a double submit (two POSTs
+    // racing the redirect) voids one review rather than two.
+    let undo_review: Option<i64> = mutable.reviews.last().map(|r| r.review_id);
     let total_cards = ctx.total_cards;
     let (cards_done, repeats) = mutable.progress();
     let percent_done = (cards_done * 100).checked_div(total_cards).unwrap_or(100);
@@ -161,6 +164,9 @@ pub fn render_session_page(ctx: &RenderContext, mutable: &MutableState) -> Falli
         html! {
             form action=(form_action) method="post" {
                 input type="hidden" name="card" value=(card.hash().to_hex());
+                @if let Some(id) = undo_review {
+                    input type="hidden" name="undo_review" value=(id);
+                }
                 (undo_button(undo_disabled))
                 (bookmark_button(is_bookmarked))
                 div.spacer {}
@@ -174,6 +180,9 @@ pub fn render_session_page(ctx: &RenderContext, mutable: &MutableState) -> Falli
     } else {
         html! {
             form action=(form_action) method="post" {
+                @if let Some(id) = undo_review {
+                    input type="hidden" name="undo_review" value=(id);
+                }
                 (undo_button(undo_disabled))
                 (bookmark_button(is_bookmarked))
                 div.spacer {}

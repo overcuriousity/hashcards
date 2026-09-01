@@ -444,6 +444,18 @@ mod tests {
             body.contains("interrupted session"),
             "deck browser must report the closed interrupted session: {body}"
         );
+
+        // The sweep runs once, at startup, so the notice is reported once.
+        // Re-closing on every browse would also stamp `ended_at` on sessions
+        // that are still live in a concurrent CLI `drill`.
+        let second = reqwest::get(format!("http://{TEST_HOST}:{port}/collection/{slug}"))
+            .await?
+            .text()
+            .await?;
+        assert!(
+            !second.contains("interrupted session"),
+            "the notice must not reappear on every visit: {second}"
+        );
         Ok(())
     }
 

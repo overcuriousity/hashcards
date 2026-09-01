@@ -61,5 +61,3 @@ create table meta (
     key text primary key,
     value text not null
 ) strict;
-
-insert into meta (key, value) values ('cloze_hash_scheme', '2');

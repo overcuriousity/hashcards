@@ -30,6 +30,11 @@ pub struct AppState {
     pub config_path: Arc<Mutex<Option<PathBuf>>>,
     /// When the collection counts were last recomputed (BUG-45).
     pub counts_refreshed_at: Arc<Mutex<Option<Timestamp>>>,
+    /// Per-slug count of session rows closed by the startup sweep, waiting to
+    /// be reported to the user. The deck browser takes the entry the first
+    /// time it renders, so the notice is shown once rather than on every
+    /// visit (see `close_dangling_sessions`).
+    pub interrupted_closed: Arc<Mutex<HashMap<String, usize>>>,
 }
 
 pub struct CollectionInfo {
@@ -65,6 +70,17 @@ pub struct DrillSession {
     pub last_activity_at: Timestamp,
     pub answer_controls: AnswerControls,
     pub mutable: MutableState,
+    /// True once this session has been taken out of the sessions map (ended
+    /// via Home, evicted as idle, or replaced by a new drill).
+    ///
+    /// Request handlers need to know that the session they cloned out of the
+    /// map is still the one the map holds. Re-reading the map would mean
+    /// taking the map lock while holding the session lock, inverting the
+    /// global lock order (map, then session) that eviction and the landing
+    /// page follow -- a deadlock with no timeout. Whoever removes a session
+    /// from the map instead marks it here, under the session lock it already
+    /// has to take, and handlers just read the flag.
+    detached: bool,
 }
 
 impl DrillSession {
@@ -83,7 +99,21 @@ impl DrillSession {
             last_activity_at: session_started_at,
             answer_controls,
             mutable,
+            detached: false,
         }
+    }
+
+    /// Mark this session as removed from the sessions map.
+    ///
+    /// Callers must already hold the map lock, so that the mark and the
+    /// removal are seen together.
+    pub fn detach(&mut self) {
+        self.detached = true;
+    }
+
+    /// Has this session been removed from the sessions map?
+    pub fn is_detached(&self) -> bool {
+        self.detached
     }
 }
 
@@ -111,6 +141,7 @@ pub fn evict_idle_sessions(
             .collect();
         keys.into_iter()
             .filter_map(|k| map.remove(&k).map(|s| (k, s)))
+            .inspect(|(_, s)| s.lock().detach())
             .collect()
     };
     let mut evicted = Vec::new();
@@ -194,6 +225,30 @@ mod tests {
         let rows = db.get_all_sessions()?;
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].ended_at, now);
+        Ok(())
+    }
+
+    /// Eviction must mark the session detached, not merely drop it from the
+    /// map: a request handler that already cloned the `Arc` learns the
+    /// session is gone by reading this flag. Re-reading the map under the
+    /// session lock would invert the global lock order and deadlock.
+    #[test]
+    fn test_evicted_session_is_marked_detached() -> Fallible<()> {
+        let dir = tempdir()?;
+        let session = session_started_at("2026-01-01T10:00:00.000", dir.path())?;
+        // A handler holding its own clone, as one would across a request.
+        let handler_view = Arc::clone(&session);
+        assert!(!handler_view.lock().is_detached());
+
+        let sessions = Mutex::new(HashMap::from([("demo".to_string(), session)]));
+        let now = Timestamp::try_from("2026-01-02T11:00:00.000".to_string())?;
+        assert_eq!(evict_idle_sessions(&sessions, 1440, now), vec!["demo"]);
+
+        assert!(
+            handler_view.lock().is_detached(),
+            "evicted session must be observable as detached through an \
+             already-cloned handle"
+        );
         Ok(())
     }
 
