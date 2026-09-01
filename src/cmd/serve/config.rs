@@ -22,15 +22,62 @@ pub struct ServeConfig {
     pub git: Option<GitSection>,
     #[serde(default)]
     pub defaults: DefaultsSection,
+    #[serde(default)]
+    pub oidc: Option<OidcSection>,
     #[serde(rename = "collection", default)]
     pub collections: Vec<CollectionEntry>,
     #[serde(rename = "hedgedoc", default)]
     pub hedgedoc: Vec<HedgedocEntry>,
+    #[serde(rename = "deck", default)]
+    pub decks: Vec<CustomDeckEntry>,
 }
 
 #[derive(Deserialize, Serialize, Clone)]
 pub struct HedgedocEntry {
     pub url: String,
+    #[serde(default)]
+    pub owner: Option<String>,
+}
+
+/// A user-assembled deck: a named selection of decks drawn from any of the
+/// owner's collections, drilled as one session.
+///
+/// `members` are `"{collection-slug}/{deck-name}"` pairs. Reviews still go to
+/// each card's own collection database, so a card keeps exactly one schedule
+/// no matter how many custom decks include it.
+#[derive(Deserialize, Serialize, Clone)]
+pub struct CustomDeckEntry {
+    pub name: String,
+    pub members: Vec<String>,
+    #[serde(default)]
+    pub owner: Option<String>,
+}
+
+/// One `members` entry, split into the collection it names and the deck
+/// within it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeckMember {
+    pub collection_slug: String,
+    pub deck_name: String,
+}
+
+impl DeckMember {
+    /// Parse `"{slug}/{deck}"`. Deck names may contain `/` (they mirror the
+    /// file tree), so only the first separator splits.
+    pub fn parse(raw: &str) -> Option<Self> {
+        let (slug, deck) = raw.split_once('/')?;
+        if slug.is_empty() || deck.is_empty() {
+            return None;
+        }
+        Some(Self {
+            collection_slug: slug.to_string(),
+            deck_name: deck.to_string(),
+        })
+    }
+
+    pub fn encode(&self) -> String {
+        format!("{}/{}", self.collection_slug, self.deck_name)
+    }
 }
 
 #[derive(Deserialize)]
@@ -93,6 +140,39 @@ fn default_commit_author_email() -> String {
 }
 
 #[derive(Deserialize)]
+pub struct OidcSection {
+    pub issuer_url: String,
+    pub client_id: String,
+    pub client_secret: String,
+    pub external_url: String,
+    pub session_secret: String,
+    #[serde(default = "default_oidc_scopes")]
+    pub scopes: Vec<String>,
+}
+
+fn default_oidc_scopes() -> Vec<String> {
+    vec![
+        "openid".to_string(),
+        "email".to_string(),
+        "profile".to_string(),
+    ]
+}
+
+/// `Key::derive_from` (the cookie signing key) panics on anything shorter,
+/// so this is the minimum a config may declare.
+pub const MIN_SESSION_SECRET_BYTES: usize = 32;
+
+#[derive(Clone)]
+pub struct ResolvedOidc {
+    pub issuer_url: String,
+    pub client_id: String,
+    pub client_secret: String,
+    pub external_url: String,
+    pub session_secret: String,
+    pub scopes: Vec<String>,
+}
+
+#[derive(Deserialize)]
 pub struct DefaultsSection {
     #[serde(default = "default_answer_controls")]
     pub answer_controls: AnswerControlsConfig,
@@ -144,6 +224,8 @@ impl From<AnswerControlsConfig> for AnswerControls {
 pub struct CollectionEntry {
     pub name: String,
     pub path: String,
+    #[serde(default)]
+    pub owner: Option<String>,
 }
 
 impl CollectionEntry {
@@ -189,6 +271,8 @@ pub struct ResolvedCollection {
     pub slug: String,
     pub coll_dir: PathBuf,
     pub db_path: PathBuf,
+    /// Owning user's email (lowercased), when `[oidc]` is configured.
+    pub owner: Option<String>,
 }
 
 pub struct TempDirTracker {
@@ -232,10 +316,15 @@ pub struct ResolvedServeConfig {
     pub config_path: Option<PathBuf>,
     /// HedgeDoc source URLs loaded from the config file.
     pub hedgedoc_entries: Vec<HedgedocEntry>,
+    /// User-assembled cross-collection decks loaded from the config file.
+    pub custom_decks: Vec<CustomDeckEntry>,
     /// Idle drill sessions are evicted after this many minutes (0 = never).
     pub session_timeout_minutes: u64,
     /// Kept alive for the process lifetime so the OS temp directory is cleaned up.
     pub _temp_dir: Option<std::sync::Arc<TempDirTracker>>,
+    /// Set when `[oidc]` is configured. Gates every route except `/auth/*`
+    /// behind login and scopes collections/notes to their `owner`.
+    pub oidc: Option<ResolvedOidc>,
 }
 
 /// Reject collections whose names map to the same URL slug.
@@ -303,11 +392,137 @@ impl ResolvedServeConfig {
                     coll_dir: repo_dir.join(&entry.path),
                     db_path: db_dir.join(format!("{slug}.db")),
                     slug,
+                    owner: entry.owner.as_ref().map(|o| o.to_lowercase()),
                 })
             })
             .collect::<Fallible<Vec<ResolvedCollection>>>()?;
 
         check_slug_collisions(&collections)?;
+
+        let oidc = match config.oidc {
+            None => None,
+            Some(o) => {
+                if !o.scopes.iter().any(|s| s == "openid") || !o.scopes.iter().any(|s| s == "email")
+                {
+                    return fail(
+                        "configuration error: [oidc].scopes must include `openid` and `email` \
+                         (the email claim is required to match collections to their owner)",
+                    );
+                }
+                // `Key::derive_from` requires at least 32 bytes and panics
+                // below that, so a short secret has to be rejected here with
+                // a message the operator can act on.
+                if o.session_secret.len() < MIN_SESSION_SECRET_BYTES {
+                    return fail(format!(
+                        "configuration error: [oidc].session_secret must be at least {} bytes \
+                         long (it is {}); generate one with `openssl rand -hex 32`",
+                        MIN_SESSION_SECRET_BYTES,
+                        o.session_secret.len()
+                    ));
+                }
+                Some(ResolvedOidc {
+                    issuer_url: o.issuer_url,
+                    client_id: o.client_id,
+                    client_secret: o.client_secret,
+                    external_url: o.external_url,
+                    session_secret: o.session_secret,
+                    scopes: o.scopes,
+                })
+            }
+        };
+
+        // `[[hedgedoc]]` owners are matched against the lowercased email claim
+        // just like collection owners, so they are normalized the same way.
+        let hedgedoc_entries: Vec<HedgedocEntry> = config
+            .hedgedoc
+            .iter()
+            .map(|h| HedgedocEntry {
+                url: h.url.clone(),
+                owner: h.owner.as_ref().map(|o| o.to_lowercase()),
+            })
+            .collect();
+
+        let custom_decks: Vec<CustomDeckEntry> = config
+            .decks
+            .iter()
+            .map(|d| CustomDeckEntry {
+                name: d.name.clone(),
+                members: d.members.clone(),
+                owner: d.owner.as_ref().map(|o| o.to_lowercase()),
+            })
+            .collect();
+        for deck in &custom_decks {
+            if deck.name.trim().is_empty() {
+                return fail("configuration error: a [[deck]] entry has an empty `name`");
+            }
+            for raw in &deck.members {
+                if DeckMember::parse(raw).is_none() {
+                    return fail(format!(
+                        "configuration error: [[deck]] '{}' has the member `{raw}`, which is not \
+                         in `collection-slug/deck-name` form",
+                        deck.name
+                    ));
+                }
+            }
+        }
+
+        if oidc.is_some() {
+            for c in &collections {
+                if c.owner.is_none() {
+                    return fail(format!(
+                        "configuration error: [oidc] is enabled, so every collection must \
+                         declare an `owner`, but collection '{}' has none",
+                        c.name
+                    ));
+                }
+            }
+            for h in &hedgedoc_entries {
+                if h.owner.is_none() {
+                    return fail(format!(
+                        "configuration error: [oidc] is enabled, so every [[hedgedoc]] entry \
+                         must declare an `owner`, but the entry for '{}' has none",
+                        h.url
+                    ));
+                }
+            }
+            for d in &custom_decks {
+                if d.owner.is_none() {
+                    return fail(format!(
+                        "configuration error: [oidc] is enabled, so every [[deck]] entry must \
+                         declare an `owner`, but the deck '{}' has none",
+                        d.name
+                    ));
+                }
+            }
+        } else {
+            // Without `[oidc]` every request is unauthenticated, so `owner`
+            // can never match and the entry would simply be unreachable.
+            // Silently ignoring the field would hide that; refuse instead.
+            if let Some(c) = collections.iter().find(|c| c.owner.is_some()) {
+                return fail(format!(
+                    "configuration error: collection '{}' declares an `owner`, but [oidc] is \
+                     not configured, so nobody is ever logged in and the collection would be \
+                     unreachable. Add an [oidc] section or remove the `owner`",
+                    c.name
+                ));
+            }
+            if let Some(d) = custom_decks.iter().find(|d| d.owner.is_some()) {
+                return fail(format!(
+                    "configuration error: the [[deck]] entry '{}' declares an `owner`, but \
+                     [oidc] is not configured, so nobody is ever logged in and the deck would \
+                     be unreachable. Add an [oidc] section or remove the `owner`",
+                    d.name
+                ));
+            }
+            if let Some(h) = hedgedoc_entries.iter().find(|h| h.owner.is_some()) {
+                return fail(format!(
+                    "configuration error: the [[hedgedoc]] entry for '{}' declares an `owner`, \
+                     but [oidc] is not configured, so nobody is ever logged in and the note \
+                     would be unreachable. Add an [oidc] section or remove the `owner`",
+                    h.url
+                ));
+            }
+        }
 
         let git = match config.git {
             None => None,
@@ -337,9 +552,11 @@ impl ResolvedServeConfig {
             collections,
             data_dir: Some(data_dir),
             config_path: None,
-            hedgedoc_entries: config.hedgedoc,
+            hedgedoc_entries,
+            custom_decks,
             session_timeout_minutes: config.server.session_timeout_minutes,
             _temp_dir: None,
+            oidc,
         })
     }
 
@@ -372,6 +589,7 @@ impl ResolvedServeConfig {
                 slug,
                 coll_dir: dir,
                 db_path,
+                owner: None,
             });
         }
 
@@ -386,8 +604,10 @@ impl ResolvedServeConfig {
             data_dir: None,
             config_path: None,
             hedgedoc_entries: Vec::new(),
+            custom_decks: Vec::new(),
             session_timeout_minutes: default_session_timeout_minutes(),
             _temp_dir: None,
+            oidc: None,
         })
     }
 }
@@ -448,9 +668,9 @@ mod tests {
         // guaranteed-absolute path instead.
         let data_dir = current_dir()?.join("var-lib-hashcards");
         let toml = format!(
-            "[server]\ndata_dir = \"{}\"\n\n\
+            "[server]\ndata_dir = {:?}\n\n\
              [[collection]]\nname = \"Japanese\"\npath = \"japanese\"\n",
-            data_dir.display()
+            data_dir
         );
         let config: ServeConfig = toml::from_str(&toml)?;
         let resolved = ResolvedServeConfig::from_toml(config)?;
@@ -516,6 +736,278 @@ path = "beta"
             toml::from_str(toml_str).map_err(|e| ErrorReport::new(e.to_string()))?;
         let resolved = ResolvedServeConfig::from_toml(config)?;
         assert_eq!(resolved.collections.len(), 2);
+        Ok(())
+    }
+
+    /// When `[oidc]` is present, every collection must declare an `owner`.
+    #[test]
+    fn test_oidc_requires_owner_on_every_collection() -> Fallible<()> {
+        let data_dir = current_dir()?.join("var-lib-hashcards-oidc-owner-test");
+        let toml_str = format!(
+            "[server]\ndata_dir = {:?}\n\n\
+             [oidc]\n\
+             issuer_url = \"https://idp.example.com\"\n\
+             client_id = \"abc\"\n\
+             client_secret = \"secret\"\n\
+             external_url = \"https://hashcards.example.com\"\n\
+             session_secret = \"a-very-long-random-session-secret-value\"\n\n\
+             [[collection]]\n\
+             name = \"Japanese\"\n\
+             path = \"japanese\"\n",
+            data_dir
+        );
+        let config: ServeConfig = toml::from_str(&toml_str)?;
+        match ResolvedServeConfig::from_toml(config) {
+            Ok(_) => panic!("expected an error for a collection with no owner while [oidc] is set"),
+            Err(e) => assert!(
+                e.to_string().contains("Japanese") && e.to_string().contains("owner"),
+                "error should name the offending collection and mention `owner`: {e}"
+            ),
+        }
+        Ok(())
+    }
+
+    /// When `[oidc]` is present and every collection has an `owner`, config
+    /// loads cleanly and the owner is lowercased for case-insensitive
+    /// matching later.
+    #[test]
+    fn test_oidc_with_owner_on_every_collection_loads() -> Fallible<()> {
+        let data_dir = current_dir()?.join("var-lib-hashcards-oidc-owner-ok-test");
+        let toml_str = format!(
+            "[server]\ndata_dir = {:?}\n\n\
+             [oidc]\n\
+             issuer_url = \"https://idp.example.com\"\n\
+             client_id = \"abc\"\n\
+             client_secret = \"secret\"\n\
+             external_url = \"https://hashcards.example.com\"\n\
+             session_secret = \"a-very-long-random-session-secret-value\"\n\n\
+             [[collection]]\n\
+             name = \"Japanese\"\n\
+             path = \"japanese\"\n\
+             owner = \"Me@Example.com\"\n",
+            data_dir
+        );
+        let config: ServeConfig = toml::from_str(&toml_str)?;
+        let resolved = ResolvedServeConfig::from_toml(config)?;
+        assert_eq!(
+            resolved.collections[0].owner.as_deref(),
+            Some("me@example.com")
+        );
+        assert!(resolved.oidc.is_some());
+        Ok(())
+    }
+
+    /// Without `[oidc]`, an `owner`-less collection loads exactly as before
+    /// — the new field is inert.
+    #[test]
+    fn test_no_oidc_owner_field_is_inert() -> Fallible<()> {
+        let data_dir = current_dir()?.join("var-lib-hashcards-no-oidc-test");
+        let toml_str = format!(
+            "[server]\ndata_dir = {:?}\n\n\
+             [[collection]]\n\
+             name = \"Japanese\"\n\
+             path = \"japanese\"\n",
+            data_dir
+        );
+        let config: ServeConfig = toml::from_str(&toml_str)?;
+        let resolved = ResolvedServeConfig::from_toml(config)?;
+        assert!(resolved.oidc.is_none());
+        assert_eq!(resolved.collections[0].owner, None);
+        Ok(())
+    }
+
+    /// `Key::derive_from` panics below 32 bytes, so a short `session_secret`
+    /// must be rejected at config load with a message the operator can act
+    /// on rather than crashing the server at startup.
+    #[test]
+    fn test_short_session_secret_is_rejected() -> Fallible<()> {
+        let data_dir = current_dir()?.join("var-lib-hashcards-short-secret-test");
+        let toml_str = format!(
+            "[server]\ndata_dir = {:?}\n\n\
+             [oidc]\n\
+             issuer_url = \"https://idp.example.com\"\n\
+             client_id = \"abc\"\n\
+             client_secret = \"secret\"\n\
+             external_url = \"https://hashcards.example.com\"\n\
+             session_secret = \"hunter2\"\n\n\
+             [[collection]]\n\
+             name = \"Japanese\"\n\
+             path = \"japanese\"\n\
+             owner = \"me@example.com\"\n",
+            data_dir
+        );
+        let config: ServeConfig = toml::from_str(&toml_str)?;
+        match ResolvedServeConfig::from_toml(config) {
+            Ok(_) => panic!("expected an error for a session_secret shorter than 32 bytes"),
+            Err(e) => assert!(
+                e.to_string().contains("session_secret"),
+                "error should name the offending setting: {e}"
+            ),
+        }
+        Ok(())
+    }
+
+    /// An `owner` with no `[oidc]` section means nobody is ever logged in, so
+    /// the collection would silently 404 for everyone. Refuse to start.
+    #[test]
+    fn test_owner_without_oidc_is_rejected() -> Fallible<()> {
+        let data_dir = current_dir()?.join("var-lib-hashcards-owner-no-oidc-test");
+        let toml_str = format!(
+            "[server]\ndata_dir = {:?}\n\n\
+             [[collection]]\n\
+             name = \"Japanese\"\n\
+             path = \"japanese\"\n\
+             owner = \"me@example.com\"\n",
+            data_dir
+        );
+        let config: ServeConfig = toml::from_str(&toml_str)?;
+        match ResolvedServeConfig::from_toml(config) {
+            Ok(_) => panic!("expected an error for an `owner` without [oidc]"),
+            Err(e) => assert!(
+                e.to_string().contains("Japanese") && e.to_string().contains("oidc"),
+                "error should name the collection and mention [oidc]: {e}"
+            ),
+        }
+        Ok(())
+    }
+
+    /// `[[hedgedoc]]` owners are lowercased just like collection owners, so a
+    /// config written with mixed case still matches the OIDC email claim.
+    #[test]
+    fn test_hedgedoc_owner_is_lowercased() -> Fallible<()> {
+        let data_dir = current_dir()?.join("var-lib-hashcards-hedgedoc-owner-case-test");
+        let toml_str = format!(
+            "[server]\ndata_dir = {:?}\n\n\
+             [oidc]\n\
+             issuer_url = \"https://idp.example.com\"\n\
+             client_id = \"abc\"\n\
+             client_secret = \"secret\"\n\
+             external_url = \"https://hashcards.example.com\"\n\
+             session_secret = \"a-very-long-random-session-secret-value\"\n\n\
+             [[hedgedoc]]\n\
+             url = \"https://pad.example.com/abc\"\n\
+             owner = \"Me@Example.com\"\n",
+            data_dir
+        );
+        let config: ServeConfig = toml::from_str(&toml_str)?;
+        let resolved = ResolvedServeConfig::from_toml(config)?;
+        assert_eq!(
+            resolved.hedgedoc_entries[0].owner.as_deref(),
+            Some("me@example.com")
+        );
+        Ok(())
+    }
+
+    /// Windows CI regression: `data_dir` is interpolated into TOML with
+    /// `{:?}`, not `{}`, so a path containing backslashes stays a valid TOML
+    /// basic string. Formatting it raw produced `data_dir = "D:\a\..."`,
+    /// which the parser rejects as a bad escape. This test runs everywhere so
+    /// the fix cannot regress on a Linux-only run.
+    #[test]
+    fn test_windows_style_data_dir_survives_toml_formatting() -> Fallible<()> {
+        let data_dir = PathBuf::from(r"D:\a\hashcards-web\var-lib-hashcards");
+        let toml_str = format!(
+            "[server]\ndata_dir = {:?}\n\n\
+             [[collection]]\n\
+             name = \"Japanese\"\n\
+             path = \"japanese\"\n",
+            data_dir
+        );
+        let config: ServeConfig = toml::from_str(&toml_str)?;
+        assert_eq!(PathBuf::from(&config.server.data_dir), data_dir);
+        Ok(())
+    }
+
+    /// A `[[deck]]` member must be `collection-slug/deck-name`.
+    #[test]
+    fn test_malformed_deck_member_is_rejected() -> Fallible<()> {
+        let data_dir = current_dir()?.join("var-lib-hashcards-deck-member-test");
+        let toml_str = format!(
+            "[server]\ndata_dir = {:?}\n\n\
+             [[deck]]\n\
+             name = \"Mixed\"\n\
+             members = [\"no-separator\"]\n",
+            data_dir
+        );
+        let config: ServeConfig = toml::from_str(&toml_str)?;
+        match ResolvedServeConfig::from_toml(config) {
+            Ok(_) => panic!("expected an error for a malformed [[deck]] member"),
+            Err(e) => assert!(
+                e.to_string().contains("Mixed") && e.to_string().contains("no-separator"),
+                "error should name the deck and the bad member: {e}"
+            ),
+        }
+        Ok(())
+    }
+
+    /// With `[oidc]` on, every deck needs an owner, exactly like collections
+    /// and HedgeDoc notes.
+    #[test]
+    fn test_oidc_requires_owner_on_every_deck() -> Fallible<()> {
+        let data_dir = current_dir()?.join("var-lib-hashcards-deck-owner-test");
+        let toml_str = format!(
+            "[server]\ndata_dir = {:?}\n\n\
+             [oidc]\n\
+             issuer_url = \"https://idp.example.com\"\n\
+             client_id = \"abc\"\n\
+             client_secret = \"secret\"\n\
+             external_url = \"https://hashcards.example.com\"\n\
+             session_secret = \"a-very-long-random-session-secret-value\"\n\n\
+             [[deck]]\n\
+             name = \"Mixed\"\n\
+             members = [\"japanese/Verbs\"]\n",
+            data_dir
+        );
+        let config: ServeConfig = toml::from_str(&toml_str)?;
+        match ResolvedServeConfig::from_toml(config) {
+            Ok(_) => panic!("expected an error for a deck with no owner while [oidc] is set"),
+            Err(e) => assert!(
+                e.to_string().contains("Mixed") && e.to_string().contains("owner"),
+                "error should name the deck and mention `owner`: {e}"
+            ),
+        }
+        Ok(())
+    }
+
+    /// A deck owner is lowercased for case-insensitive matching, and a deck
+    /// with no `[oidc]` may not declare one at all.
+    #[test]
+    fn test_deck_owner_is_lowercased_and_rejected_without_oidc() -> Fallible<()> {
+        let data_dir = current_dir()?.join("var-lib-hashcards-deck-owner-case-test");
+        let with_oidc = format!(
+            "[server]\ndata_dir = {:?}\n\n\
+             [oidc]\n\
+             issuer_url = \"https://idp.example.com\"\n\
+             client_id = \"abc\"\n\
+             client_secret = \"secret\"\n\
+             external_url = \"https://hashcards.example.com\"\n\
+             session_secret = \"a-very-long-random-session-secret-value\"\n\n\
+             [[deck]]\n\
+             name = \"Mixed\"\n\
+             members = [\"japanese/Verbs\"]\n\
+             owner = \"Me@Example.com\"\n",
+            data_dir
+        );
+        let config: ServeConfig = toml::from_str(&with_oidc)?;
+        let resolved = ResolvedServeConfig::from_toml(config)?;
+        assert_eq!(
+            resolved.custom_decks[0].owner.as_deref(),
+            Some("me@example.com")
+        );
+
+        let without_oidc = format!(
+            "[server]\ndata_dir = {:?}\n\n\
+             [[deck]]\n\
+             name = \"Mixed\"\n\
+             members = [\"japanese/Verbs\"]\n\
+             owner = \"me@example.com\"\n",
+            data_dir
+        );
+        let config: ServeConfig = toml::from_str(&without_oidc)?;
+        assert!(
+            ResolvedServeConfig::from_toml(config).is_err(),
+            "an `owner` without [oidc] must be rejected for decks too"
+        );
         Ok(())
     }
 }

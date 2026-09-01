@@ -10,6 +10,7 @@ use maud::html;
 use chrono::Duration;
 
 use crate::cmd::drill::template::page_template;
+use crate::cmd::serve::auth::CurrentUser;
 use crate::cmd::serve::hedgedoc::build_combined_infos;
 use crate::cmd::serve::state::AppState;
 use crate::cmd::serve::state::CollectionInfo;
@@ -29,8 +30,10 @@ pub fn counts_are_stale(last: Option<Timestamp>, now: Timestamp, interval_minute
 pub async fn landing_handler(
     State(state): State<AppState>,
     Query(query): Query<HashMap<String, String>>,
+    current_user: Option<CurrentUser>,
 ) -> (StatusCode, Html<String>) {
     let flash = Flash::from_query(&query);
+    let owner = current_user.map(|u| u.email);
 
     // BUG-45: recompute counts when they are older than the poll interval.
     let interval_minutes = state
@@ -59,12 +62,28 @@ pub async fn landing_handler(
         }
     }
 
-    let collections = state.collections.read().await;
+    let all_collections = state.collections.read().await;
+    let collections: Vec<&CollectionInfo> = all_collections
+        .iter()
+        .filter(|c| c.owner.as_deref() == owner.as_deref())
+        .collect();
     let last_synced = *state.last_synced.lock();
     let hedgedoc_last_synced = *state.hedgedoc_last_synced.lock();
     let git_enabled = state.config.git.is_some();
-    let hedgedoc_count = state.hedgedoc_sources.lock().len();
+    let hedgedoc_count = state
+        .hedgedoc_sources
+        .lock()
+        .iter()
+        .filter(|s| s.collection.owner.as_deref() == owner.as_deref())
+        .count();
     let config_available = state.config.data_dir.is_some();
+    let custom_decks: Vec<(String, String)> = state
+        .custom_decks
+        .lock()
+        .iter()
+        .filter(|d| d.owner.as_deref() == owner.as_deref())
+        .map(|d| (d.name.clone(), d.slug.clone()))
+        .collect();
     // FEAT-03: surface running sessions so they can be resumed rather than
     // silently restarted.
     let resume: HashMap<String, usize> = {
@@ -87,8 +106,9 @@ pub async fn landing_handler(
         hedgedoc_count,
         hedgedoc_last_synced,
         config_available,
+        signed_in_as: owner.clone(),
     };
-    let html = render_landing_page(&collections, &resume, &status, flash);
+    let html = render_landing_page(&collections, &custom_decks, &resume, &status, flash);
     (StatusCode::OK, Html(html.into_string()))
 }
 
@@ -100,10 +120,14 @@ struct LandingStatus {
     hedgedoc_count: usize,
     hedgedoc_last_synced: Option<Timestamp>,
     config_available: bool,
+    /// The logged-in user's email, when `[oidc]` is configured. Drives the
+    /// only logout control in the UI.
+    signed_in_as: Option<String>,
 }
 
 fn render_landing_page(
-    collections: &[CollectionInfo],
+    collections: &[&CollectionInfo],
+    custom_decks: &[(String, String)],
     resume: &HashMap<String, usize>,
     status: &LandingStatus,
     flash: Option<Flash>,
@@ -114,11 +138,22 @@ fn render_landing_page(
         hedgedoc_count,
         hedgedoc_last_synced,
         config_available,
+        ref signed_in_as,
     } = *status;
     page_template(html! {
         @if let Some(f) = &flash { (f.render()) }
         div.landing {
             h1 { "hashcards" }
+            @if let Some(email) = signed_in_as {
+                div.sync-bar {
+                    span.sync-status { (format!("Signed in as {email}")) }
+                    // POST, so a third-party page cannot log the user out by
+                    // embedding the URL.
+                    form action="/auth/logout" method="post" style="display:inline" {
+                        input .sync-button.btn.btn-secondary type="submit" value="Log out";
+                    }
+                }
+            }
             @if git_enabled {
                 div.sync-bar {
                     span.sync-status {
@@ -130,6 +165,37 @@ fn render_landing_page(
                     }
                     form action="/sync" method="post" style="display:inline" {
                         input .sync-button.btn.btn-secondary type="submit" value="Sync Now";
+                    }
+                }
+            }
+            @if config_available {
+                div.sync-bar {
+                    span.sync-status {
+                        @if custom_decks.is_empty() {
+                            "No decks"
+                        } @else {
+                            (format!("{} deck(s)", custom_decks.len()))
+                        }
+                    }
+                    form action="/decks" method="get" style="display:inline" {
+                        input .sync-button.btn.btn-secondary type="submit" value="Manage Decks";
+                    }
+                }
+            }
+            @if !custom_decks.is_empty() {
+                h2 { "Decks" }
+                table.collection-table {
+                    tbody {
+                        @for (name, slug) in custom_decks {
+                            tr {
+                                td { (name) }
+                                td {
+                                    a.drill-link.btn.btn-primary href=(format!("/collection/{slug}")) {
+                                        "Open"
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }

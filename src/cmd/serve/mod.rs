@@ -1,6 +1,8 @@
+mod auth;
 mod bookmarks;
 mod browse;
 pub mod config;
+mod decks;
 mod edit;
 mod git;
 mod handlers;
@@ -47,12 +49,15 @@ mod tests {
                 slug: slug.to_string(),
                 coll_dir: coll_dir.clone(),
                 db_path: coll_dir.join("hashcards.db"),
+                owner: None,
             }],
             data_dir: None,
             config_path: None,
             hedgedoc_entries: Vec::new(),
+            custom_decks: Vec::new(),
             session_timeout_minutes: 1440,
             _temp_dir: None,
+            oidc: None,
         };
         spawn(async move { start_serve(config).await });
         wait_for_server(TEST_HOST, port).await?;
@@ -74,6 +79,28 @@ mod tests {
         let body = response.text().await?;
         assert!(body.contains("flash-success"), "body: {body}");
         assert!(body.contains("Hello world"));
+        Ok(())
+    }
+
+    /// Regression: with no [oidc] configured, /auth/login must not exist —
+    /// proves the auth routes and middleware are opt-in, not always-on.
+    #[tokio::test]
+    async fn test_auth_routes_absent_without_oidc_config() -> Fallible<()> {
+        let dir = tempdir()?;
+        let coll_dir = dir.path().to_path_buf();
+        write(coll_dir.join("Alpha.md"), "Q: What is 1+1?\nA: 2\n")?;
+        let slug = "test-collection";
+        let port = spawn_test_server(coll_dir, slug).await?;
+
+        let response = reqwest::Client::new()
+            .get(format!("http://{TEST_HOST}:{port}/auth/login"))
+            .send()
+            .await?;
+        assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND);
+
+        // And the collection page itself is still reachable with no login.
+        let response = reqwest::get(format!("http://{TEST_HOST}:{port}/collection/{slug}")).await?;
+        assert!(response.status().is_success());
         Ok(())
     }
 
@@ -100,12 +127,15 @@ mod tests {
                 slug: slug.clone(),
                 coll_dir: coll_dir.clone(),
                 db_path: coll_dir.join("hashcards.db"),
+                owner: None,
             }],
             data_dir: None,
             config_path: None,
             hedgedoc_entries: Vec::new(),
+            custom_decks: Vec::new(),
             session_timeout_minutes: 1440,
             _temp_dir: None,
+            oidc: None,
         };
 
         spawn(async move { start_serve(config).await });
@@ -226,8 +256,10 @@ mod tests {
             data_dir: Some(data_dir.clone()),
             config_path: Some(config_path.clone()),
             hedgedoc_entries: Vec::new(),
+            custom_decks: Vec::new(),
             session_timeout_minutes: 1440,
             _temp_dir: None,
+            oidc: None,
         };
         spawn(async move { start_serve(config).await });
         wait_for_server(TEST_HOST, port).await?;
@@ -275,12 +307,15 @@ mod tests {
                 slug: slug.clone(),
                 coll_dir: coll_dir.clone(),
                 db_path: coll_dir.join("hashcards.db"),
+                owner: None,
             }],
             data_dir: None,
             config_path: None,
             hedgedoc_entries: Vec::new(),
+            custom_decks: Vec::new(),
             session_timeout_minutes: 1440,
             _temp_dir: None,
+            oidc: None,
         };
         spawn(async move { start_serve(config).await });
         wait_for_server(TEST_HOST, port).await?;
@@ -352,12 +387,15 @@ mod tests {
                 slug: slug.clone(),
                 coll_dir: coll_dir.clone(),
                 db_path: db_path.clone(),
+                owner: None,
             }],
             data_dir: None,
             config_path: None,
             hedgedoc_entries: Vec::new(),
+            custom_decks: Vec::new(),
             session_timeout_minutes: 1440,
             _temp_dir: None,
+            oidc: None,
         };
         spawn(async move { start_serve(config).await });
         wait_for_server(TEST_HOST, port).await?;
@@ -426,12 +464,15 @@ mod tests {
                 slug: slug.clone(),
                 coll_dir: coll_dir.clone(),
                 db_path: db_path.clone(),
+                owner: None,
             }],
             data_dir: None,
             config_path: None,
             hedgedoc_entries: Vec::new(),
+            custom_decks: Vec::new(),
             session_timeout_minutes: 1440,
             _temp_dir: None,
+            oidc: None,
         };
         spawn(async move { start_serve(config).await });
         wait_for_server(TEST_HOST, port).await?;
@@ -482,12 +523,15 @@ mod tests {
                 slug: slug.clone(),
                 coll_dir: coll_dir.clone(),
                 db_path: coll_dir.join("hashcards.db"),
+                owner: None,
             }],
             data_dir: None,
             config_path: None,
             hedgedoc_entries: Vec::new(),
+            custom_decks: Vec::new(),
             session_timeout_minutes: 1440,
             _temp_dir: None,
+            oidc: None,
         };
 
         spawn(async move { start_serve(config).await });

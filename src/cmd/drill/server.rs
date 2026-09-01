@@ -54,6 +54,7 @@ use crate::cmd::drill::katex::katex_mhchem_js_handler;
 use crate::cmd::drill::post::post_handler;
 use crate::cmd::drill::state::MutableState;
 use crate::cmd::drill::state::ServerState;
+use crate::cmd::drill::state::SessionDbs;
 use crate::cmd::drill::stats::stats_handler;
 use crate::cmd::drill::template::icon_192_handler;
 use crate::cmd::drill::template::icon_512_handler;
@@ -194,8 +195,7 @@ pub async fn start_server(config: ServerConfig) -> Fallible<()> {
         session_started_at: config.session_started_at,
         mutable: Arc::new(Mutex::new(MutableState {
             reveal: false,
-            db,
-            session_id,
+            dbs: SessionDbs::single(db, session_id),
             cache,
             cards: due_today,
             reviews: Vec::new(),
@@ -253,13 +253,8 @@ pub async fn start_server(config: ServerConfig) -> Fallible<()> {
 /// interrupt loses nothing; this only stamps `ended_at` and counts the
 /// persisted (non-voided) reviews for the exit message.
 pub fn finalize_interrupted_session(mutable: &MutableState) -> Fallible<String> {
-    mutable
-        .db
-        .close_session(mutable.session_id, Timestamp::now())?;
-    let count = mutable
-        .db
-        .get_reviews_for_session(mutable.session_id)?
-        .len();
+    mutable.dbs.close_all(Timestamp::now())?;
+    let count = mutable.dbs.all_reviews()?.len();
     let noun = if count == 1 { "review" } else { "reviews" };
     Ok(format!("Session interrupted. {count} {noun} saved."))
 }
@@ -474,8 +469,7 @@ mod tests {
             Performance::Reviewed(performance),
         )?;
         let mutable = MutableState::new(
-            db,
-            session_id,
+            SessionDbs::single(db, session_id),
             Cache::new(),
             Vec::new(),
             Jitter::none(),
@@ -487,7 +481,7 @@ mod tests {
         assert_eq!(summary, "Session interrupted. 1 review saved.");
         // The session row is closed: get_all_sessions decodes ended_at as a
         // non-null Timestamp, so it only succeeds once the row is closed.
-        let sessions = mutable.db.get_all_sessions()?;
+        let sessions = mutable.dbs.primary().db.get_all_sessions()?;
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].session_id, session_id);
         Ok(())

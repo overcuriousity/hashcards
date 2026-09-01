@@ -7,6 +7,7 @@ use parking_lot::Mutex;
 use axum::Router;
 use axum::routing::get;
 use axum::routing::post;
+use axum_extra::extract::cookie::Key;
 use tokio::net::TcpListener;
 use tokio::sync::RwLock;
 
@@ -24,12 +25,24 @@ use crate::cmd::drill::katex::katex_mhchem_js_handler;
 use crate::cmd::drill::template::icon_192_handler;
 use crate::cmd::drill::template::icon_512_handler;
 use crate::cmd::drill::template::manifest_handler;
+use crate::cmd::serve::auth::build_oidc_runtime;
+use crate::cmd::serve::auth::callback_handler;
+use crate::cmd::serve::auth::login_handler;
+use crate::cmd::serve::auth::logout_handler;
+use crate::cmd::serve::auth::require_auth;
 use crate::cmd::serve::bookmarks::bookmark_delete_handler;
 use crate::cmd::serve::bookmarks::bookmark_list_handler;
 use crate::cmd::serve::bookmarks::bookmark_note_handler;
+use crate::cmd::serve::config::MIN_SESSION_SECRET_BYTES;
 use crate::cmd::serve::config::ResolvedCollection;
 use crate::cmd::serve::config::ResolvedGit;
+use crate::cmd::serve::config::ResolvedOidc;
 use crate::cmd::serve::config::ResolvedServeConfig;
+use crate::cmd::serve::decks::check_deck_slug_collisions;
+use crate::cmd::serve::decks::deck_add_handler;
+use crate::cmd::serve::decks::deck_delete_handler;
+use crate::cmd::serve::decks::decks_manage_handler;
+use crate::cmd::serve::decks::resolve_custom_decks;
 use crate::cmd::serve::edit::edit_get_handler;
 use crate::cmd::serve::edit::edit_post_handler;
 use crate::cmd::serve::git::clone_or_pull;
@@ -45,11 +58,8 @@ use crate::cmd::serve::handlers::hedgedoc_manage_handler;
 use crate::cmd::serve::handlers::hedgedoc_sync_now_handler;
 use crate::cmd::serve::handlers::sync_handler;
 use crate::cmd::serve::hedgedoc::build_combined_infos;
-use crate::cmd::serve::hedgedoc::build_note;
 use crate::cmd::serve::hedgedoc::build_source_lossless;
 use crate::cmd::serve::hedgedoc::check_startup_slug_collisions;
-use crate::cmd::serve::hedgedoc::error_note;
-use crate::cmd::serve::hedgedoc::source_uri_from_url;
 use crate::cmd::serve::hedgedoc::spawn_hedgedoc_sync_task;
 use crate::cmd::serve::landing::landing_handler;
 use crate::cmd::serve::state::AppState;
@@ -61,6 +71,7 @@ use crate::cmd::signals::terminate_signal;
 use crate::db::Database;
 use crate::error::ErrorReport;
 use crate::error::Fallible;
+use crate::error::fail;
 use crate::types::timestamp::Timestamp;
 
 /// How long a session's heartbeat must have been silent before the startup
@@ -139,6 +150,30 @@ fn sweep_dangling_sessions(
     counts
 }
 
+/// Derive the cookie signing key from `[oidc].session_secret`.
+///
+/// `Key::derive_from` panics on a secret shorter than
+/// `MIN_SESSION_SECRET_BYTES`. `ResolvedServeConfig::from_toml` rejects those
+/// already, but a config built any other way (tests, future callers) would
+/// otherwise reach the panic, so the length is re-checked here and reported
+/// as an ordinary error.
+fn session_key(oidc: Option<&ResolvedOidc>) -> Fallible<Key> {
+    match oidc {
+        // Never used when `[oidc]` is absent: the routes and middleware that
+        // read cookies are only registered when it is present.
+        None => Ok(Key::generate()),
+        Some(o) if o.session_secret.len() >= MIN_SESSION_SECRET_BYTES => {
+            Ok(Key::derive_from(o.session_secret.as_bytes()))
+        }
+        Some(o) => fail(format!(
+            "configuration error: [oidc].session_secret must be at least {} bytes long \
+             (it is {}); generate one with `openssl rand -hex 32`",
+            MIN_SESSION_SECRET_BYTES,
+            o.session_secret.len()
+        )),
+    }
+}
+
 pub async fn start_serve(config: ResolvedServeConfig) -> Fallible<()> {
     // Git mode: clone/pull repo and create data directories
     let sync_git = match &config.git {
@@ -174,30 +209,12 @@ pub async fn start_serve(config: ResolvedServeConfig) -> Fallible<()> {
     let data_dir: Option<PathBuf> = config.data_dir.clone();
 
     let hedgedoc_sources_init = if let Some(ref dd) = data_dir {
+        // One source per `[[hedgedoc]]` entry: notes are never grouped by
+        // host, so an entry can never inherit another entry's owner.
+        // build_source_lossless never drops an entry (BUG-40).
         let mut sources: Vec<HedgedocSource> = Vec::new();
         for entry in &config.hedgedoc_entries {
-            let existing_idx = source_uri_from_url(&entry.url)
-                .and_then(|source_uri| sources.iter().position(|s| s.source_uri == source_uri));
-            match existing_idx {
-                Some(idx) => {
-                    // Additional note for an already-built source. build_note
-                    // reports sync failures via `last_error` rather than
-                    // erroring, and even a hard error keeps the entry (BUG-40).
-                    let collection = sources[idx].collection.clone();
-                    match build_note(&entry.url, &collection).await {
-                        Ok(note) => sources[idx].notes.push(note),
-                        Err(e) => {
-                            log::error!("Failed to initialize HedgeDoc note {}: {e}", entry.url);
-                            sources[idx]
-                                .notes
-                                .push(error_note(&entry.url, e.to_string()));
-                        }
-                    }
-                }
-                // First note for this source (or unparseable URL):
-                // build_source_lossless never drops the entry.
-                None => sources.push(build_source_lossless(&entry.url, dd).await),
-            }
+            sources.push(build_source_lossless(&entry.url, dd, entry.owner.clone()).await);
         }
         sources
     } else {
@@ -222,6 +239,7 @@ pub async fn start_serve(config: ResolvedServeConfig) -> Fallible<()> {
             slug: c.slug.clone(),
             coll_dir: c.coll_dir.clone(),
             db_path: c.db_path.clone(),
+            owner: c.owner.clone(),
         })
         .collect();
 
@@ -239,8 +257,7 @@ pub async fn start_serve(config: ResolvedServeConfig) -> Fallible<()> {
     // Mark initial sync time only if at least one note was fetched without error.
     let hedgedoc_last_synced_init = if hedgedoc_sources_init
         .iter()
-        .flat_map(|s| s.notes.iter())
-        .any(|n| n.last_error.is_none())
+        .any(|s| s.note.last_error.is_none())
     {
         Some(Timestamp::now())
     } else {
@@ -261,17 +278,40 @@ pub async fn start_serve(config: ResolvedServeConfig) -> Fallible<()> {
     let hedgedoc_sources = Arc::new(Mutex::new(hedgedoc_sources_init));
     let hedgedoc_last_synced = Arc::new(Mutex::new(hedgedoc_last_synced_init));
 
+    // Discovery happens once at startup, not lazily on the first login
+    // attempt, so a broken [oidc] config fails fast with a clear error.
+    let oidc = match &config.oidc {
+        Some(o) => Some(Arc::new(build_oidc_runtime(o).await?)),
+        None => None,
+    };
+
+    // User-assembled decks are resolved once here; adds and deletes refresh
+    // the list in place.
+    let custom_decks = resolve_custom_decks(&config.custom_decks);
+    // Decks must not collide with a HedgeDoc note's slug either, since both
+    // are addressed through `/collection/{slug}`.
+    let all_slugged: Vec<ResolvedCollection> = config
+        .collections
+        .iter()
+        .cloned()
+        .chain(hedgedoc_sources.lock().iter().map(|s| s.collection.clone()))
+        .collect();
+    check_deck_slug_collisions(&custom_decks, &all_slugged)?;
+
     let state = AppState {
         config: config.clone(),
         collections: Arc::new(RwLock::new(collection_infos)),
         sessions: Arc::new(Mutex::new(HashMap::new())),
         last_synced: Arc::new(Mutex::new(last_synced)),
         hedgedoc_sources: hedgedoc_sources.clone(),
+        custom_decks: Arc::new(Mutex::new(custom_decks)),
         hedgedoc_last_synced: hedgedoc_last_synced.clone(),
         config_path,
         // Counts were just computed above, so the stamp starts fresh.
         counts_refreshed_at: Arc::new(Mutex::new(Some(Timestamp::now()))),
         interrupted_closed: Arc::new(Mutex::new(interrupted_closed)),
+        session_key: session_key(config.oidc.as_ref())?,
+        oidc,
     };
 
     spawn_session_eviction_task(state.sessions.clone(), config.session_timeout_minutes);
@@ -305,6 +345,9 @@ pub async fn start_serve(config: ResolvedServeConfig) -> Fallible<()> {
         .route("/hedgedoc/add", post(hedgedoc_add_handler))
         .route("/hedgedoc/delete", post(hedgedoc_delete_handler))
         .route("/hedgedoc/sync", post(hedgedoc_sync_now_handler))
+        .route("/decks", get(decks_manage_handler))
+        .route("/decks/add", post(deck_add_handler))
+        .route("/decks/delete", post(deck_delete_handler))
         .route("/collection/{slug}", get(collection_get_handler))
         .route("/collection/{slug}", post(collection_post_handler))
         .route("/collection/{slug}/start", post(collection_start_handler))
@@ -338,8 +381,26 @@ pub async fn start_serve(config: ResolvedServeConfig) -> Fallible<()> {
         .route(KATEX_MHCHEM_JS_URL, get(katex_mhchem_js_handler))
         .route("/katex/fonts/{*path}", get(katex_font_handler))
         .route(HLJS_CSS_URL, get(hljs_css_handler))
-        .route(HLJS_JS_URL, get(hljs_js_handler))
-        .with_state(state);
+        .route(HLJS_JS_URL, get(hljs_js_handler));
+
+    // `/auth/*` must NOT go through `require_auth` — gating the login route
+    // itself behind login is the classic OIDC redirect loop.
+    let app = if state.oidc.is_some() {
+        let auth_routes = Router::new()
+            .route("/auth/login", get(login_handler))
+            .route("/auth/callback", get(callback_handler))
+            // POST, not GET: a GET logout is triggerable by any third-party
+            // page embedding it as an image.
+            .route("/auth/logout", post(logout_handler));
+        app.layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            require_auth,
+        ))
+        .merge(auth_routes)
+    } else {
+        app
+    };
+    let app = app.with_state(state);
 
     log::debug!("Starting server on {bind}");
     let listener = TcpListener::bind(&bind).await?;

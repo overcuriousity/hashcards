@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use axum_extra::extract::cookie::Key;
 use chrono::Duration;
 use parking_lot::Mutex;
 
@@ -9,8 +10,10 @@ use tokio::sync::RwLock;
 
 use crate::cmd::drill::server::AnswerControls;
 use crate::cmd::drill::state::MutableState;
+use crate::cmd::serve::auth::OidcRuntime;
 use crate::cmd::serve::config::ResolvedCollection;
 use crate::cmd::serve::config::ResolvedServeConfig;
+use crate::cmd::serve::decks::ResolvedCustomDeck;
 use crate::types::timestamp::Timestamp;
 
 /// A drill session shared behind a per-slug lock. Handlers clone the `Arc`
@@ -26,6 +29,11 @@ pub struct AppState {
     pub sessions: Arc<Mutex<HashMap<String, SharedSession>>>,
     pub last_synced: Arc<Mutex<Option<Timestamp>>>,
     pub hedgedoc_sources: Arc<Mutex<Vec<HedgedocSource>>>,
+    /// User-assembled cross-collection decks, resolved at startup and
+    /// refreshed whenever one is added or deleted. A `parking_lot` mutex
+    /// like `hedgedoc_sources`: these are read from the blocking drill
+    /// paths, not only from async handlers.
+    pub custom_decks: Arc<Mutex<Vec<ResolvedCustomDeck>>>,
     pub hedgedoc_last_synced: Arc<Mutex<Option<Timestamp>>>,
     pub config_path: Arc<Mutex<Option<PathBuf>>>,
     /// When the collection counts were last recomputed (BUG-45).
@@ -35,6 +43,23 @@ pub struct AppState {
     /// time it renders, so the notice is shown once rather than on every
     /// visit (see `close_dangling_sessions`).
     pub interrupted_closed: Arc<Mutex<HashMap<String, usize>>>,
+    /// Signs the OIDC session and login-flow cookies. When `[oidc]` is not
+    /// configured this key is generated randomly at startup and never used
+    /// — keeping it non-optional avoids threading `Option` through every
+    /// cookie read/write, since the auth routes and middleware that use it
+    /// are only ever registered when `[oidc]` is configured.
+    pub session_key: Key,
+    /// Set when `[oidc]` is configured. Gates every route except `/auth/*`
+    /// behind login and scopes collections/notes to their `owner`.
+    pub oidc: Option<Arc<OidcRuntime>>,
+}
+
+/// Lets `axum_extra`'s `SignedCookieJar` extractor pull the signing key
+/// straight out of `AppState`.
+impl axum::extract::FromRef<AppState> for Key {
+    fn from_ref(state: &AppState) -> Key {
+        state.session_key.clone()
+    }
 }
 
 pub struct CollectionInfo {
@@ -42,14 +67,21 @@ pub struct CollectionInfo {
     pub slug: String,
     pub total_cards: usize,
     pub due_today: usize,
+    pub owner: Option<String>,
 }
 
-/// A HedgeDoc markdown endpoint used as a collection source.
+/// A single HedgeDoc note, used as a collection of its own.
+///
+/// Notes are deliberately *not* grouped by HedgeDoc host. Grouping made the
+/// host's first-seen `owner` the owner of every note on it, so on a shared
+/// HedgeDoc instance one user's note landed in another user's collection.
+/// One note, one collection, one database, one owner.
 #[derive(Clone)]
 pub struct HedgedocSource {
+    /// The scheme/host/port the note lives on. Display only.
     pub source_uri: String,
     pub collection: ResolvedCollection,
-    pub notes: Vec<HedgedocNote>,
+    pub note: HedgedocNote,
 }
 
 #[derive(Clone)]
@@ -148,15 +180,8 @@ pub fn evict_idle_sessions(
     for (slug, session) in expired {
         let session = session.lock();
         if session.mutable.finished_at.is_none() {
-            if let Err(e) = session
-                .mutable
-                .db
-                .close_session(session.mutable.session_id, now)
-            {
-                log::error!(
-                    "Failed to close evicted session {} for collection '{slug}': {e}",
-                    session.mutable.session_id
-                );
+            if let Err(e) = session.mutable.dbs.close_all(now) {
+                log::error!("Failed to close evicted session for collection '{slug}': {e}");
             }
         }
         evicted.push(slug);
@@ -172,6 +197,7 @@ mod tests {
 
     use super::*;
     use crate::cmd::drill::cache::Cache;
+    use crate::cmd::drill::state::SessionDbs;
     use crate::error::ErrorReport;
     use crate::error::Fallible;
     use crate::rng::TinyRng;
@@ -186,8 +212,7 @@ mod tests {
         let started_at = Timestamp::try_from(at.to_string())?;
         let session_id = db.create_session(started_at)?;
         let mutable = MutableState::new(
-            db,
-            session_id,
+            SessionDbs::single(db, session_id),
             Cache::new(),
             Vec::new(),
             Jitter::none(),

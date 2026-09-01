@@ -517,7 +517,71 @@ The `[server]` section also accepts:
 
 ### Single-user semantics
 
-Serve mode assumes a single user per collection. Drill sessions are keyed by collection, so two browsers (or tabs) pointed at the same collection share one drill session: both see the same card, and a grade from either advances the shared queue. There is no per-client session isolation and no authentication. If a session is abandoned, it is evicted after `session_timeout_minutes` of inactivity; every grade given before that is already persisted.
+Serve mode assumes a single user per collection. Drill sessions are keyed by collection, so two browsers (or tabs) pointed at the same collection share one drill session: both see the same card, and a grade from either advances the shared queue. There is no per-client session isolation. If a session is abandoned, it is evicted after `session_timeout_minutes` of inactivity; every grade given before that is already persisted.
+
+### Optional OIDC login and multi-user collections
+
+By default hashcards still has no authentication — see the warning above. Adding a `[oidc]` section to the config turns on login for every route except `/auth/*`, and requires every `[[collection]]` and `[[hedgedoc]]` entry to declare an `owner` (an email, matched case-insensitively against the OIDC `email` claim):
+
+```toml
+[oidc]
+issuer_url = "https://cloud.example.com/index.php/apps/oidc"
+client_id = "..."
+client_secret = "..."
+external_url = "https://hashcards.example.com"   # the public URL users reach the server through
+session_secret = "..."                            # at least 32 bytes of randomness; generate once, keep stable
+# scopes = ["openid", "email", "profile"]          # default shown; must include openid and email
+
+[[collection]]
+name = "Japanese"
+path = "japanese"
+owner = "me@example.com"
+
+[[collection]]
+name = "Mathematics"
+path = "math"
+owner = "someone-else@example.com"
+```
+
+Notes:
+
+- `external_url` is used to build the OIDC redirect URI (`{external_url}/auth/callback`) and is independent of `host`/`port` — set it to the address a browser actually reaches the server at, even behind a reverse proxy.
+- `session_secret` signs the login session cookie. It must be at least 32 bytes long (`openssl rand -hex 32`); config load fails otherwise. Rotating it logs out every user.
+- The session cookie is `HttpOnly` and `SameSite=Lax`, lasts 30 days (re-issued while you keep using it), and is marked `Secure` when `external_url` is HTTPS.
+- Config load fails with a clear error if `[oidc]` is present and any collection or HedgeDoc entry is missing `owner` — and also if an `owner` is declared *without* an `[oidc]` section, since nobody would ever be logged in to match it.
+- Each `[[hedgedoc]]` note is a collection of its own, owned by that entry's `owner` alone. Notes are never grouped by HedgeDoc host, so several users can take notes from one shared HedgeDoc instance — including the same note — without sharing a collection or a review database.
+- Log out from the button on the landing page. `/auth/logout` is a POST, so it cannot be triggered by a third-party page.
+- Adding a user is a config edit (add `owner = "their@email"` to their collections) plus a restart — there is no signup flow or admin UI, and no sharing: each collection is visible to exactly one owner. A logged-in user who owns nothing sees an empty landing page.
+- In-browser edits are committed to git as the logged-in user (name and email both set to their OIDC email) instead of the configured git default.
+- This is scoped to `serve` mode only; `hashcards drill` remains a local, unauthenticated, single-collection tool.
+
+### Decks: drilling across collections
+
+A *deck* is a saved selection of decks drawn from any of your collections,
+drilled together in one session. Manage them at `/decks`, or from the
+"Manage Decks" button on the landing page.
+
+```toml
+[[deck]]
+name = "Exam revision"
+members = ["japanese/Verbs", "math/Algebra"]
+# owner = "me@example.com"   # required when [oidc] is configured
+```
+
+`members` are `"{collection-slug}/{deck-name}"` pairs. Decks created through
+the web interface are written back to the config file, exactly as HedgeDoc
+sources are.
+
+A deck owns no cards and no database. Drilling one opens each contributing
+collection's own database and routes every review back to the collection the
+card came from, so **a card keeps exactly one schedule** however many decks
+include it — it never becomes due twice on schedules that drift apart.
+Deleting a deck removes only the selection; the cards and their review
+history are untouched.
+
+Per-collection features (stats, bookmarks, in-browser editing) stay on their
+own collections, since a deck spans several. With `[oidc]` on, a deck is
+visible only to its owner and may only include collections that owner holds.
 
 ### Defaults
 

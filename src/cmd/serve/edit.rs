@@ -16,6 +16,7 @@ use serde::Deserialize;
 
 use crate::cmd::drill::template::page_template;
 use crate::cmd::run_blocking;
+use crate::cmd::serve::auth::CurrentUser;
 use crate::cmd::serve::git::commit_edit;
 use crate::cmd::serve::handlers::find_collection;
 use crate::cmd::serve::state::AppState;
@@ -37,18 +38,25 @@ use crate::types::timestamp::Timestamp;
 pub async fn edit_get_handler(
     State(state): State<AppState>,
     AxumPath((slug, hash_hex)): AxumPath<(String, String)>,
+    current_user: Option<CurrentUser>,
 ) -> (StatusCode, Html<String>) {
+    let owner = current_user.map(|u| u.email);
     let state2 = state.clone();
     let slug2 = slug.clone();
     let hash2 = hash_hex.clone();
-    match run_blocking(move || edit_get_inner(&state2, &slug2, &hash2)).await {
+    match run_blocking(move || edit_get_inner(&state2, &slug2, &hash2, owner.as_deref())).await {
         Ok(html) => (StatusCode::OK, Html(html)),
         Err(e) => error_page(&slug, &hash_hex, &e.to_string()),
     }
 }
 
-fn edit_get_inner(state: &AppState, slug: &str, hash_hex: &str) -> Fallible<String> {
-    let rc = find_collection(state, slug)
+fn edit_get_inner(
+    state: &AppState,
+    slug: &str,
+    hash_hex: &str,
+    owner: Option<&str>,
+) -> Fallible<String> {
+    let rc = find_collection(state, slug, owner)
         .ok_or_else(|| ErrorReport::new(format!("Unknown collection: {slug}")))?;
 
     let hash = CardHash::from_hex(hash_hex)?;
@@ -147,12 +155,13 @@ pub struct EditOutcome {
 pub async fn edit_post_handler(
     State(state): State<AppState>,
     AxumPath((slug, hash_hex)): AxumPath<(String, String)>,
+    current_user: Option<CurrentUser>,
     Form(form): Form<EditForm>,
 ) -> Result<Redirect, (StatusCode, Html<String>)> {
     let state2 = state.clone();
     let slug2 = slug.clone();
     let hash2 = hash_hex.clone();
-    match run_blocking(move || edit_post_inner(&state2, &slug2, &hash2, form)).await {
+    match run_blocking(move || edit_post_inner(&state2, &slug2, &hash2, form, current_user)).await {
         Ok(outcome) => {
             log::debug!(
                 "Edit saved: {} card(s) migrated, {} skipped, committed={}",
@@ -184,8 +193,10 @@ fn edit_post_inner(
     slug: &str,
     hash_hex: &str,
     form: EditForm,
+    current_user: Option<CurrentUser>,
 ) -> Fallible<EditOutcome> {
-    let rc = find_collection(state, slug)
+    let owner = current_user.as_ref().map(|u| u.email.as_str());
+    let rc = find_collection(state, slug, owner)
         .ok_or_else(|| ErrorReport::new(format!("Unknown collection: {slug}")))?;
 
     if state.sessions.lock().contains_key(slug) {
@@ -272,12 +283,18 @@ fn edit_post_inner(
 
     // FEAT-04: every successful web edit becomes a git commit, so git sync
     // keeps working and the collection gets versioned card history for free.
-    let (author_name, author_email) = match state.config.git.as_ref() {
-        Some(g) => (
-            g.commit_author_name.as_str(),
-            g.commit_author_email.as_str(),
-        ),
-        None => ("hashcards web edit", "hashcards@localhost"),
+    // When OIDC is on, the commit is attributed to the logged-in user rather
+    // than the shared configured default, so git history shows who edited
+    // what.
+    let (author_name, author_email): (&str, &str) = match &current_user {
+        Some(user) => (user.email.as_str(), user.email.as_str()),
+        None => match state.config.git.as_ref() {
+            Some(g) => (
+                g.commit_author_name.as_str(),
+                g.commit_author_email.as_str(),
+            ),
+            None => ("hashcards web edit", "hashcards@localhost"),
+        },
     };
     let committed = commit_edit(&file_path, author_name, author_email).map_err(|e| {
         ErrorReport::new(format!(
@@ -558,10 +575,13 @@ mod tests {
             sessions: Arc::new(Mutex::new(HashMap::new())),
             last_synced: Arc::new(Mutex::new(None)),
             hedgedoc_sources: Arc::new(Mutex::new(Vec::new())),
+            custom_decks: std::sync::Arc::new(parking_lot::Mutex::new(Vec::new())),
             hedgedoc_last_synced: Arc::new(Mutex::new(None)),
             config_path: Arc::new(Mutex::new(None)),
             counts_refreshed_at: Arc::new(Mutex::new(None)),
             interrupted_closed: Arc::new(Mutex::new(HashMap::new())),
+            session_key: axum_extra::extract::cookie::Key::generate(),
+            oidc: None,
         })
     }
 
@@ -606,6 +626,7 @@ mod tests {
                 new_text: "Q: Two\nA: 2".to_string(),
                 mtime_ms: mtime.to_string(),
             },
+            None,
         )?;
 
         // The collision is reported, not raised as a 500.
@@ -657,6 +678,7 @@ mod tests {
                 new_text: "## Geography\nQ: Capital of France?\nA: Paris, France".to_string(),
                 mtime_ms: mtime.to_string(),
             },
+            None,
         )?;
         assert_eq!(
             outcome.migrated, 1,
@@ -713,6 +735,7 @@ mod tests {
                 new_text: "C: A [y] B [x]".to_string(),
                 mtime_ms: mtime.to_string(),
             },
+            None,
         )?;
         assert_eq!(outcome.migrated, 2);
         assert_eq!(outcome.skipped, 0);
@@ -804,6 +827,7 @@ mod tests {
                 new_text: "Q: capital of France?\nA: **Paris**".to_string(),
                 mtime_ms: mtime.to_string(),
             },
+            None,
         )?;
         assert!(outcome.committed, "edit was not committed");
 
@@ -828,6 +852,71 @@ mod tests {
             "pull failed after edit: {}",
             String::from_utf8_lossy(&pull.stderr)
         );
+        Ok(())
+    }
+
+    /// When `[oidc]` is on, an in-browser edit's git commit is attributed to
+    /// the logged-in user, not the configured default — a better audit
+    /// trail than a single shared "hashcards web edit" author.
+    #[test]
+    fn test_edit_commit_uses_current_user_as_author_when_oidc_is_on() -> Fallible<()> {
+        let dir = tempfile::tempdir()?;
+        let work = dir.path().join("work");
+        std::fs::create_dir_all(&work)?;
+
+        git(&work, &["init", "-b", "main"]);
+        std::fs::write(work.join(".gitignore"), "hashcards.db\n")?;
+        let file = work.join("Deck.md");
+        std::fs::write(&file, "Q: capital of France?\nA: Paris\n")?;
+        git(&work, &["add", "."]);
+        git(
+            &work,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-m",
+                "init",
+            ],
+        );
+
+        // Alice must own the collection for `find_collection` to resolve it
+        // under her session — an unowned collection would 404 for anyone
+        // authenticated, by design (see Task 8).
+        let mut state = test_state(&work)?;
+        {
+            let config = std::sync::Arc::get_mut(&mut state.config)
+                .ok_or_else(|| ErrorReport::new("config Arc unexpectedly shared"))?;
+            config.collections[0].owner = Some("alice@example.com".to_string());
+        }
+        let slug = state.config.collections[0].slug.clone();
+        let cards = parse_deck(&work)?.cards;
+        let hash_hex = cards[0].hash().to_hex();
+        let mtime = file_mtime_ms(&file)?;
+
+        let current_user = Some(CurrentUser {
+            email: "alice@example.com".to_string(),
+        });
+        let outcome = edit_post_inner(
+            &state,
+            &slug,
+            &hash_hex,
+            EditForm {
+                new_text: "Q: capital of France?\nA: **Paris**".to_string(),
+                mtime_ms: mtime.to_string(),
+            },
+            current_user,
+        )?;
+        assert!(outcome.committed, "edit was not committed");
+
+        let log = SyncCommand::new("git")
+            .args(["log", "-1", "--pretty=format:%an <%ae>"])
+            .current_dir(&work)
+            .output()?;
+        let author = String::from_utf8_lossy(&log.stdout);
+        assert_eq!(author, "alice@example.com <alice@example.com>");
         Ok(())
     }
 
