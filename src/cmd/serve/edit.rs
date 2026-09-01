@@ -161,8 +161,7 @@ pub async fn edit_post_handler(
     let state2 = state.clone();
     let slug2 = slug.clone();
     let hash2 = hash_hex.clone();
-    match run_blocking(move || edit_post_inner(&state2, &slug2, &hash2, form, current_user)).await
-    {
+    match run_blocking(move || edit_post_inner(&state2, &slug2, &hash2, form, current_user)).await {
         Ok(outcome) => {
             log::debug!(
                 "Edit saved: {} card(s) migrated, {} skipped, committed={}",

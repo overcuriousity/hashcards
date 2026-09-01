@@ -494,8 +494,7 @@ pub async fn collection_post_handler(
     let state2 = state.clone();
     let slug2 = slug.clone();
     let owner = current_user.map(|u| u.email);
-    match run_blocking(move || collection_post_inner(&state2, &slug2, form, owner.as_deref()))
-        .await
+    match run_blocking(move || collection_post_inner(&state2, &slug2, form, owner.as_deref())).await
     {
         Ok(redirect) => redirect,
         Err(e) => {

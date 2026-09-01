@@ -220,8 +220,7 @@ pub(super) async fn login_handler(
     for scope in &runtime.scopes {
         auth_request = auth_request.add_scope(scope.clone());
     }
-    let (authorize_url, csrf_token, nonce) =
-        auth_request.set_pkce_challenge(pkce_challenge).url();
+    let (authorize_url, csrf_token, nonce) = auth_request.set_pkce_challenge(pkce_challenge).url();
 
     let flow_state = OidcFlowState {
         csrf_token: csrf_token.secret().clone(),
@@ -262,9 +261,11 @@ pub(super) async fn callback_handler(
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "Missing authorization code").into_response())?;
     let returned_state = query.get("state").cloned().unwrap_or_default();
     if returned_state != flow.csrf_token {
-        return Err(
-            (StatusCode::BAD_REQUEST, "Login state mismatch — please try again").into_response(),
-        );
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Login state mismatch — please try again",
+        )
+            .into_response());
     }
 
     let http_client = openidconnect::reqwest::ClientBuilder::new()
@@ -292,7 +293,11 @@ pub(super) async fn callback_handler(
         .request_async(&http_client)
         .await
         .map_err(|e| {
-            (StatusCode::BAD_GATEWAY, format!("OIDC token exchange failed: {e}")).into_response()
+            (
+                StatusCode::BAD_GATEWAY,
+                format!("OIDC token exchange failed: {e}"),
+            )
+                .into_response()
         })?;
 
     let id_token = token_response.id_token().ok_or_else(|| {
@@ -305,7 +310,11 @@ pub(super) async fn callback_handler(
     let claims = id_token
         .claims(&runtime.client.id_token_verifier(), &Nonce::new(flow.nonce))
         .map_err(|e| {
-            (StatusCode::BAD_GATEWAY, format!("ID token validation failed: {e}")).into_response()
+            (
+                StatusCode::BAD_GATEWAY,
+                format!("ID token validation failed: {e}"),
+            )
+                .into_response()
         })?;
 
     let email = claims
@@ -523,7 +532,9 @@ mod tests {
 
     async fn mock_authorize_handler(
         axum::extract::State(state): axum::extract::State<MockIdpState>,
-        axum::extract::Query(query): axum::extract::Query<std::collections::HashMap<String, String>>,
+        axum::extract::Query(query): axum::extract::Query<
+            std::collections::HashMap<String, String>,
+        >,
     ) -> axum::response::Redirect {
         *state.last_nonce.lock().unwrap() = query.get("nonce").cloned();
         let redirect_uri = query.get("redirect_uri").cloned().unwrap_or_default();
@@ -725,7 +736,10 @@ mod tests {
         assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND);
 
         // The landing page lists only Alice's collection.
-        let response = client.get(format!("http://127.0.0.1:{port}/")).send().await?;
+        let response = client
+            .get(format!("http://127.0.0.1:{port}/"))
+            .send()
+            .await?;
         let body = response.text().await?;
         assert!(body.contains("Alice's Deck"), "body: {body}");
         assert!(!body.contains("Bob's Deck"), "body: {body}");
