@@ -64,12 +64,18 @@ pub struct CollectionInfo {
     pub owner: Option<String>,
 }
 
-/// A HedgeDoc markdown endpoint used as a collection source.
+/// A single HedgeDoc note, used as a collection of its own.
+///
+/// Notes are deliberately *not* grouped by HedgeDoc host. Grouping made the
+/// host's first-seen `owner` the owner of every note on it, so on a shared
+/// HedgeDoc instance one user's note landed in another user's collection.
+/// One note, one collection, one database, one owner.
 #[derive(Clone)]
 pub struct HedgedocSource {
+    /// The scheme/host/port the note lives on. Display only.
     pub source_uri: String,
     pub collection: ResolvedCollection,
-    pub notes: Vec<HedgedocNote>,
+    pub note: HedgedocNote,
 }
 
 #[derive(Clone)]

@@ -529,7 +529,7 @@ issuer_url = "https://cloud.example.com/index.php/apps/oidc"
 client_id = "..."
 client_secret = "..."
 external_url = "https://hashcards.example.com"   # the public URL users reach the server through
-session_secret = "..."                            # a long random string; generate once, keep stable
+session_secret = "..."                            # at least 32 bytes of randomness; generate once, keep stable
 # scopes = ["openid", "email", "profile"]          # default shown; must include openid and email
 
 [[collection]]
@@ -546,8 +546,11 @@ owner = "someone-else@example.com"
 Notes:
 
 - `external_url` is used to build the OIDC redirect URI (`{external_url}/auth/callback`) and is independent of `host`/`port` — set it to the address a browser actually reaches the server at, even behind a reverse proxy.
-- `session_secret` signs the login session cookie. Rotating it logs out every user.
-- Config load fails with a clear error if `[oidc]` is present and any collection or HedgeDoc entry is missing `owner`.
+- `session_secret` signs the login session cookie. It must be at least 32 bytes long (`openssl rand -hex 32`); config load fails otherwise. Rotating it logs out every user.
+- The session cookie is `HttpOnly` and `SameSite=Lax`, lasts 30 days (re-issued while you keep using it), and is marked `Secure` when `external_url` is HTTPS.
+- Config load fails with a clear error if `[oidc]` is present and any collection or HedgeDoc entry is missing `owner` — and also if an `owner` is declared *without* an `[oidc]` section, since nobody would ever be logged in to match it.
+- Each `[[hedgedoc]]` note is a collection of its own, owned by that entry's `owner` alone. Notes are never grouped by HedgeDoc host, so several users can take notes from one shared HedgeDoc instance — including the same note — without sharing a collection or a review database.
+- Log out from the button on the landing page. `/auth/logout` is a POST, so it cannot be triggered by a third-party page.
 - Adding a user is a config edit (add `owner = "their@email"` to their collections) plus a restart — there is no signup flow or admin UI, and no sharing: each collection is visible to exactly one owner. A logged-in user who owns nothing sees an empty landing page.
 - In-browser edits are committed to git as the logged-in user (name and email both set to their OIDC email) instead of the configured git default.
 - This is scoped to `serve` mode only; `hashcards drill` remains a local, unauthenticated, single-collection tool.

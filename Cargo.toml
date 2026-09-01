@@ -18,6 +18,7 @@ env_logger = "0.11.10"
 log = "0.4.29"
 maud = "0.27.0"
 open = "5.3.4"
+time = { version = "0.3", default-features = false }
 openidconnect = "4"
 parking_lot = "0.12"
 percent-encoding = "2.3.2"

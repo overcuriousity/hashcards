@@ -8,6 +8,7 @@ use axum_extra::extract::cookie::SameSite;
 use axum_extra::extract::cookie::SignedCookieJar;
 use serde::Deserialize;
 use serde::Serialize;
+use time::Duration as CookieDuration;
 
 use crate::cmd::serve::config::ResolvedOidc;
 use crate::cmd::serve::state::AppState;
@@ -37,7 +38,15 @@ struct SessionPayload {
     expires_at: String,
 }
 
-pub(super) fn set_session_cookie(jar: SignedCookieJar, email: &str) -> SignedCookieJar {
+/// `secure` marks the cookie `Secure`, so it is only ever sent over HTTPS.
+/// It is derived from the deployment's `external_url` scheme rather than
+/// hardcoded, because a local HTTP deployment could not log in at all with
+/// `Secure` always set.
+pub(super) fn set_session_cookie(
+    jar: SignedCookieJar,
+    email: &str,
+    secure: bool,
+) -> SignedCookieJar {
     let expires_at = Timestamp::now().minus_minutes(-SESSION_LIFETIME_MINUTES);
     let payload = SessionPayload {
         email: email.to_string(),
@@ -49,6 +58,12 @@ pub(super) fn set_session_cookie(jar: SignedCookieJar, email: &str) -> SignedCoo
     cookie.set_http_only(true);
     cookie.set_path("/");
     cookie.set_same_site(SameSite::Lax);
+    cookie.set_secure(secure);
+    // Without an explicit lifetime this is a browser-session cookie, which
+    // would log the user out on every browser restart no matter what the
+    // payload says. Both are derived from `SESSION_LIFETIME_MINUTES` at the
+    // same instant, so the cookie and its payload expire together.
+    cookie.set_max_age(CookieDuration::minutes(SESSION_LIFETIME_MINUTES));
     jar.add(cookie)
 }
 
@@ -81,7 +96,11 @@ pub(super) fn session_needs_renewal(jar: &SignedCookieJar) -> bool {
 }
 
 pub(super) fn clear_session_cookie(jar: SignedCookieJar) -> SignedCookieJar {
-    jar.remove(Cookie::from(SESSION_COOKIE))
+    // The removal cookie must carry the same `Path` as the one that was set,
+    // or the browser keeps the original.
+    let mut cookie = Cookie::from(SESSION_COOKIE);
+    cookie.set_path("/");
+    jar.remove(cookie)
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -98,7 +117,11 @@ struct FlowPayload {
     expires_at: String,
 }
 
-pub(super) fn set_flow_cookie(jar: SignedCookieJar, state: &OidcFlowState) -> SignedCookieJar {
+pub(super) fn set_flow_cookie(
+    jar: SignedCookieJar,
+    state: &OidcFlowState,
+    secure: bool,
+) -> SignedCookieJar {
     let expires_at = Timestamp::now().minus_minutes(-FLOW_LIFETIME_MINUTES);
     let payload = FlowPayload {
         state: state.clone(),
@@ -109,6 +132,8 @@ pub(super) fn set_flow_cookie(jar: SignedCookieJar, state: &OidcFlowState) -> Si
     cookie.set_http_only(true);
     cookie.set_path("/");
     cookie.set_same_site(SameSite::Lax);
+    cookie.set_secure(secure);
+    cookie.set_max_age(CookieDuration::minutes(FLOW_LIFETIME_MINUTES));
     jar.add(cookie)
 }
 
@@ -142,6 +167,33 @@ type DiscoveredCoreClient = openidconnect::core::CoreClient<
 pub struct OidcRuntime {
     client: DiscoveredCoreClient,
     scopes: Vec<openidconnect::Scope>,
+    /// True when `external_url` is HTTPS, in which case the session and flow
+    /// cookies are marked `Secure`.
+    secure_cookies: bool,
+}
+
+impl OidcRuntime {
+    pub(super) fn secure_cookies(&self) -> bool {
+        self.secure_cookies
+    }
+}
+
+/// A `return_to` target is only honoured when it is a path on this server.
+/// It must start with a single `/`; `//host` and `/\host` are read by
+/// browsers as protocol-relative URLs to another origin, and control
+/// characters cannot go in a `Location` header at all. Anything else falls
+/// back to the site root, so a crafted login link cannot bounce a user to an
+/// attacker's page immediately after a genuine login.
+fn safe_return_to(raw: &str) -> String {
+    let local = raw.starts_with('/')
+        && !raw.starts_with("//")
+        && !raw.starts_with("/\\")
+        && !raw.chars().any(|c| c.is_control());
+    if local {
+        raw.to_string()
+    } else {
+        "/".to_string()
+    }
 }
 
 pub(super) async fn build_oidc_runtime(config: &ResolvedOidc) -> Fallible<OidcRuntime> {
@@ -187,8 +239,13 @@ pub(super) async fn build_oidc_runtime(config: &ResolvedOidc) -> Fallible<OidcRu
     .set_redirect_uri(redirect_url);
 
     let scopes = config.scopes.iter().cloned().map(Scope::new).collect();
+    let secure_cookies = config.external_url.starts_with("https://");
 
-    Ok(OidcRuntime { client, scopes })
+    Ok(OidcRuntime {
+        client,
+        scopes,
+        secure_cookies,
+    })
 }
 
 pub(super) async fn login_handler(
@@ -209,7 +266,7 @@ pub(super) async fn login_handler(
     let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
     let return_to = query
         .get("return_to")
-        .cloned()
+        .map(|raw| safe_return_to(raw))
         .unwrap_or_else(|| "/".to_string());
 
     let mut auth_request = runtime.client.authorize_url(
@@ -228,7 +285,7 @@ pub(super) async fn login_handler(
         pkce_verifier: pkce_verifier.secret().clone(),
         return_to,
     };
-    let jar = set_flow_cookie(jar, &flow_state);
+    let jar = set_flow_cookie(jar, &flow_state, runtime.secure_cookies);
 
     Ok((jar, axum::response::Redirect::to(authorize_url.as_str())))
 }
@@ -330,8 +387,14 @@ pub(super) async fn callback_handler(
         .as_str()
         .to_lowercase();
 
-    let jar = set_session_cookie(jar, &email);
-    Ok((jar, axum::response::Redirect::to(&flow.return_to)))
+    let jar = set_session_cookie(jar, &email, runtime.secure_cookies);
+    // The flow cookie is signed, so `return_to` cannot have been tampered
+    // with since `login_handler` validated it — re-checking here keeps the
+    // guarantee local to the redirect that acts on it.
+    Ok((
+        jar,
+        axum::response::Redirect::to(&safe_return_to(&flow.return_to)),
+    ))
 }
 
 pub(super) async fn logout_handler(
@@ -353,15 +416,17 @@ pub(super) async fn logout_handler(
 const RETURN_TO_ENCODE_SET: &percent_encoding::AsciiSet = percent_encoding::NON_ALPHANUMERIC;
 
 pub(super) async fn require_auth(
+    axum::extract::State(state): axum::extract::State<AppState>,
     jar: SignedCookieJar,
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Response {
+    let secure = state.oidc.as_ref().is_some_and(|o| o.secure_cookies());
     match read_session(&jar) {
         Some(_) => {
             let jar = if session_needs_renewal(&jar) {
                 match read_session(&jar) {
-                    Some(user) => set_session_cookie(jar, &user.email),
+                    Some(user) => set_session_cookie(jar, &user.email, secure),
                     None => jar,
                 }
             } else {
@@ -427,7 +492,7 @@ mod tests {
     fn test_session_round_trip() {
         let key = Key::generate();
         let jar = SignedCookieJar::new(key);
-        let jar = set_session_cookie(jar, "me@example.com");
+        let jar = set_session_cookie(jar, "me@example.com", true);
         let user = read_session(&jar).expect("session should be readable immediately after set");
         assert_eq!(user.email, "me@example.com");
     }
@@ -456,7 +521,7 @@ mod tests {
             pkce_verifier: "verifier".to_string(),
             return_to: "/collection/japanese".to_string(),
         };
-        let jar = set_flow_cookie(jar, &state);
+        let jar = set_flow_cookie(jar, &state, true);
         let (_, taken) = take_flow_cookie(jar).expect("flow cookie should be readable");
         assert_eq!(taken.csrf_token, "csrf");
         assert_eq!(taken.return_to, "/collection/japanese");
@@ -823,7 +888,7 @@ mod tests {
         // Now logged in: /auth/logout's own response (not a followed
         // redirect target) must clear the session cookie.
         let response = client
-            .get(format!("http://127.0.0.1:{port}/auth/logout"))
+            .post(format!("http://127.0.0.1:{port}/auth/logout"))
             .send()
             .await?;
         let cookies: Vec<String> = response
@@ -840,5 +905,52 @@ mod tests {
             "expected /auth/logout to clear the hc_session cookie, got: {cookies:?}"
         );
         Ok(())
+    }
+
+    /// `return_to` must never carry the user off this server after a
+    /// successful login: an absolute or protocol-relative target is an open
+    /// redirect, and falls back to the site root.
+    #[test]
+    fn test_return_to_rejects_offsite_targets() {
+        assert_eq!(
+            safe_return_to("/collection/japanese"),
+            "/collection/japanese"
+        );
+        assert_eq!(safe_return_to("/a?b=c#d"), "/a?b=c#d");
+        assert_eq!(safe_return_to("https://evil.example/"), "/");
+        assert_eq!(safe_return_to("//evil.example/"), "/");
+        assert_eq!(safe_return_to("/\\evil.example/"), "/");
+        assert_eq!(safe_return_to("evil.example"), "/");
+        assert_eq!(safe_return_to(""), "/");
+        // Control characters cannot go in a `Location` header.
+        assert_eq!(safe_return_to("/ok\r\nSet-Cookie: x=1"), "/");
+    }
+
+    /// The session cookie must outlive the browser process: without an
+    /// explicit lifetime it is a session cookie and the user is logged out on
+    /// every restart, contradicting the 30-day sliding session.
+    #[test]
+    fn test_session_cookie_carries_its_lifetime_and_secure_flag() {
+        let key = Key::generate();
+        let jar = SignedCookieJar::new(key);
+        let jar = set_session_cookie(jar, "me@example.com", true);
+        let cookie = jar.get(SESSION_COOKIE).expect("cookie was just set");
+        assert_eq!(
+            cookie.max_age(),
+            Some(CookieDuration::minutes(SESSION_LIFETIME_MINUTES))
+        );
+        assert_eq!(cookie.secure(), Some(true));
+        assert_eq!(cookie.http_only(), Some(true));
+    }
+
+    /// A plain-HTTP deployment must not set `Secure`, or the cookie is never
+    /// sent back and login loops forever.
+    #[test]
+    fn test_session_cookie_is_not_secure_over_plain_http() {
+        let key = Key::generate();
+        let jar = SignedCookieJar::new(key);
+        let jar = set_session_cookie(jar, "me@example.com", false);
+        let cookie = jar.get(SESSION_COOKIE).expect("cookie was just set");
+        assert_ne!(cookie.secure(), Some(true));
     }
 }

@@ -70,7 +70,12 @@ pub async fn landing_handler(
     let last_synced = *state.last_synced.lock();
     let hedgedoc_last_synced = *state.hedgedoc_last_synced.lock();
     let git_enabled = state.config.git.is_some();
-    let hedgedoc_count = state.hedgedoc_sources.lock().len();
+    let hedgedoc_count = state
+        .hedgedoc_sources
+        .lock()
+        .iter()
+        .filter(|s| s.collection.owner.as_deref() == owner.as_deref())
+        .count();
     let config_available = state.config.data_dir.is_some();
     // FEAT-03: surface running sessions so they can be resumed rather than
     // silently restarted.
@@ -94,6 +99,7 @@ pub async fn landing_handler(
         hedgedoc_count,
         hedgedoc_last_synced,
         config_available,
+        signed_in_as: owner.clone(),
     };
     let html = render_landing_page(&collections, &resume, &status, flash);
     (StatusCode::OK, Html(html.into_string()))
@@ -107,6 +113,9 @@ struct LandingStatus {
     hedgedoc_count: usize,
     hedgedoc_last_synced: Option<Timestamp>,
     config_available: bool,
+    /// The logged-in user's email, when `[oidc]` is configured. Drives the
+    /// only logout control in the UI.
+    signed_in_as: Option<String>,
 }
 
 fn render_landing_page(
@@ -121,11 +130,22 @@ fn render_landing_page(
         hedgedoc_count,
         hedgedoc_last_synced,
         config_available,
+        ref signed_in_as,
     } = *status;
     page_template(html! {
         @if let Some(f) = &flash { (f.render()) }
         div.landing {
             h1 { "hashcards" }
+            @if let Some(email) = signed_in_as {
+                div.sync-bar {
+                    span.sync-status { (format!("Signed in as {email}")) }
+                    // POST, so a third-party page cannot log the user out by
+                    // embedding the URL.
+                    form action="/auth/logout" method="post" style="display:inline" {
+                        input .sync-button.btn.btn-secondary type="submit" value="Log out";
+                    }
+                }
+            }
             @if git_enabled {
                 div.sync-bar {
                     span.sync-status {

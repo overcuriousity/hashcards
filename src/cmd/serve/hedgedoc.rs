@@ -51,9 +51,25 @@ pub fn source_display_name(source_uri: &str) -> String {
     source_uri.to_string()
 }
 
-/// Build the collection slug for a HedgeDoc source URI.
-pub fn slug_for_source_uri(source_uri: &str) -> String {
-    format!("hedgedoc-{}", slugify(source_uri))
+/// Build the collection slug for a HedgeDoc note.
+///
+/// Every note is a collection of its own, so the slug is derived from the
+/// note URL, never from the host. `owner` is folded into the hash as well:
+/// two users may legitimately add the same public note, and they must not
+/// end up sharing a slug — and therefore a database.
+pub fn slug_for_note(url: &str, owner: Option<&str>) -> String {
+    let note_id = note_id_from_url(url).unwrap_or_else(|| url.to_string());
+    let stem = slugify(&note_id);
+    let stem = if stem.is_empty() {
+        "note"
+    } else {
+        stem.as_str()
+    };
+    let keyed = match owner {
+        Some(owner) => format!("{owner}\n{url}"),
+        None => url.to_string(),
+    };
+    format!("hedgedoc-{}-{}", stem, note_id_disambiguator(&keyed))
 }
 
 /// Return the configured collection whose slug collides with `slug`, if any.
@@ -86,7 +102,7 @@ pub fn check_startup_slug_collisions(
     }
     for source in sources {
         let slug = source.collection.slug.as_str();
-        let owner = format!("HedgeDoc source '{}'", source.source_uri);
+        let owner = format!("HedgeDoc note '{}'", source.note.url);
         if let Some(first) = seen.get(slug) {
             return fail(format!(
                 "configuration error: {first} and {owner} both map to the URL slug '{slug}'. Rename the collection or use a different HedgeDoc source URL so their slugs differ."
@@ -323,24 +339,45 @@ fn frontmatter_title(markdown: &str) -> Option<String> {
     None
 }
 
-/// Build a `ResolvedCollection` for a HedgeDoc source given its note ID and
-/// the resolved data directory.
+/// Build a `ResolvedCollection` for a single HedgeDoc note.
+///
+/// The slug (and with it the note directory and database) is unique per
+/// (note URL, owner), so nothing is ever shared between users.
 pub fn resolved_collection(
-    source_uri: &str,
+    url: &str,
     data_dir: &Path,
     owner: Option<String>,
 ) -> ResolvedCollection {
-    let slug = slug_for_source_uri(source_uri);
-    let source_key = slugify(source_uri);
-    let coll_dir = data_dir.join("hedgedoc").join(source_key);
+    let slug = slug_for_note(url, owner.as_deref());
+    let coll_dir = data_dir.join("hedgedoc").join(&slug);
     let db_path = data_dir.join("db").join(format!("{slug}.db"));
     ResolvedCollection {
-        name: source_display_name(source_uri),
+        name: note_display_name(url),
         slug,
         coll_dir,
         db_path,
         owner,
     }
+}
+
+/// Placeholder collection name for a note that has not synced yet: the note
+/// ID, qualified by its host. Replaced by the note's own title on the first
+/// successful sync (see `apply_sync_result`).
+fn note_display_name(url: &str) -> String {
+    let note_id = note_id_from_url(url).unwrap_or_else(|| url.to_string());
+    match source_uri_from_url(url) {
+        Some(uri) => format!("{} / {note_id}", source_display_name(&uri)),
+        None => note_id,
+    }
+}
+
+/// Record a successful sync on a source: the note's own title becomes the
+/// collection name, so the landing page shows the note rather than its host.
+pub fn apply_sync_result(source: &mut HedgedocSource, deck_name: String, file_name: String) {
+    source.collection.name = deck_name.clone();
+    source.note.deck_name = deck_name;
+    source.note.file_name = file_name;
+    source.note.last_error = None;
 }
 
 /// Short, stable disambiguator derived from the exact note ID (blake3, the
@@ -430,41 +467,20 @@ pub fn commit_add(
     sources: &Mutex<Vec<HedgedocSource>>,
     config_path: Option<&Path>,
     url: &str,
-    source_uri: &str,
-    new_source: Option<HedgedocSource>,
-    new_note: Option<HedgedocNote>,
+    owner: Option<&str>,
+    new_source: HedgedocSource,
 ) -> Fallible<Vec<HedgedocSource>> {
     let mut guard = sources.lock();
+    // Scoped to the caller: the same public note added by two different
+    // users is two separate collections, not a duplicate.
     if guard
         .iter()
-        .flat_map(|s| s.notes.iter())
-        .any(|n| n.url == url)
+        .any(|s| s.note.url == url && s.collection.owner.as_deref() == owner)
     {
         return fail(format!("HedgeDoc note is already configured: {url}"));
     }
     let mut updated = guard.clone();
-    if let Some(source) = new_source {
-        match updated
-            .iter_mut()
-            .find(|s| s.source_uri == source.source_uri)
-        {
-            // Another request created this source concurrently: merge our
-            // note into it rather than pushing a duplicate source.
-            Some(existing) => existing.notes.extend(source.notes),
-            None => updated.push(source),
-        }
-    } else if let Some(note) = new_note {
-        match updated.iter_mut().find(|s| s.source_uri == source_uri) {
-            Some(src) => src.notes.push(note),
-            None => {
-                return fail(format!(
-                    "HedgeDoc source was removed while adding the note: {source_uri}"
-                ));
-            }
-        }
-    } else {
-        return fail("Nothing to add for HedgeDoc source.");
-    }
+    updated.push(new_source);
     if let Some(path) = config_path {
         persist_hedgedoc_entries(path, &all_hedgedoc_entries(&updated))?;
     }
@@ -472,14 +488,11 @@ pub fn commit_add(
     Ok(updated)
 }
 
-/// What a `commit_delete` removed. `removed_note` is the deleted note's file
-/// name with its collection; `removed_sources` lists collections whose source
-/// was removed entirely (no notes left). BUG-42 uses this to clean up
-/// on-disk data and tell the user what remains.
+/// What a `commit_delete` removed: the deleted note's collection. BUG-42
+/// uses this to clean up on-disk data and tell the user what remains.
 pub struct DeleteOutcome {
     pub snapshot: Vec<HedgedocSource>,
-    pub removed_note: Option<(String, ResolvedCollection)>,
-    pub removed_sources: Vec<ResolvedCollection>,
+    pub removed: ResolvedCollection,
 }
 
 /// Atomically commit a HedgeDoc source/note deletion (BUG-39): mutate and
@@ -489,33 +502,28 @@ pub fn commit_delete(
     sources: &Mutex<Vec<HedgedocSource>>,
     config_path: Option<&Path>,
     url: &str,
+    owner: Option<&str>,
 ) -> Fallible<DeleteOutcome> {
     let mut guard = sources.lock();
     let mut updated = guard.clone();
-    let mut removed_note = None;
-    for src in updated.iter_mut() {
-        if let Some(note) = src.notes.iter().find(|n| n.url == url) {
-            removed_note = Some((note.file_name.clone(), src.collection.clone()));
-        }
-        src.notes.retain(|n| n.url != url);
-    }
-    if removed_note.is_none() {
-        return fail(format!("No HedgeDoc source with this URL: {url}"));
-    }
-    let removed_sources: Vec<ResolvedCollection> = updated
+    // Matched on (url, owner): deleting your own note must never remove
+    // another user's note with the same URL.
+    let matches = |s: &HedgedocSource| s.note.url == url && s.collection.owner.as_deref() == owner;
+    let Some(removed) = updated
         .iter()
-        .filter(|s| s.notes.is_empty())
+        .find(|s| matches(s))
         .map(|s| s.collection.clone())
-        .collect();
-    updated.retain(|s| !s.notes.is_empty());
+    else {
+        return fail(format!("No HedgeDoc source with this URL: {url}"));
+    };
+    updated.retain(|s| !matches(s));
     if let Some(path) = config_path {
         persist_hedgedoc_entries(path, &all_hedgedoc_entries(&updated))?;
     }
     *guard = updated.clone();
     Ok(DeleteOutcome {
         snapshot: updated,
-        removed_note,
-        removed_sources,
+        removed,
     })
 }
 
@@ -525,44 +533,23 @@ pub fn commit_delete(
 /// the source is re-added later. Cleanup failures are reported, not fatal:
 /// the source is already removed from config and memory at this point.
 pub fn cleanup_after_delete(outcome: &DeleteOutcome) -> String {
-    // Whole source removed: delete its note directory.
-    if let Some(rc) = outcome.removed_sources.first() {
-        if let Err(e) = std::fs::remove_dir_all(&rc.coll_dir) {
-            if e.kind() != std::io::ErrorKind::NotFound {
-                return format!(
-                    "Source removed, but its note directory {} could not be deleted: {e}. \
-                     The review database at {} was kept.",
-                    rc.coll_dir.display(),
-                    rc.db_path.display(),
-                );
-            }
+    let rc = &outcome.removed;
+    if let Err(e) = std::fs::remove_dir_all(&rc.coll_dir) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            return format!(
+                "Note removed, but its directory {} could not be deleted: {e}. \
+                 The review database at {} was kept.",
+                rc.coll_dir.display(),
+                rc.db_path.display(),
+            );
         }
-        return format!(
-            "Source removed. Its note directory {} was deleted. The review database at {} \
-             was kept, so your review history survives if you re-add this source.",
-            rc.coll_dir.display(),
-            rc.db_path.display(),
-        );
     }
-    // Only one note of a multi-note source removed: delete just its file.
-    if let Some((file_name, rc)) = &outcome.removed_note {
-        let path = rc.coll_dir.join(file_name);
-        if let Err(e) = std::fs::remove_file(&path) {
-            if e.kind() != std::io::ErrorKind::NotFound {
-                return format!(
-                    "Note removed, but its file {} could not be deleted: {e}",
-                    path.display()
-                );
-            }
-        }
-        return format!(
-            "Note removed and its file {} deleted. The review database at {} was kept, \
-             so your review history survives if you re-add this note.",
-            path.display(),
-            rc.db_path.display(),
-        );
-    }
-    "Source removed.".to_string()
+    format!(
+        "Note removed. Its directory {} was deleted. The review database at {} was kept, \
+         so your review history survives if you re-add this note.",
+        rc.coll_dir.display(),
+        rc.db_path.display(),
+    )
 }
 
 /// A placeholder note carrying an initialization error. `last_error: Some`
@@ -592,11 +579,11 @@ pub async fn build_source_lossless(
             let msg = e.to_string();
             log::error!("Failed to initialize HedgeDoc source {url}: {msg}");
             let source_uri = source_uri_from_url(url).unwrap_or_else(|| url.to_string());
-            let collection = resolved_collection(&source_uri, data_dir, owner);
+            let collection = resolved_collection(url, data_dir, owner);
             HedgedocSource {
                 source_uri,
                 collection,
-                notes: vec![error_note(url, msg)],
+                note: error_note(url, msg),
             }
         }
     }
@@ -609,8 +596,8 @@ pub fn collection_info_for_source(source: &HedgedocSource) -> CollectionInfo {
             Ok(counts) => counts,
             Err(e) => {
                 log::warn!(
-                    "Failed to count cards for HedgeDoc source '{}': {e}",
-                    source.source_uri
+                    "Failed to count cards for HedgeDoc note '{}': {e}",
+                    source.note.url
                 );
                 (0, 0)
             }
@@ -657,17 +644,22 @@ pub async fn build_source(
         crate::error::ErrorReport::new(format!("Cannot derive source URI from URL: {url}"))
     })?;
 
-    let rc = resolved_collection(&source_uri, data_dir, owner);
+    let mut rc = resolved_collection(url, data_dir, owner);
     tokio::fs::create_dir_all(&rc.coll_dir).await?;
     if let Some(parent) = rc.db_path.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
     let note = build_note(url, &rc).await?;
+    // A note that synced knows its own title; show that rather than the
+    // host/ID placeholder.
+    if note.last_error.is_none() {
+        rc.name = note.deck_name.clone();
+    }
 
     Ok(HedgedocSource {
         source_uri,
         collection: rc,
-        notes: vec![note],
+        note,
     })
 }
 
@@ -698,11 +690,7 @@ pub fn spawn_hedgedoc_sync_task(
                 let sources = hedgedoc_sources.lock();
                 sources
                     .iter()
-                    .flat_map(|s| {
-                        s.notes
-                            .iter()
-                            .map(move |n| (n.url.clone(), s.collection.clone()))
-                    })
+                    .map(|s| (s.note.url.clone(), s.collection.clone()))
                     .collect()
             };
 
@@ -715,22 +703,16 @@ pub fn spawn_hedgedoc_sync_task(
                         let mut sources = hedgedoc_sources.lock();
                         if let Some(src) = sources.iter_mut().find(|s| s.collection.slug == rc.slug)
                         {
-                            if let Some(note) = src.notes.iter_mut().find(|n| &n.url == url) {
-                                note.deck_name = deck_name;
-                                note.file_name = file_name;
-                                note.last_error = None;
-                            }
+                            apply_sync_result(src, deck_name, file_name);
                         }
                     }
                     Err(e) => {
                         let msg = e.to_string();
                         log::error!("Periodic HedgeDoc sync failed for {url}: {msg}");
                         let mut sources = hedgedoc_sources.lock();
-                        for src in sources.iter_mut() {
-                            if let Some(note) = src.notes.iter_mut().find(|n| &n.url == url) {
-                                note.last_error = Some(msg.clone());
-                                break;
-                            }
+                        if let Some(src) = sources.iter_mut().find(|s| s.collection.slug == rc.slug)
+                        {
+                            src.note.last_error = Some(msg);
                         }
                     }
                 }
@@ -776,12 +758,9 @@ pub fn build_combined_infos(
 pub fn all_hedgedoc_entries(hedgedoc_sources: &[HedgedocSource]) -> Vec<HedgedocEntry> {
     hedgedoc_sources
         .iter()
-        .flat_map(|s| {
-            let owner = s.collection.owner.clone();
-            s.notes.iter().map(move |n| HedgedocEntry {
-                url: n.url.clone(),
-                owner: owner.clone(),
-            })
+        .map(|s| HedgedocEntry {
+            url: s.note.url.clone(),
+            owner: s.collection.owner.clone(),
         })
         .collect()
 }
@@ -1091,16 +1070,21 @@ mod tests {
     }
 
     fn test_source_for(uri: &str, url: &str) -> HedgedocSource {
+        test_source_owned_by(uri, url, None)
+    }
+
+    fn test_source_owned_by(uri: &str, url: &str, owner: Option<&str>) -> HedgedocSource {
+        let owner = owner.map(|o| o.to_string());
         HedgedocSource {
             source_uri: uri.to_string(),
             collection: ResolvedCollection {
                 name: uri.to_string(),
-                slug: slug_for_source_uri(uri),
+                slug: slug_for_note(url, owner.as_deref()),
                 coll_dir: PathBuf::from("/nonexistent/hedgedoc/test"),
                 db_path: PathBuf::from("/nonexistent/db/test.db"),
-                owner: None,
+                owner,
             },
-            notes: vec![test_note_for(url)],
+            note: test_note_for(url),
         }
     }
 
@@ -1118,12 +1102,11 @@ mod tests {
             &sources,
             Some(&config_path),
             "https://n.example.com/doc1",
-            "https://n.example.com",
             None,
-            Some(test_note_for("https://n.example.com/doc1")),
+            test_source_for("https://n.example.com", "https://n.example.com/doc1"),
         );
         assert!(result.is_err());
-        assert_eq!(sources.lock()[0].notes.len(), 1);
+        assert_eq!(sources.lock().len(), 1);
     }
 
     #[test]
@@ -1140,12 +1123,11 @@ mod tests {
             &sources,
             Some(&missing_config),
             "https://n.example.com/doc2",
-            "https://n.example.com",
             None,
-            Some(test_note_for("https://n.example.com/doc2")),
+            test_source_for("https://n.example.com", "https://n.example.com/doc2"),
         );
         assert!(result.is_err());
-        assert_eq!(sources.lock()[0].notes.len(), 1);
+        assert_eq!(sources.lock().len(), 1);
     }
 
     /// Regression test (BUG-39): concurrent adds must not lose entries. The
@@ -1172,9 +1154,8 @@ mod tests {
                     &sources,
                     Some(&config_path),
                     &url,
-                    "https://n.example.com",
                     None,
-                    Some(test_note_for(&url)),
+                    test_source_for("https://n.example.com", &url),
                 )
                 .unwrap();
             }));
@@ -1183,7 +1164,7 @@ mod tests {
             h.join().unwrap();
         }
 
-        assert_eq!(sources.lock()[0].notes.len(), 9);
+        assert_eq!(sources.lock().len(), 9);
         let content = std::fs::read_to_string(&config_path).unwrap();
         for i in 0..=8 {
             assert!(content.contains(&format!("doc{i}")), "config lost doc{i}");
@@ -1203,12 +1184,15 @@ mod tests {
             "https://n.example.com/doc1",
         )]);
 
-        let outcome =
-            commit_delete(&sources, Some(&config_path), "https://n.example.com/doc1").unwrap();
-        // The note's source had no other notes, so the whole source is gone.
+        let outcome = commit_delete(
+            &sources,
+            Some(&config_path),
+            "https://n.example.com/doc1",
+            None,
+        )
+        .unwrap();
         assert!(outcome.snapshot.is_empty());
-        assert_eq!(outcome.removed_sources.len(), 1);
-        assert!(outcome.removed_note.is_some());
+        assert_eq!(outcome.removed.owner, None);
         assert!(sources.lock().is_empty());
         let content = std::fs::read_to_string(&config_path).unwrap();
         assert!(!content.contains("doc1"));
@@ -1224,7 +1208,12 @@ mod tests {
             "https://n.example.com/doc1",
         )]);
 
-        let result = commit_delete(&sources, Some(&config_path), "https://n.example.com/other");
+        let result = commit_delete(
+            &sources,
+            Some(&config_path),
+            "https://n.example.com/other",
+            None,
+        );
         assert!(result.is_err());
         assert_eq!(sources.lock().len(), 1);
     }
@@ -1244,10 +1233,10 @@ mod tests {
             &sources,
             Some(&missing_config),
             "https://n.example.com/doc1",
+            None,
         );
         assert!(result.is_err());
         assert_eq!(sources.lock().len(), 1);
-        assert_eq!(sources.lock()[0].notes.len(), 1);
     }
 
     /// Regression test (BUG-42): deleting a source's last note must delete the
@@ -1271,8 +1260,7 @@ mod tests {
         };
         let outcome = DeleteOutcome {
             snapshot: Vec::new(),
-            removed_note: Some(("note.md".to_string(), rc.clone())),
-            removed_sources: vec![rc],
+            removed: rc,
         };
 
         let message = cleanup_after_delete(&outcome);
@@ -1288,38 +1276,6 @@ mod tests {
         );
     }
 
-    /// When the source still has other notes, only the deleted note's file
-    /// goes; the directory (and the other notes' files) stay.
-    #[test]
-    fn cleanup_after_delete_note_only_removes_just_that_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let coll_dir = dir.path().join("hedgedoc").join("src");
-        std::fs::create_dir_all(&coll_dir).unwrap();
-        std::fs::write(coll_dir.join("gone.md"), "x").unwrap();
-        std::fs::write(coll_dir.join("stays.md"), "y").unwrap();
-
-        let rc = ResolvedCollection {
-            name: "src".to_string(),
-            slug: "hedgedoc-src".to_string(),
-            coll_dir: coll_dir.clone(),
-            db_path: dir.path().join("db").join("hedgedoc-src.db"),
-            owner: None,
-        };
-        let outcome = DeleteOutcome {
-            snapshot: Vec::new(), // irrelevant for cleanup
-            removed_note: Some(("gone.md".to_string(), rc)),
-            removed_sources: Vec::new(),
-        };
-
-        let message = cleanup_after_delete(&outcome);
-        assert!(!coll_dir.join("gone.md").exists());
-        assert!(coll_dir.join("stays.md").exists());
-        assert!(
-            message.contains("kept"),
-            "message must say what remains: {message}"
-        );
-    }
-
     /// Regression test (BUG-40): a source that fails to initialize at startup
     /// must stay in memory with an Error status — and therefore survive the
     /// config round-trip — instead of being silently dropped and then written
@@ -1329,10 +1285,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let source = build_source_lossless("not a valid url", dir.path(), None).await;
 
-        assert_eq!(source.notes.len(), 1);
-        assert_eq!(source.notes[0].url, "not a valid url");
+        assert_eq!(source.note.url, "not a valid url");
         assert!(
-            source.notes[0].last_error.is_some(),
+            source.note.last_error.is_some(),
             "failing source must carry an Error status"
         );
 
@@ -1348,7 +1303,7 @@ mod tests {
     #[test]
     fn test_startup_hedgedoc_slug_collision_is_rejected() {
         let uri = "https://pad.example.com/notes";
-        let slug = slug_for_source_uri(uri);
+        let slug = slug_for_note(uri, None);
         let collections = vec![ResolvedCollection {
             name: "Notes".to_string(),
             slug: slug.clone(),
@@ -1365,34 +1320,111 @@ mod tests {
                 db_path: PathBuf::from("/tmp/hedge.db"),
                 owner: None,
             },
-            notes: Vec::new(),
+            note: test_note_for(uri),
         }];
         assert!(check_startup_slug_collisions(&collections, &sources).is_err());
         assert!(check_startup_slug_collisions(&collections, &[]).is_ok());
     }
 
-    /// Two distinct source URIs that slugify identically collide with each
-    /// other, even though neither matches a configured collection.
+    /// Two notes whose IDs slugify identically stay distinct: the slug ends
+    /// in a hash of the full URL, so `abc+1` and `abc-1` do not collide.
     #[test]
-    fn test_two_sources_slugifying_alike_are_rejected() {
-        let source = |uri: &str| HedgedocSource {
-            source_uri: uri.to_string(),
-            collection: ResolvedCollection {
-                name: uri.to_string(),
-                slug: slug_for_source_uri(uri),
-                coll_dir: PathBuf::from("/tmp/hedge"),
-                db_path: PathBuf::from("/tmp/hedge.db"),
-                owner: None,
-            },
-            notes: Vec::new(),
-        };
-        let a = source("https://pad.example.com/abc+1");
-        let b = source("https://pad.example.com/abc-1");
+    fn test_notes_slugifying_alike_stay_distinct() {
+        let a = slug_for_note("https://pad.example.com/abc+1", None);
+        let b = slug_for_note("https://pad.example.com/abc-1", None);
+        assert_ne!(a, b, "the URL hash must keep look-alike note IDs apart");
+    }
+
+    /// The HIGH finding this restructure fixes: two users adding notes from
+    /// the same HedgeDoc host must get separate collections, databases and
+    /// owners. Grouping by host used to give the second user's note to
+    /// whoever was configured first.
+    #[tokio::test]
+    async fn notes_from_one_host_are_never_shared_between_users() {
+        let dir = tempfile::tempdir().unwrap();
+        let alice = build_source_lossless(
+            "https://pad.example.com/alice-note",
+            dir.path(),
+            Some("alice@example.com".to_string()),
+        )
+        .await;
+        let bob = build_source_lossless(
+            "https://pad.example.com/bob-note",
+            dir.path(),
+            Some("bob@example.com".to_string()),
+        )
+        .await;
+
+        assert_ne!(alice.collection.slug, bob.collection.slug);
+        assert_ne!(alice.collection.db_path, bob.collection.db_path);
+        assert_ne!(alice.collection.coll_dir, bob.collection.coll_dir);
+        assert_eq!(alice.collection.owner.as_deref(), Some("alice@example.com"));
+        assert_eq!(bob.collection.owner.as_deref(), Some("bob@example.com"));
+
+        // The config round-trip keeps each entry with its own owner rather
+        // than re-deriving both from one shared source.
+        let entries = all_hedgedoc_entries(&[alice, bob]);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].owner.as_deref(), Some("alice@example.com"));
+        assert_eq!(entries[1].owner.as_deref(), Some("bob@example.com"));
+    }
+
+    /// Two users may add the very same public note. They must not share a
+    /// slug, and therefore not a review database.
+    #[test]
+    fn same_note_added_by_two_users_gets_two_slugs() {
+        let url = "https://pad.example.com/shared";
+        let alice = slug_for_note(url, Some("alice@example.com"));
+        let bob = slug_for_note(url, Some("bob@example.com"));
+        assert_ne!(alice, bob);
+    }
+
+    /// Deleting your own note must not remove another user's note with the
+    /// same URL.
+    #[test]
+    fn commit_delete_only_removes_the_callers_note() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("hashcards.toml");
+        write_toml(&config_path, "[server]\ndata_dir = \"/tmp\"\n");
+        let url = "https://n.example.com/shared";
+        let sources = Mutex::new(vec![
+            test_source_owned_by("https://n.example.com", url, Some("alice@example.com")),
+            test_source_owned_by("https://n.example.com", url, Some("bob@example.com")),
+        ]);
+
+        let outcome =
+            commit_delete(&sources, Some(&config_path), url, Some("alice@example.com")).unwrap();
+        assert_eq!(outcome.removed.owner.as_deref(), Some("alice@example.com"));
+        assert_eq!(sources.lock().len(), 1);
         assert_eq!(
-            a.collection.slug, b.collection.slug,
-            "these URIs must slugify alike for this test to mean anything"
+            sources.lock()[0].collection.owner.as_deref(),
+            Some("bob@example.com")
         );
-        assert!(check_startup_slug_collisions(&[], &[a, b]).is_err());
+    }
+
+    /// The same note added by two users is not a duplicate for the second
+    /// user.
+    #[test]
+    fn commit_add_allows_the_same_note_for_a_different_owner() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("hashcards.toml");
+        write_toml(&config_path, "[server]\ndata_dir = \"/tmp\"\n");
+        let url = "https://n.example.com/shared";
+        let sources = Mutex::new(vec![test_source_owned_by(
+            "https://n.example.com",
+            url,
+            Some("alice@example.com"),
+        )]);
+
+        let added = commit_add(
+            &sources,
+            Some(&config_path),
+            url,
+            Some("bob@example.com"),
+            test_source_owned_by("https://n.example.com", url, Some("bob@example.com")),
+        );
+        assert!(added.is_ok(), "{:?}", added.err().map(|e| e.to_string()));
+        assert_eq!(sources.lock().len(), 2);
     }
 
     /// BUG-43 regression: a configured collection whose slug equals a
@@ -1400,7 +1432,7 @@ mod tests {
     #[test]
     fn test_hedgedoc_slug_collision_is_detected() {
         let source_uri = "demo@hedgedoc.example.org";
-        let hedgedoc_slug = slug_for_source_uri(source_uri);
+        let hedgedoc_slug = slug_for_note(source_uri, None);
         let colliding = ResolvedCollection {
             name: "Sneaky".to_string(),
             slug: hedgedoc_slug.clone(),

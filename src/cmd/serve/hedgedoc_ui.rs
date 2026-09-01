@@ -67,30 +67,29 @@ pub fn render_manage_page(
                         }
                         tbody {
                             @for src in sources {
-                                @for note in &src.notes {
-                                    tr {
-                                        td { (src.collection.name) }
-                                        td { (note.deck_name) }
-                                        td.source-url-cell {
-                                            @if let Some(href) = safe_href(&note.url) {
-                                                a href=(href) target="_blank" rel="noopener noreferrer" { (note.url) }
-                                            } @else {
-                                                span { (note.url) }
-                                            }
+                                @let note = &src.note;
+                                tr {
+                                    td { (src.source_uri) }
+                                    td { (note.deck_name) }
+                                    td.source-url-cell {
+                                        @if let Some(href) = safe_href(&note.url) {
+                                            a href=(href) target="_blank" rel="noopener noreferrer" { (note.url) }
+                                        } @else {
+                                            span { (note.url) }
                                         }
-                                        td {
-                                            @if let Some(ref err) = note.last_error {
-                                                span.status-error title=(err) { "Error" }
-                                            } @else {
-                                                span.status-ok { "OK" }
-                                            }
+                                    }
+                                    td {
+                                        @if let Some(ref err) = note.last_error {
+                                            span.status-error title=(err) { "Error" }
+                                        } @else {
+                                            span.status-ok { "OK" }
                                         }
-                                        td {
-                                            form action="/hedgedoc/delete" method="post" {
-                                                input type="hidden" name="url" value=(note.url);
-                                                input type="submit" value="Delete" .sync-button
-                                                    onclick="return confirm('Remove this HedgeDoc source?')";
-                                            }
+                                    }
+                                    td {
+                                        form action="/hedgedoc/delete" method="post" {
+                                            input type="hidden" name="url" value=(note.url);
+                                            input type="submit" value="Delete" .sync-button
+                                                onclick="return confirm('Remove this HedgeDoc note?')";
                                         }
                                     }
                                 }
@@ -121,12 +120,12 @@ mod tests {
                 db_path: PathBuf::from("/tmp/notes.db"),
                 owner: None,
             },
-            notes: vec![HedgedocNote {
+            note: HedgedocNote {
                 url: url.to_string(),
                 deck_name: "deck".to_string(),
                 file_name: "deck.md".to_string(),
                 last_error: None,
-            }],
+            },
         }
     }
 
