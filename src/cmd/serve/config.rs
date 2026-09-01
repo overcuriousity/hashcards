@@ -582,7 +582,7 @@ mod tests {
         let toml = format!(
             "[server]\ndata_dir = {:?}\n\n\
              [[collection]]\nname = \"Japanese\"\npath = \"japanese\"\n",
-            &data_dir
+            data_dir
         );
         let config: ServeConfig = toml::from_str(&toml)?;
         let resolved = ResolvedServeConfig::from_toml(config)?;
@@ -666,7 +666,7 @@ path = "beta"
              [[collection]]\n\
              name = \"Japanese\"\n\
              path = \"japanese\"\n",
-            &data_dir
+            data_dir
         );
         let config: ServeConfig = toml::from_str(&toml_str)?;
         match ResolvedServeConfig::from_toml(config) {
@@ -697,7 +697,7 @@ path = "beta"
              name = \"Japanese\"\n\
              path = \"japanese\"\n\
              owner = \"Me@Example.com\"\n",
-            &data_dir
+            data_dir
         );
         let config: ServeConfig = toml::from_str(&toml_str)?;
         let resolved = ResolvedServeConfig::from_toml(config)?;
@@ -719,7 +719,7 @@ path = "beta"
              [[collection]]\n\
              name = \"Japanese\"\n\
              path = \"japanese\"\n",
-            &data_dir
+            data_dir
         );
         let config: ServeConfig = toml::from_str(&toml_str)?;
         let resolved = ResolvedServeConfig::from_toml(config)?;
@@ -746,7 +746,7 @@ path = "beta"
              name = \"Japanese\"\n\
              path = \"japanese\"\n\
              owner = \"me@example.com\"\n",
-            &data_dir
+            data_dir
         );
         let config: ServeConfig = toml::from_str(&toml_str)?;
         match ResolvedServeConfig::from_toml(config) {
@@ -770,7 +770,7 @@ path = "beta"
              name = \"Japanese\"\n\
              path = \"japanese\"\n\
              owner = \"me@example.com\"\n",
-            &data_dir
+            data_dir
         );
         let config: ServeConfig = toml::from_str(&toml_str)?;
         match ResolvedServeConfig::from_toml(config) {
@@ -799,7 +799,7 @@ path = "beta"
              [[hedgedoc]]\n\
              url = \"https://pad.example.com/abc\"\n\
              owner = \"Me@Example.com\"\n",
-            &data_dir
+            data_dir
         );
         let config: ServeConfig = toml::from_str(&toml_str)?;
         let resolved = ResolvedServeConfig::from_toml(config)?;
@@ -823,7 +823,7 @@ path = "beta"
              [[collection]]\n\
              name = \"Japanese\"\n\
              path = \"japanese\"\n",
-            &data_dir
+            data_dir
         );
         let config: ServeConfig = toml::from_str(&toml_str)?;
         assert_eq!(PathBuf::from(&config.server.data_dir), data_dir);
