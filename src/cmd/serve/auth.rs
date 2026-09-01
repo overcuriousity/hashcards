@@ -25,7 +25,7 @@ const SESSION_RENEW_WITHIN_MINUTES: i64 = 7 * 24 * 60;
 const FLOW_LIFETIME_MINUTES: i64 = 10;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct CurrentUser {
+pub(crate) struct CurrentUser {
     pub email: String,
 }
 
@@ -370,7 +370,7 @@ pub(super) async fn require_auth(
     }
 }
 
-pub(super) struct MissingSession;
+pub(crate) struct MissingSession;
 
 impl IntoResponse for MissingSession {
     fn into_response(self) -> Response {
@@ -387,6 +387,22 @@ impl FromRequestParts<AppState> for CurrentUser {
     ) -> Result<Self, Self::Rejection> {
         let jar = SignedCookieJar::from_headers(&parts.headers, state.session_key.clone());
         read_session(&jar).ok_or(MissingSession)
+    }
+}
+
+/// Lets handlers take `Option<CurrentUser>` directly — `None` when there is
+/// no session, `Some` when there is one. axum's `Option<T>` extractor is
+/// driven by this trait rather than a blanket bridge from
+/// `FromRequestParts`, so it needs its own (infallible) impl.
+impl axum::extract::OptionalFromRequestParts<AppState> for CurrentUser {
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Option<Self>, Self::Rejection> {
+        let jar = SignedCookieJar::from_headers(&parts.headers, state.session_key.clone());
+        Ok(read_session(&jar))
     }
 }
 

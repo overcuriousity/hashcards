@@ -16,6 +16,7 @@ use serde::Deserialize;
 
 use crate::cmd::drill::template::page_template;
 use crate::cmd::run_blocking;
+use crate::cmd::serve::auth::CurrentUser;
 use crate::cmd::serve::git::commit_edit;
 use crate::cmd::serve::handlers::find_collection;
 use crate::cmd::serve::state::AppState;
@@ -37,18 +38,25 @@ use crate::types::timestamp::Timestamp;
 pub async fn edit_get_handler(
     State(state): State<AppState>,
     AxumPath((slug, hash_hex)): AxumPath<(String, String)>,
+    current_user: Option<CurrentUser>,
 ) -> (StatusCode, Html<String>) {
+    let owner = current_user.map(|u| u.email);
     let state2 = state.clone();
     let slug2 = slug.clone();
     let hash2 = hash_hex.clone();
-    match run_blocking(move || edit_get_inner(&state2, &slug2, &hash2)).await {
+    match run_blocking(move || edit_get_inner(&state2, &slug2, &hash2, owner.as_deref())).await {
         Ok(html) => (StatusCode::OK, Html(html)),
         Err(e) => error_page(&slug, &hash_hex, &e.to_string()),
     }
 }
 
-fn edit_get_inner(state: &AppState, slug: &str, hash_hex: &str) -> Fallible<String> {
-    let rc = find_collection(state, slug)
+fn edit_get_inner(
+    state: &AppState,
+    slug: &str,
+    hash_hex: &str,
+    owner: Option<&str>,
+) -> Fallible<String> {
+    let rc = find_collection(state, slug, owner)
         .ok_or_else(|| ErrorReport::new(format!("Unknown collection: {slug}")))?;
 
     let hash = CardHash::from_hex(hash_hex)?;
@@ -147,12 +155,14 @@ pub struct EditOutcome {
 pub async fn edit_post_handler(
     State(state): State<AppState>,
     AxumPath((slug, hash_hex)): AxumPath<(String, String)>,
+    current_user: Option<CurrentUser>,
     Form(form): Form<EditForm>,
 ) -> Result<Redirect, (StatusCode, Html<String>)> {
     let state2 = state.clone();
     let slug2 = slug.clone();
     let hash2 = hash_hex.clone();
-    match run_blocking(move || edit_post_inner(&state2, &slug2, &hash2, form)).await {
+    match run_blocking(move || edit_post_inner(&state2, &slug2, &hash2, form, current_user)).await
+    {
         Ok(outcome) => {
             log::debug!(
                 "Edit saved: {} card(s) migrated, {} skipped, committed={}",
@@ -184,8 +194,10 @@ fn edit_post_inner(
     slug: &str,
     hash_hex: &str,
     form: EditForm,
+    current_user: Option<CurrentUser>,
 ) -> Fallible<EditOutcome> {
-    let rc = find_collection(state, slug)
+    let owner = current_user.as_ref().map(|u| u.email.as_str());
+    let rc = find_collection(state, slug, owner)
         .ok_or_else(|| ErrorReport::new(format!("Unknown collection: {slug}")))?;
 
     if state.sessions.lock().contains_key(slug) {
@@ -272,12 +284,18 @@ fn edit_post_inner(
 
     // FEAT-04: every successful web edit becomes a git commit, so git sync
     // keeps working and the collection gets versioned card history for free.
-    let (author_name, author_email) = match state.config.git.as_ref() {
-        Some(g) => (
-            g.commit_author_name.as_str(),
-            g.commit_author_email.as_str(),
-        ),
-        None => ("hashcards web edit", "hashcards@localhost"),
+    // When OIDC is on, the commit is attributed to the logged-in user rather
+    // than the shared configured default, so git history shows who edited
+    // what.
+    let (author_name, author_email): (&str, &str) = match &current_user {
+        Some(user) => (user.email.as_str(), user.email.as_str()),
+        None => match state.config.git.as_ref() {
+            Some(g) => (
+                g.commit_author_name.as_str(),
+                g.commit_author_email.as_str(),
+            ),
+            None => ("hashcards web edit", "hashcards@localhost"),
+        },
     };
     let committed = commit_edit(&file_path, author_name, author_email).map_err(|e| {
         ErrorReport::new(format!(
@@ -608,6 +626,7 @@ mod tests {
                 new_text: "Q: Two\nA: 2".to_string(),
                 mtime_ms: mtime.to_string(),
             },
+            None,
         )?;
 
         // The collision is reported, not raised as a 500.
@@ -659,6 +678,7 @@ mod tests {
                 new_text: "## Geography\nQ: Capital of France?\nA: Paris, France".to_string(),
                 mtime_ms: mtime.to_string(),
             },
+            None,
         )?;
         assert_eq!(
             outcome.migrated, 1,
@@ -715,6 +735,7 @@ mod tests {
                 new_text: "C: A [y] B [x]".to_string(),
                 mtime_ms: mtime.to_string(),
             },
+            None,
         )?;
         assert_eq!(outcome.migrated, 2);
         assert_eq!(outcome.skipped, 0);
@@ -806,6 +827,7 @@ mod tests {
                 new_text: "Q: capital of France?\nA: **Paris**".to_string(),
                 mtime_ms: mtime.to_string(),
             },
+            None,
         )?;
         assert!(outcome.committed, "edit was not committed");
 

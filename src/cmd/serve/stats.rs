@@ -6,6 +6,7 @@ use maud::html;
 
 use crate::cmd::drill::template::page_template;
 use crate::cmd::run_blocking;
+use crate::cmd::serve::auth::CurrentUser;
 use crate::cmd::serve::handlers::find_collection;
 use crate::cmd::serve::state::AppState;
 use crate::cmd::stats_page::gather_stats;
@@ -19,12 +20,15 @@ use crate::types::date::Date;
 pub async fn collection_stats_handler(
     State(state): State<AppState>,
     Path(slug): Path<String>,
+    current_user: Option<CurrentUser>,
 ) -> (StatusCode, Html<String>) {
-    let known = find_collection(&state, &slug).is_some();
+    let owner = current_user.map(|u| u.email);
+    let known = find_collection(&state, &slug, owner.as_deref()).is_some();
     let state2 = state.clone();
     let slug2 = slug.clone();
+    let owner2 = owner.clone();
     // Parsing the collection and reading SQLite is blocking work (BUG-44).
-    match run_blocking(move || stats_inner(&state2, &slug2)).await {
+    match run_blocking(move || stats_inner(&state2, &slug2, owner2.as_deref())).await {
         Ok(html) => (StatusCode::OK, Html(html)),
         Err(e) => {
             let status = if known {
@@ -45,8 +49,8 @@ pub async fn collection_stats_handler(
     }
 }
 
-fn stats_inner(state: &AppState, slug: &str) -> Fallible<String> {
-    let rc = find_collection(state, slug)
+fn stats_inner(state: &AppState, slug: &str, owner: Option<&str>) -> Fallible<String> {
+    let rc = find_collection(state, slug, owner)
         .ok_or_else(|| ErrorReport::new(format!("Unknown collection: {slug}")))?;
     let collection = Collection::with_db_path(rc.coll_dir.clone(), rc.db_path.clone())?;
     let stats = gather_stats(&collection.db, &collection.cards, Date::today())?;

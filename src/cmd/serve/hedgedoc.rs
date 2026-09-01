@@ -325,7 +325,11 @@ fn frontmatter_title(markdown: &str) -> Option<String> {
 
 /// Build a `ResolvedCollection` for a HedgeDoc source given its note ID and
 /// the resolved data directory.
-pub fn resolved_collection(source_uri: &str, data_dir: &Path) -> ResolvedCollection {
+pub fn resolved_collection(
+    source_uri: &str,
+    data_dir: &Path,
+    owner: Option<String>,
+) -> ResolvedCollection {
     let slug = slug_for_source_uri(source_uri);
     let source_key = slugify(source_uri);
     let coll_dir = data_dir.join("hedgedoc").join(source_key);
@@ -335,9 +339,7 @@ pub fn resolved_collection(source_uri: &str, data_dir: &Path) -> ResolvedCollect
         slug,
         coll_dir,
         db_path,
-        // Threaded through properly once the caller has the owning
-        // HedgedocEntry available (Task 3).
-        owner: None,
+        owner,
     }
 }
 
@@ -579,14 +581,18 @@ pub fn error_note(url: &str, message: String) -> HedgedocNote {
 /// placeholder source whose note carries the error, so the configured entry
 /// stays in memory — and in the config file — with an Error status until the
 /// user explicitly deletes it. The periodic sync retries it automatically.
-pub async fn build_source_lossless(url: &str, data_dir: &Path) -> HedgedocSource {
-    match build_source(url, data_dir).await {
+pub async fn build_source_lossless(
+    url: &str,
+    data_dir: &Path,
+    owner: Option<String>,
+) -> HedgedocSource {
+    match build_source(url, data_dir, owner.clone()).await {
         Ok(source) => source,
         Err(e) => {
             let msg = e.to_string();
             log::error!("Failed to initialize HedgeDoc source {url}: {msg}");
             let source_uri = source_uri_from_url(url).unwrap_or_else(|| url.to_string());
-            let collection = resolved_collection(&source_uri, data_dir);
+            let collection = resolved_collection(&source_uri, data_dir, owner);
             HedgedocSource {
                 source_uri,
                 collection,
@@ -642,12 +648,16 @@ pub async fn build_note(url: &str, collection: &ResolvedCollection) -> Fallible<
 }
 
 /// Re-derive a `HedgedocSource` from a URL, performing an initial sync for the note.
-pub async fn build_source(url: &str, data_dir: &Path) -> Fallible<HedgedocSource> {
+pub async fn build_source(
+    url: &str,
+    data_dir: &Path,
+    owner: Option<String>,
+) -> Fallible<HedgedocSource> {
     let source_uri = source_uri_from_url(url).ok_or_else(|| {
         crate::error::ErrorReport::new(format!("Cannot derive source URI from URL: {url}"))
     })?;
 
-    let rc = resolved_collection(&source_uri, data_dir);
+    let rc = resolved_collection(&source_uri, data_dir, owner);
     tokio::fs::create_dir_all(&rc.coll_dir).await?;
     if let Some(parent) = rc.db_path.parent() {
         tokio::fs::create_dir_all(parent).await?;
@@ -1317,7 +1327,7 @@ mod tests {
     #[tokio::test]
     async fn build_source_lossless_keeps_failing_entry_with_error_status() {
         let dir = tempfile::tempdir().unwrap();
-        let source = build_source_lossless("not a valid url", dir.path()).await;
+        let source = build_source_lossless("not a valid url", dir.path(), None).await;
 
         assert_eq!(source.notes.len(), 1);
         assert_eq!(source.notes[0].url, "not a valid url");

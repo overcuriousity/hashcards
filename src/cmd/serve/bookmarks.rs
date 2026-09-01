@@ -14,6 +14,7 @@ use serde::Deserialize;
 
 use crate::cmd::drill::template::page_template;
 use crate::cmd::run_blocking;
+use crate::cmd::serve::auth::CurrentUser;
 use crate::cmd::serve::handlers::find_collection;
 use crate::cmd::serve::state::AppState;
 use crate::collection::Collection;
@@ -30,18 +31,26 @@ pub async fn bookmark_list_handler(
     State(state): State<AppState>,
     AxumPath(slug): AxumPath<String>,
     Query(query): Query<HashMap<String, String>>,
+    current_user: Option<CurrentUser>,
 ) -> (StatusCode, Html<String>) {
     let flash = Flash::from_query(&query);
+    let owner = current_user.map(|u| u.email);
     let state2 = state.clone();
     let slug2 = slug.clone();
-    match run_blocking(move || bookmark_list_inner(&state2, &slug2, flash)).await {
+    match run_blocking(move || bookmark_list_inner(&state2, &slug2, flash, owner.as_deref())).await
+    {
         Ok(html) => (StatusCode::OK, Html(html)),
         Err(e) => error_page(&slug, e),
     }
 }
 
-fn bookmark_list_inner(state: &AppState, slug: &str, flash: Option<Flash>) -> Fallible<String> {
-    let rc = find_collection(state, slug)
+fn bookmark_list_inner(
+    state: &AppState,
+    slug: &str,
+    flash: Option<Flash>,
+    owner: Option<&str>,
+) -> Fallible<String> {
+    let rc = find_collection(state, slug, owner)
         .ok_or_else(|| ErrorReport::new(format!("Unknown collection: {slug}")))?;
     let collection = Collection::with_db_path(rc.coll_dir.clone(), rc.db_path.clone())?;
     let bookmarks = collection.db.list_bookmarks()?;
@@ -177,18 +186,27 @@ fn render_orphaned_row(slug: &str, bm: &Bookmark) -> Markup {
 pub async fn bookmark_delete_handler(
     State(state): State<AppState>,
     AxumPath((slug, hash_hex)): AxumPath<(String, String)>,
+    current_user: Option<CurrentUser>,
 ) -> Redirect {
     let to = format!("/collection/{slug}/bookmarks");
+    let owner = current_user.map(|u| u.email);
     let state2 = state.clone();
     let slug2 = slug.clone();
-    match run_blocking(move || bookmark_delete_inner(&state2, &slug2, &hash_hex)).await {
+    match run_blocking(move || bookmark_delete_inner(&state2, &slug2, &hash_hex, owner.as_deref()))
+        .await
+    {
         Ok(()) => Flash::success("Bookmark removed.").redirect(&to),
         Err(e) => Flash::error(format!("Failed to remove bookmark: {e}")).redirect(&to),
     }
 }
 
-fn bookmark_delete_inner(state: &AppState, slug: &str, hash_hex: &str) -> Fallible<()> {
-    let rc = find_collection(state, slug)
+fn bookmark_delete_inner(
+    state: &AppState,
+    slug: &str,
+    hash_hex: &str,
+    owner: Option<&str>,
+) -> Fallible<()> {
+    let rc = find_collection(state, slug, owner)
         .ok_or_else(|| ErrorReport::new(format!("Unknown collection: {slug}")))?;
     let collection = Collection::with_db_path(rc.coll_dir, rc.db_path)?;
     let hash = CardHash::from_hex(hash_hex)?;
@@ -206,19 +224,31 @@ pub struct NoteForm {
 pub async fn bookmark_note_handler(
     State(state): State<AppState>,
     AxumPath((slug, hash_hex)): AxumPath<(String, String)>,
+    current_user: Option<CurrentUser>,
     Form(form): Form<NoteForm>,
 ) -> Redirect {
     let to = format!("/collection/{slug}/bookmarks");
+    let owner = current_user.map(|u| u.email);
     let state2 = state.clone();
     let slug2 = slug.clone();
-    match run_blocking(move || bookmark_note_inner(&state2, &slug2, &hash_hex, form.note)).await {
+    match run_blocking(move || {
+        bookmark_note_inner(&state2, &slug2, &hash_hex, form.note, owner.as_deref())
+    })
+    .await
+    {
         Ok(()) => Flash::success("Note saved.").redirect(&to),
         Err(e) => Flash::error(format!("Failed to save note: {e}")).redirect(&to),
     }
 }
 
-fn bookmark_note_inner(state: &AppState, slug: &str, hash_hex: &str, note: String) -> Fallible<()> {
-    let rc = find_collection(state, slug)
+fn bookmark_note_inner(
+    state: &AppState,
+    slug: &str,
+    hash_hex: &str,
+    note: String,
+    owner: Option<&str>,
+) -> Fallible<()> {
+    let rc = find_collection(state, slug, owner)
         .ok_or_else(|| ErrorReport::new(format!("Unknown collection: {slug}")))?;
     let collection = Collection::with_db_path(rc.coll_dir, rc.db_path)?;
     let hash = CardHash::from_hex(hash_hex)?;

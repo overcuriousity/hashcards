@@ -201,8 +201,11 @@ pub async fn start_serve(config: ResolvedServeConfig) -> Fallible<()> {
                     }
                 }
                 // First note for this source (or unparseable URL):
-                // build_source_lossless never drops the entry.
-                None => sources.push(build_source_lossless(&entry.url, dd).await),
+                // build_source_lossless never drops the entry. The owner is
+                // taken from this first entry; a later entry mapping to the
+                // same source_uri with a different owner is a config
+                // mistake this doesn't separately flag.
+                None => sources.push(build_source_lossless(&entry.url, dd, entry.owner.clone()).await),
             }
         }
         sources

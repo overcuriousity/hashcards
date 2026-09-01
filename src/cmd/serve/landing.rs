@@ -10,6 +10,7 @@ use maud::html;
 use chrono::Duration;
 
 use crate::cmd::drill::template::page_template;
+use crate::cmd::serve::auth::CurrentUser;
 use crate::cmd::serve::hedgedoc::build_combined_infos;
 use crate::cmd::serve::state::AppState;
 use crate::cmd::serve::state::CollectionInfo;
@@ -29,8 +30,10 @@ pub fn counts_are_stale(last: Option<Timestamp>, now: Timestamp, interval_minute
 pub async fn landing_handler(
     State(state): State<AppState>,
     Query(query): Query<HashMap<String, String>>,
+    current_user: Option<CurrentUser>,
 ) -> (StatusCode, Html<String>) {
     let flash = Flash::from_query(&query);
+    let owner = current_user.map(|u| u.email);
 
     // BUG-45: recompute counts when they are older than the poll interval.
     let interval_minutes = state
@@ -59,7 +62,11 @@ pub async fn landing_handler(
         }
     }
 
-    let collections = state.collections.read().await;
+    let all_collections = state.collections.read().await;
+    let collections: Vec<&CollectionInfo> = all_collections
+        .iter()
+        .filter(|c| c.owner.as_deref() == owner.as_deref())
+        .collect();
     let last_synced = *state.last_synced.lock();
     let hedgedoc_last_synced = *state.hedgedoc_last_synced.lock();
     let git_enabled = state.config.git.is_some();
@@ -103,7 +110,7 @@ struct LandingStatus {
 }
 
 fn render_landing_page(
-    collections: &[CollectionInfo],
+    collections: &[&CollectionInfo],
     resume: &HashMap<String, usize>,
     status: &LandingStatus,
     flash: Option<Flash>,
