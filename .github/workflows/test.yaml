@@ -29,7 +29,7 @@ jobs:
           toolchain: stable
 
       - name: cache rust deps
-        uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       - name: fetch katex deps
         run: make vendor/katex
@@ -44,7 +44,7 @@ jobs:
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
 
       - name: cache rust deps
-        uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       - name: install cargo-machete
         run: cargo install cargo-machete
@@ -70,7 +70,7 @@ jobs:
           toolchain: stable
 
       - name: cache rust deps
-        uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       - name: install cargo-llvm-cov
         uses: taiki-e/install-action@7ec692fc37da04f8da31c22ba9f3b71ef267e650 # v2.62.24
@@ -112,7 +112,7 @@ jobs:
           toolchain: stable
 
       - name: cache rust deps
-        uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       - name: fetch deps
         run: cargo fetch
@@ -137,7 +137,7 @@ jobs:
           toolchain: stable
 
       - name: cache rust deps
-        uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       - name: fetch deps
         run: cargo fetch
