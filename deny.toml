@@ -1,3 +1,8 @@
+[graph]
+# Dev-only dependencies never ship in the release binary, so their license
+# doesn't affect distribution.
+exclude-dev = true
+
 [licenses]
 allow = [
     "MIT",

@@ -755,7 +755,9 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let work = dir.path().join("work");
         std::fs::create_dir_all(&work)?;
-        let work = work.canonicalize()?;
+        // Not canonicalized: on Windows that adds a `\\?\` verbatim prefix,
+        // which git's clone-source parser below misreads as a UNC host.
+        // `tempdir()` already returns an absolute path.
 
         git(&work, &["init", "-b", "main"]);
         // The per-collection DB lives in the collection dir in --directories

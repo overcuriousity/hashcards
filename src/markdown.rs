@@ -199,6 +199,13 @@ mod tests {
     /// Regression: a media filename containing a double quote must not be
     /// able to close the `src` attribute and inject further attributes into
     /// the generated `<audio>` element.
+    ///
+    /// Windows-only skip: `"` is one of the characters Windows filesystems
+    /// refuse in a filename outright, so the attack this guards against
+    /// cannot be constructed there in the first place. The same escaping
+    /// path is still exercised, filename-independent, by
+    /// `test_audio_title_is_attribute_escaped`.
+    #[cfg(not(windows))]
     #[test]
     fn test_audio_url_is_attribute_escaped() -> Fallible<()> {
         let coll_path: PathBuf = create_tmp_directory()?;

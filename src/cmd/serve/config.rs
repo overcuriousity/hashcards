@@ -274,7 +274,15 @@ impl ResolvedServeConfig {
             .iter()
             .map(|entry| {
                 let entry_path = PathBuf::from(&entry.path);
-                if entry_path.is_absolute() {
+                // `is_absolute()` alone misses a path that `has_root()` but,
+                // on Windows, no drive prefix (e.g. `/etc`, or a UNC-less
+                // `\etc`): `is_absolute()` is false for it there, yet
+                // `repo_dir.join(entry_path)` below still discards
+                // `repo_dir` and keeps only its own root, exactly like an
+                // absolute path would. `has_root()` catches that case on
+                // every platform (on Unix it is equivalent to
+                // `is_absolute()`).
+                if entry_path.is_absolute() || entry_path.has_root() {
                     return fail(format!(
                         "configuration error: collection path must be relative \
                          (it is resolved inside `{}`), but `{}` is absolute",
@@ -434,14 +442,22 @@ mod tests {
     /// {data_dir}/repo.
     #[test]
     fn test_relative_collection_path_accepted() -> Fallible<()> {
-        let toml = "[server]\ndata_dir = \"/var/lib/hashcards\"\n\n\
-                    [[collection]]\nname = \"Japanese\"\npath = \"japanese\"\n";
-        let config: ServeConfig = toml::from_str(toml)?;
+        // `/var/lib/hashcards` is not a platform-absolute path on Windows
+        // (no drive prefix), so a literal expected string would not match
+        // there; build both the fixture and the expectation from the same
+        // guaranteed-absolute path instead.
+        let data_dir = current_dir()?.join("var-lib-hashcards");
+        let toml = format!(
+            "[server]\ndata_dir = \"{}\"\n\n\
+             [[collection]]\nname = \"Japanese\"\npath = \"japanese\"\n",
+            data_dir.display()
+        );
+        let config: ServeConfig = toml::from_str(&toml)?;
         let resolved = ResolvedServeConfig::from_toml(config)?;
         assert_eq!(resolved.collections.len(), 1);
         assert_eq!(
             resolved.collections[0].coll_dir,
-            PathBuf::from("/var/lib/hashcards/repo/japanese")
+            data_dir.join("repo").join("japanese")
         );
         Ok(())
     }
