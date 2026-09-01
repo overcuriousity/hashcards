@@ -79,7 +79,7 @@ blake3( "ClozeV2" ++ text ++ 0xFF ++ deletion ++ 0xFF ++ decimal(occurrence_inde
   - `pub fn legacy_hash(&self) -> Option<CardHash>` on `Card` — delegates to its content.
   - `fn occurrence_index(bytes: &[u8], start: usize, deletion: &[u8]) -> usize` (private free function in `card.rs`).
 
-- [ ] **Step 1: Write the failing regression tests**
+- [x] **Step 1: Write the failing regression tests**
 
 Add to the `tests` module at the bottom of `src/types/card.rs` (after `test_family_hash`). Byte-position sanity for the fixtures: in `"The capital of France is Paris"`, `France` occupies bytes 15–20 and `Paris` bytes 25–29; in `"je bois du café"`, `café` occupies bytes 11–15 (`é` is two bytes — positions are BYTE positions per CLAUDE.md).
 
@@ -172,12 +172,12 @@ Add to the `tests` module at the bottom of `src/types/card.rs` (after `test_fami
     }
 ```
 
-- [ ] **Step 2: Run the tests and see them fail**
+- [x] **Step 2: Run the tests and see them fail**
 
 Run: `cargo test types::card`
 Expected: COMPILE ERROR — `legacy_hash` does not exist yet. Comment out the two `legacy_hash` assertions temporarily if you want to see the value failures directly: `test_cloze_hash_is_content_based`, `test_cloze_hash_is_content_based_non_ascii`, and `test_cloze_hash_no_longer_uses_offsets` FAIL against the current offset-based algorithm; `test_repeated_identical_deletions_hash_differently`, `test_distinct_deletions_hash_differently`, and `test_duplicate_cards_still_collide` already pass (pin-down tests). Restore the assertions before Step 3.
 
-- [ ] **Step 3: Implement the new hash, `occurrence_index`, and `legacy_hash`**
+- [x] **Step 3: Implement the new hash, `occurrence_index`, and `legacy_hash`**
 
 3a. Replace `CardContent::hash` (currently `src/types/card.rs:155-171`) with:
 
@@ -259,12 +259,12 @@ fn occurrence_index(bytes: &[u8], start: usize, deletion: &[u8]) -> usize {
     }
 ```
 
-- [ ] **Step 4: Run the full test suite and see it pass**
+- [x] **Step 4: Run the full test suite and see it pass**
 
 Run: `cargo test`
 Expected: all tests PASS. Parser, drill, serve, edit, and export tests never assert concrete cloze hash values — they compare hashes computed through `Card::hash()` on both sides — so the scheme change must not break any of them. If any test fails on a hard-coded cloze hash value, update that value using the reference formula from Step 1 and note it in the commit message.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/types/card.rs
@@ -288,7 +288,7 @@ git commit -m "fix: derive cloze hashes from deletion content, not byte offsets 
   - `pub fn migrate_cloze_hashes(&mut self, renames: &[(CardHash, CardHash)]) -> Fallible<usize>` on `Database` — renames every `(legacy, new)` pair and stamps the scheme `'2'`, all in ONE transaction; returns the number of cards renamed
   - `fn migrate_add_meta(tx: &Transaction) -> Fallible<()>`; `SCHEMA_VERSION` becomes 6
 
-- [ ] **Step 1: Write the failing regression tests**
+- [x] **Step 1: Write the failing regression tests**
 
 Add to the `tests` module in `src/db.rs`:
 
@@ -394,12 +394,12 @@ Add to the `tests` module in `src/db.rs`:
     }
 ```
 
-- [ ] **Step 2: Run the tests and see them fail**
+- [x] **Step 2: Run the tests and see them fail**
 
 Run: `cargo test test_fresh_db_has_current_cloze_hash_scheme test_legacy_db_is_stamped_with_legacy_scheme test_migrate_cloze_hashes`
 Expected: COMPILE ERROR — `CLOZE_HASH_SCHEME_CURRENT`, `cloze_hash_scheme`, and `migrate_cloze_hashes` do not exist yet. That is the failing state.
 
-- [ ] **Step 3: Implement migration 6, the constants, and the two methods**
+- [x] **Step 3: Implement migration 6, the constants, and the two methods**
 
 3a. In `src/schema.sql`, append at the end of the file (after the `schema_version` table plan 08 added). Fresh databases only ever contain new-scheme hashes, so they are seeded `'2'`:
 
@@ -522,12 +522,12 @@ fn migrate_add_meta(tx: &Transaction) -> Fallible<()> {
     }
 ```
 
-- [ ] **Step 4: Run the tests and see them pass**
+- [x] **Step 4: Run the tests and see them pass**
 
 Run: `cargo test`
 Expected: all tests PASS, including the four new ones and plan 08's `test_migrated_schema_matches_fresh_schema` (which now also proves migration 6's `meta` table structure matches `schema.sql` — the seeded *value* differs by design and is not part of the structural snapshot) and `test_newer_schema_version_is_rejected` (unchanged: 999 > 6).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/db.rs src/schema.sql
@@ -545,7 +545,7 @@ git commit -m "feat: meta table with cloze hash scheme marker; transactional has
 - Consumes: Task 1's `Card::legacy_hash() -> Option<CardHash>` and `Card::hash() -> CardHash`; Task 2's `Database::cloze_hash_scheme()`, `Database::migrate_cloze_hashes(&[(CardHash, CardHash)]) -> Fallible<usize>`, and `CLOZE_HASH_SCHEME_CURRENT`.
 - Produces: `fn upgrade_cloze_hashes(db: &mut Database, cards: &[Card]) -> Fallible<()>` (private to `collection.rs`); every `Collection` constructor (`new`, `with_db_path` — drill, serve, check, orphans, stats, export all go through these) now guarantees the DB is on the current scheme before any other DB access.
 
-- [ ] **Step 1: Write the failing end-to-end regression test**
+- [x] **Step 1: Write the failing end-to-end regression test**
 
 Append to `src/collection.rs` (the file currently has no tests module). The test builds a DB with old-scheme hashes computed **with the old algorithm inline** (independent of `legacy_hash()`), plus a genuinely-deleted card, then loads the collection and asserts reviews/performance/bookmarks followed their cards while the deleted card's rows stayed orphaned.
 
@@ -696,12 +696,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run the tests and see the regression test fail**
+- [x] **Step 2: Run the tests and see the regression test fail**
 
 Run: `cargo test test_load_migrates_legacy_cloze_hashes test_load_of_current_scheme_db_is_a_noop`
 Expected: `test_load_migrates_legacy_cloze_hashes` FAILS at `card {} was not re-linked` — nothing performs the rehash yet, so the DB still holds the legacy hashes. `test_load_of_current_scheme_db_is_a_noop` PASSES (fresh DBs are already scheme 2 after Task 2 — pin-down test).
 
-- [ ] **Step 3: Implement the load-time upgrade hook**
+- [x] **Step 3: Implement the load-time upgrade hook**
 
 3a. In `src/collection.rs`, add imports at the top (with the other `use` statements):
 
@@ -765,12 +765,12 @@ fn upgrade_cloze_hashes(db: &mut Database, cards: &[Card]) -> Fallible<()> {
 }
 ```
 
-- [ ] **Step 4: Run the full test suite and see it pass**
+- [x] **Step 4: Run the full test suite and see it pass**
 
 Run: `cargo test`
 Expected: all tests PASS, including both new collection tests. Every command (`drill`, `serve`, `check`, `orphans`, `stats`, `export`) constructs its DB access through `Collection::new`/`with_db_path`, so they all get the upgrade for free; the serve-mode edit path (`src/cmd/serve/edit.rs`) opens `Database::new` directly, but only against a DB that a `Collection` load has already upgraded in the same process.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/collection.rs
@@ -793,7 +793,7 @@ git commit -m "feat: re-link legacy cloze hashes at collection load (BUG-27)"
 
 **JSON export implications, for the record:** `CardExport.hash`, `CardExport.family_hash`, and `ReviewExport.hash` (`src/cmd/export.rs:56-57`, `:111`) are read through `Collection`, which upgrades the DB before export — so an export taken after upgrading is internally consistent, but its cloze hash values differ from any export taken with an older hashcards. `CardContentExport::Cloze::start`/`end` (`src/cmd/export.rs:79-83`) remain BYTE positions in the export, unchanged (see BUG-26 for their doc wording). External consumers that key on cloze hash values must re-key once — the changelog entry says so.
 
-- [ ] **Step 1: Write the export pin-down test**
+- [x] **Step 1: Write the export pin-down test**
 
 Add to the `tests` module in `src/cmd/export.rs` (imports shown go at the top of the module, next to the existing ones):
 
@@ -831,12 +831,12 @@ Add to the `tests` module in `src/cmd/export.rs` (imports shown go at the top of
 
 Note: `create_tmp_directory` may already be imported in this tests module (it is used by `test_full_export`); if so, skip the duplicate `use`.
 
-- [ ] **Step 2: Run the test and see it pass**
+- [x] **Step 2: Run the test and see it pass**
 
 Run: `cargo test test_export_uses_content_based_cloze_hashes`
 Expected: PASS — this is a pin-down test guarding the export against future hash-input drift (any change to the scheme now fails here and in Task 1's reference tests together).
 
-- [ ] **Step 3: Document the scheme in README.md**
+- [x] **Step 3: Document the scheme in README.md**
 
 In `README.md`, in the "Cloze Cards" section, insert after the multi-line cloze example's closing fence (line 264, just before the `### Separators` heading) the following paragraph:
 
@@ -848,7 +848,7 @@ depend on byte offsets or on the machine's CPU architecture, so a
 `hashcards.db` written on one computer works on any other.
 ```
 
-- [ ] **Step 4: Update CHANGELOG.xml (breaking-change entry)**
+- [x] **Step 4: Update CHANGELOG.xml (breaking-change entry)**
 
 `CHANGELOG.xsd` allows a `<breaking>` change list inside `<unreleased>` (the `changesType` choice includes `added`/`fixed`/`changed`/`removed`/`deprecated`/`security`/`breaking` in any order). In `CHANGELOG.xml`, inside `<unreleased>`, after the closing `</changed>` tag, add (match the file's 8/12-space indentation; if a `<breaking>` block already exists by then, just append the `<change>` to it):
 
@@ -862,16 +862,16 @@ depend on byte offsets or on the machine's CPU architecture, so a
 
 Validate: `xmllint --noout --schema CHANGELOG.xsd CHANGELOG.xml` (if `xmllint` is unavailable, eyeball against the XSD: `breaking` contains `change` elements with an optional `author` attribute).
 
-- [ ] **Step 5: Confirm IDEAS.md needs no change**
+- [x] **Step 5: Confirm IDEAS.md needs no change**
 
 Read `IDEAS.md`. As of this plan's writing it contains: Card Stages, Term-Definition Cards, Preview Command, Jitter, Logo — **no** entry about the cloze rehash. The spec's BUG-27 instruction to "document it in IDEAS.md with a migration sketch" applied only to the deferred option, which the project owner has rejected in favor of doing the rehash now; since the work is done, nothing is added to IDEAS.md. If someone has added a cloze-rehash/BUG-27 entry to IDEAS.md in the meantime, delete that entry (the work is no longer future work) and include the deletion in this task's commit.
 
-- [ ] **Step 6: Run the full suite one last time**
+- [x] **Step 6: Run the full suite one last time**
 
 Run: `cargo test`
 Expected: all tests PASS.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add src/cmd/export.rs README.md CHANGELOG.xml

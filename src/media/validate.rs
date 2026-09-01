@@ -163,7 +163,7 @@ mod tests {
 
         // Parse cards from markdown with missing media references
         let markdown = "Q: What is this image?\n\n![](missing_image.jpg)\n\nA: Unknown\n\nQ: What is this audio?\nA: ![](missing_audio.mp3)";
-        let parser = CardParser::new("test_deck".to_string(), card_file.clone());
+        let parser = CardParser::new("test_deck".to_string(), card_file.clone(), 0);
         let cards = parser.parse(markdown)?;
 
         // Validate media files - should return an error
@@ -200,7 +200,7 @@ mod tests {
 
         // Parse cards from markdown with existing media reference.
         let markdown = "Q: What is this image?\n\n![](existing_image.jpg)\n\nA: A test image";
-        let parser = CardParser::new("test_deck".to_string(), card_file.clone());
+        let parser = CardParser::new("test_deck".to_string(), card_file.clone(), 0);
         let cards = parser.parse(markdown)?;
 
         // Validate media files - should succeed.
@@ -222,11 +222,14 @@ mod tests {
         std::fs::write(&card_file, b"")?;
 
         let markdown = "Q: What is shown?\nA: ![](https://example.com/image.png)";
-        let parser = CardParser::new("test_deck".to_string(), card_file.clone());
+        let parser = CardParser::new("test_deck".to_string(), card_file.clone(), 0);
         let cards = parser.parse(markdown)?;
 
         let result = validate_media_files(&cards, &test_dir);
-        assert!(result.is_ok(), "external URLs should not fail validation: {result:?}");
+        assert!(
+            result.is_ok(),
+            "external URLs should not fail validation: {result:?}"
+        );
 
         Ok(())
     }
@@ -243,7 +246,7 @@ mod tests {
 
         // Parse cloze card with missing media reference.
         let markdown = "C: The capital of [France] is ![](@/paris.jpg)";
-        let parser = CardParser::new("test_deck".to_string(), card_file.clone());
+        let parser = CardParser::new("test_deck".to_string(), card_file.clone(), 0);
         let cards: Vec<Card> = parser.parse(markdown)?;
 
         // Validate media files - should fail.

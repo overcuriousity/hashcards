@@ -72,7 +72,6 @@ impl Cache {
             None => fail(format!("Card with hash {card_hash} not found in cache")),
         }
     }
-
 }
 
 #[cfg(test)]

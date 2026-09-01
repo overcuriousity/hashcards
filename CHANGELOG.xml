@@ -1,6 +1,116 @@
 <changelog>
     <unreleased>
+        <breaking>
+            <change author="mstoeck3">
+                Cloze card hashes are now derived from the card's text, the deleted substring, and an occurrence index, instead of the deletion's raw byte offsets. Card identity no longer depends on CPU endianness or pointer width, so a hashcards.db can move between machines. There is no automatic upgrade path: a database written by an older version keeps its old cloze hashes, which this version sees as orphans (visible to the orphans command) while the cloze cards themselves start fresh. (BUG-27)
+            </change>
+        </breaking>
         <fixed>
+            <change author="claude">
+                Serve mode no longer deadlocks when a grade is submitted while the idle-session sweep or the collection list is running. The three code paths took the session map lock and a session's own lock in opposite orders; with no lock timeout this hung the server outright.
+            </change>
+            <change author="claude">
+                A line beginning with `D:` inside an answer is now ordinary text again. The new term/definition shorthand treated `D:` as a tag wherever it appeared, so an answer such as "D: dominant allele shown" failed the entire collection load. `D:` is a tag only directly below a `T:` line.
+            </change>
+            <change author="claude">
+                A line such as ```` ```code``` ```` no longer opens a code fence that is never closed, which silently swallowed every card below it in the file. A backtick fence's info string may not itself contain backticks.
+            </change>
+            <change author="claude">
+                A markdown link whose text contains brackets, for example `[the [inner] docs](url)`, no longer fails the deck with "Nested cloze brackets". Link labels may contain balanced brackets and are left to the link.
+            </change>
+            <change author="claude">
+                A cloze card with a malformed deletion range now reports a clear error instead of panicking while rendering.
+            </change>
+            <change author="claude">
+                Editing a card in the browser now keeps its review history when the edit adds a line above the card's own `Q:`. The new card was previously matched by its exact starting line, so shifting it down orphaned its history while still reporting "Card saved."
+            </change>
+            <change author="claude">
+                A browser edit's hash migration now runs in a single transaction, and an edit that makes a card identical to an existing one is reported instead of failing with a server error part-way through. Previously such an edit left the file saved, the database half-migrated and the working tree dirty.
+            </change>
+            <change author="claude">
+                Two Undo requests arriving together (a double click, or key auto-repeat) now void one review instead of two. Undo carries the review it means to void, the same guard grades already had.
+            </change>
+            <change author="claude">
+                Sessions left open by a crash or restart are now closed once, when the server starts, instead of on every visit to a collection, and only when they have been silent for over an hour. Sessions carry a heartbeat that the owning process stamps as it works, so a session still running in a concurrent `drill` — which shares the same database file — is no longer stamped as ended and left appending reviews to a row claiming to have finished. A session is also marked closed explicitly rather than inferred from its end time matching its start time, so one whose reviews were all undone is no longer re-reported on every sweep, forever. This adds schema version 7; existing databases are migrated in place on first open.
+            </change>
+            <change author="claude">
+                Database connections now wait for a lock held by another connection rather than failing immediately, and the drill stats page is rendered off the async runtime. Opening `/stats` while a grade was being written could return a server error.
+            </change>
+            <change author="claude">
+                Stats now count due cards from the parsed collection rather than the card table, which nothing populates before a collection's first drill. A collection that had never been drilled reported no cards due at all, and the due forecast counted orphaned rows that the per-deck column did not, so the two halves of the page disagreed.
+            </change>
+            <change author="mstoeck3">
+                Session completion stats are now computed from the session's persisted reviews: distinct cards and total reviews (including repeats) are reported separately, and the slowest-card row shows the card's question preview instead of its deck name. (BUG-13)
+            </change>
+            <change author="mstoeck3">
+                Per-card review timing now starts when the card is first displayed instead of when the answer is revealed, so recorded durations and pace stats include recall time. (BUG-14)
+            </change>
+            <change author="claude">
+                A second Ctrl+C during shutdown now stops hashcards immediately (exit code 130), and both drill and serve modes shut down gracefully on SIGTERM. Previously catching the first Ctrl+C replaced the default signal handling, so if shutdown stalled on an open client connection the process could only be stopped with SIGKILL. (BUG-52)
+            </change>
+            <change author="claude">
+                Interrupting a drill with Ctrl+C now exits cleanly: the session is closed, a summary of the saved reviews is printed, and the exit code is 0. Reviews are written to the database as they happen, so an interrupted session loses nothing. Previously the command exited with the error "Session interrupted before completion". (BUG-10)
+            </change>
+            <change author="claude">
+                Re-bookmarking a card during drilling (pressing `b` on an already-bookmarked card) no longer erases the bookmark's note or resets its creation time. (BUG-07)
+            </change>
+            <change author="mstoeck3">
+                Landing-page card counts now refresh when a drill session finishes or is ended, and on loading the landing page when the cached counts are older than the sync poll interval. Previously they went stale until the next sync or Home action. (BUG-45)
+            </change>
+            <change author="mstoeck3">
+                Serve-mode drill sessions idle for longer than a configurable timeout (`session_timeout_minutes`, default 24 hours) are now evicted and their database session rows closed; previously abandoned sessions lived forever and their session rows stayed open. Serve mode's single-user semantics are now documented in the README. (BUG-08)
+            </change>
+            <change author="mstoeck3">
+                Serve mode now runs collection parsing and database work on a blocking thread pool instead of the async runtime, so one slow request no longer stalls every other request. (BUG-44)
+            </change>
+            <change author="mstoeck3">
+                Serve mode now detects URL slug collisions between collections (e.g. paths `a/b` and `a-b`, or a configured collection shadowing a HedgeDoc source) at config load, at server startup, and when adding a HedgeDoc source, failing with a message naming both colliding collections. The startup check also covers sources configured in the config file and two source URLs that reduce to the same slug, neither of which was validated before. Previously one collection was silently routed to the other's database. (BUG-43)
+            </change>
+            <change author="claude">
+                HedgeDoc sources that fail to initialize at server startup (for example while the HedgeDoc instance is unreachable) are no longer silently dropped from the configuration. They now appear with an "Error" status, are retried on every sync, and are only removed when explicitly deleted. (BUG-40)
+            </change>
+            <change author="claude">
+                Deleting a HedgeDoc source now also deletes its downloaded note files from disk. The review database is deliberately kept so review history survives re-adding the source; the confirmation message states exactly what was deleted and what was kept. (BUG-42)
+            </change>
+            <change author="claude">
+                Adding and deleting HedgeDoc sources is now atomic: the duplicate check, the in-memory change, and the config-file write happen under a single lock, so concurrent add/delete requests can no longer lose configured sources. Failures are reported to the user instead of only being logged. (BUG-39)
+            </change>
+            <change author="claude">
+                HedgeDoc note filenames now include a short hash of the note ID, so two notes whose IDs differ only in special characters no longer overwrite each other's files. Old-format files are cleaned up automatically on the next sync. (BUG-41)
+            </change>
+            <change author="claude">
+                HedgeDoc URLs are now validated when a source is added: non-HTTPS or malformed URLs are rejected immediately with an error message instead of being persisted and showing a permanent "Error" status. (BUG-38)
+            </change>
+            <change author="mstoeck3">
+                When a cloze card is edited in the browser, review history now follows each deletion by its content instead of its position in the document. Reordering or removing a deletion no longer transplants history onto the wrong sibling card; cards that cannot be matched unambiguously start fresh, and the save notice says how many. (BUG-35)
+            </change>
+            <change author="mstoeck3">
+                Editing a one-line card (such as a single-line `C:` cloze) in the browser no longer duplicates it: the card's own first line is no longer mistaken for the end of its own block, so the edit replaces the line instead of being inserted above it.
+            </change>
+            <change author="mstoeck3">
+                The in-browser card editor now re-checks the source file's modification time immediately before atomically replacing it, so a concurrent change on disk is never silently overwritten. If reverting a rejected edit fails, the editor now reports that the file may be inconsistent instead of silently ignoring the failure. (BUG-36)
+            </change>
+            <change author="mstoeck3">
+                In serve mode, an error while rendering a card or handling an action no longer destroys the running drill session. The session now stays in place behind a per-collection lock, so after a transient error the same card is shown again and progress is kept.
+            </change>
+            <change author="mstoeck3">
+                Holding down a grading key or double-submitting a grade no longer grades several cards in a row: key auto-repeat is ignored in the browser, and the server ignores a grade for a card that is no longer current, showing a notice instead.
+            </change>
+            <change author="mstoeck3">
+                A grade submitted without a revealed answer (for example from a stale browser page) is no longer silently ignored: the page now shows a notice explaining that the grade was not counted.
+            </change>
+            <change author="mstoeck3">
+                Undoing after a session has finished now reopens the session's database row, so reviews made after the undo are attached to an open session instead of one that still claims to be closed.
+            </change>
+            <change author="mstoeck3">
+                Grading and undoing now commit to the database before changing the in-memory session. Previously a failed database write during a grade silently discarded the card (unrecorded and not undoable), and a failed write during undo could duplicate the card in the queue.
+            </change>
+            <change author="claude">
+                Pressing Shutdown before the drill session is finished now shows a message explaining that the session is still in progress, instead of silently doing nothing.
+            </change>
+            <change author="claude">
+                Byte-identical duplicate cards no longer disappear silently: collection loading keeps one copy and prints a warning naming both file locations, and drilling proceeds normally. Duplicates can no longer abort drill startup.
+            </change>
             <change author="claude">
                 The collection browse page now reports database errors instead of silently displaying a bookmark count of zero.
             </change>
@@ -10,8 +120,124 @@
             <change author="claude">
                 HedgeDoc notes whose permission level prevents anonymous download (e.g. "Locked" or "Protected") now show an "Error" status with a descriptive message instead of silently reporting "OK" while storing an HTML page as markdown (yielding zero cards).
             </change>
+            <change author="claude">
+                Ending a session before revealing or grading any card no longer shows nonsense statistics (0 cards reviewed over the whole server uptime); the completion page now simply reports that no cards were reviewed.
+            </change>
+            <change author="claude">
+                The drill-mode error page now returns HTTP 500 instead of 200, is styled, and has a link back to the session.
+            </change>
+            <change author="claude">
+                Starting a drill with no decks selected no longer silently drills the entire collection; it now shows "Select at least one deck."
+            </change>
+            <change author="claude">
+                Errors in web actions are no longer silently swallowed: failed grades and undos, bookmark removal and note saving, manual git sync, and all HedgeDoc add/delete/sync failures now show an error banner instead of redirecting as if they had succeeded.
+            </change>
+            <change author="claude">
+                Malformed lines in `macros.tex` (lines without a space between the macro name and its definition) are now reported as warnings with their line number instead of being silently ignored.
+            </change>
+            <change author="claude">
+                Removed panics reachable from web request handlers: an empty card queue and a premature completion-page request now render an error page instead of crashing the server; internal parser and grade-action inconsistencies, system-clock errors, and Ctrl+C handler failures are reported as errors instead of panicking.
+            </change>
+            <change author="claude">
+                Session and sync state locks no longer use `.lock().unwrap()`: a panic in one request can no longer poison the locks and cascade into crashes of every subsequent request.
+            </change>
+            <change author="claude">
+                An empty cloze deletion (`[]`) now produces a clear parse error with the file and line, instead of crashing the parser (debug builds) or silently corrupting cloze positions (release builds). (BUG-16)
+            </change>
+            <change author="claude">
+                Nested cloze brackets (`[[a]]`) and cloze deletions left open at the end of a line or file now produce clear parse errors with the file and line, instead of silently dropping brackets or reporting a misleading "must contain at least one cloze deletion" message. (BUG-19)
+            </change>
+            <change author="claude">
+                Markdown links (`[text](url)`) inside cloze cards are no longer misparsed as cloze deletions; they are passed through to Markdown like image syntax. The bracket escape rules are now documented in the README. (BUG-17)
+            </change>
+            <change author="claude">
+                `Q:`, `A:`, `C:`, and `---` lines inside fenced code blocks (``` or ~~~) are now treated as literal text instead of card syntax, so cards containing code samples parse correctly. (BUG-18)
+            </change>
+            <change author="claude">
+                Line numbers in parse errors, media errors, and the JSON export are no longer offset by the length of a file's TOML frontmatter; they now refer to real file lines. (BUG-20)
+            </change>
+            <change author="claude">
+                Frontmatter and file-read errors now name the file they came from; I/O, database, path, UTF-8, and JSON errors are rendered as human-readable messages instead of debug dumps; and parse errors no longer carry a redundant "Parse error:" prefix. (BUG-21)
+            </change>
+            <change author="claude">
+                Cloze deletion positions are documented as byte offsets (they were previously described as character positions, including in the JSON export), and a non-ASCII cloze round-trip test now pins this behavior. (BUG-26)
+            </change>
+            <change author="claude">
+                Cloze cards whose text literally contains the string `CLOZE_DELETION` no longer render that text as a spurious cloze blank. The internal placeholder is now generated per render and checked against the card text.
+            </change>
+            <change author="claude">
+                Cards no longer stay permanently invisible when the KaTeX script fails to load or math rendering throws: card content visibility is now restored even when rendering fails.
+            </change>
+            <change author="claude">
+                The error message for an invalid grade string now includes the offending value instead of the literal text `{value}`. (BUG-29)
+            </change>
+            <change author="claude">
+                A system clock rollback (a last-review timestamp in the future) no longer corrupts scheduling: negative elapsed time is clamped to zero, preventing NaN stability and intervals. (BUG-28)
+            </change>
+            <change author="claude">
+                Corrected documentation for `interval_raw` (card performance and JSON export): the value is in days, not hours. (BUG-30)
+            </change>
+            <change author="claude">
+                Deleting a card (e.g. via the orphans command) is now a single atomic statement relying on the database's foreign-key cascade. Previously the card's reviews were deleted in a separate step, so an interruption could erase review history while leaving the card in place. Note that card deletion permanently removes the card's review history and bookmarks; unlike undo, it does not keep a voided audit trail. (BUG-31)
+            </change>
+            <change author="claude">
+                Review lookups by card, by session, and by day are now backed by database indexes (including a generated per-day date column), so daily review counts and session stats no longer scan the whole reviews table. (BUG-33)
+            </change>
+            <change author="claude">
+                Loading a collection page no longer renders a session a concurrent request just ended (via Home, or idle eviction) as if it were still live. The GET path lacked the same "was this session removed from under me" check the drill actions already had, so it could go on stamping heartbeats and per-card timers on a session whose database row was already closed.
+            </change>
+            <change author="claude">
+                Saving a card edit no longer reports "could not be matched to their previous review history" for a card that simply had no prior review history to begin with (for example, a newly added card). That message is now reserved for true collisions, where the edited card became byte-identical to another card that already has its own history.
+            </change>
+            <change author="claude">
+                Loading a collection page now stamps the session heartbeat once per request instead of twice.
+            </change>
+            <change author="claude">
+                The startup sweep that closes dangling sessions now checks every collection's database concurrently instead of one after another, so server startup no longer slows down in proportion to how many collections are configured.
+            </change>
         </fixed>
+        <security>
+            <change author="claude">
+                The URL of an audio media reference is now HTML-escaped before being embedded in the audio element, alongside its title. Percent-encoding leaves the double-quote character intact, so a media file whose name contained a quote could close the `src` attribute and inject arbitrary attributes into the page.
+            </change>
+            <change author="claude">
+                `hashcards stats --format html` now writes to a randomly named, owner-only file instead of a fixed path in the shared temporary directory. The old fixed name let any other local user pre-create it as a symlink and have a file the invoking user can write truncated, and left review statistics world-readable at a guessable path.
+            </change>
+            <change author="claude">
+                Titles of audio media references are now HTML-escaped before being embedded in the audio element, preventing HTML injection through a crafted markdown title.
+            </change>
+            <change author="claude">
+                HedgeDoc source URLs are now validated at storage time (well-formed HTTPS only) and re-checked at render time, so a link with an unsafe scheme such as `javascript:` can never be stored or rendered as a clickable link.
+            </change>
+            <change author="claude">
+                Symlinked directories inside a collection can no longer be used to serve files from outside the collection root: media paths are now canonicalized and must resolve inside the (canonicalized) collection directory, in both the file-serving endpoint and collection-relative (`@/`) media resolution (BUG-46).
+            </change>
+            <change author="claude">
+                The server now binds to 127.0.0.1 by default instead of 0.0.0.0. Listening on all interfaces requires an explicit opt-in (`host = "0.0.0.0"` in the config, or `--host 0.0.0.0`); the documentation now states that hashcards has no authentication (BUG-47).
+            </change>
+            <change author="claude">
+                Collection `path` entries in the configuration file are now validated at load time: absolute paths and paths containing `..` are rejected with a clear error, so a collection can no longer point outside the data directory. A relative collection directory passed to the media loader now produces an error instead of a panic (BUG-48).
+            </change>
+        </security>
         <added>
+            <change author="mstoeck3">
+                Stats page: due forecast for the next 30 days, reviews per day over the last 90 days, grade distribution, retention estimate, and per-deck due/total counts. Available at `/collection/{slug}/stats` in serve mode and `/stats` while drilling; `hashcards stats` now renders the page to a file and opens it in the browser, replacing the unimplemented `--format html` stub. (FEAT-02)
+            </change>
+            <change author="claude">
+                The drill progress bar now has a numeric counter: "7 of 20 (+3 repeats)". The bar advances when a card is graded for the first time; cards re-queued by Forgot/Hard are tallied in the repeats counter instead of silently stalling the bar. Undo rolls the counter back. (FEAT-08)
+            </change>
+            <change author="mstoeck3">
+                Session resume: the collection list now shows "Resume session (N cards remaining)" for a running drill session, and starting a new drill no longer silently discards an unfinished one. Session rows left open by a crash or restart are closed and reported on the collection page; every review made before the interruption is kept. (FEAT-03)
+            </change>
+            <change author="mstoeck3">
+                In-browser edits in a git-backed collection are now committed automatically (message: `hashcards: web edit of &lt;file&gt;`, author configurable via `commit_author_name` / `commit_author_email` in the `[git]` config section). Every web edit thus gets versioned card history for free, and background git sync no longer breaks on a dirty working tree. Pull failures during manual sync are now reported in the browser instead of only being logged. (FEAT-04, BUG-34)
+            </change>
+            <change author="claude">
+                Flash messages: actions in the drill and serve web interfaces now show one-shot success/error banners (dismissible) instead of failing or succeeding silently. The message travels as query parameters across the post-redirect.
+            </change>
+            <change author="claude">
+                `hashcards check` now lists byte-identical duplicate cards, naming both file:line locations for each duplicate.
+            </change>
             <change author="mstoeck3">
                 Each grade is now written to the database as it happens, so a session interrupted by a dropped connection or a closed tab keeps the progress made up to that point. Previously an interrupted session was lost entirely.
             </change>
@@ -54,13 +280,28 @@
             <change author="mstoeck3">
                 Added HedgeDoc source support in serve mode: publicly accessible HedgeDoc notes can be used as collections. Sources are managed via a web interface at `/hedgedoc` and persisted to the TOML config file. Syncing follows the same polling interval as git.
             </change>
+            <change author="claude">
+                Term-definition shorthand: a `T:`/`D:` line pair expands at parse time into two reciprocal front-back cards ("Define: X" and "Term for: Y"). The generated cards hash identically to hand-written equivalents, so review history is preserved when converting. Note: lines beginning with `T:` or `D:` are now card tags, like `Q:` and `A:`.
+            </change>
+            <change author="claude">
+                Review intervals now get a small random jitter (default plus or minus 5%) to diffuse review peaks over time. Configurable via `--jitter` on `hashcards drill` and the `[defaults] jitter` key in the serve config; set to 0.0 to disable. (FEAT-05)
+            </change>
         </added>
         <changed>
+            <change author="claude">
+                Internal cleanup: removed the unused session start time parameter threaded through the drill action handlers, a leftover from the era when reviews were flushed in a batch at session end. (BUG-09)
+            </change>
+            <change author="claude">
+                The database now records its schema version in a `schema_version` table, and schema changes are applied as numbered, ordered migrations instead of ad-hoc column probes. Databases created by newer versions of hashcards are rejected with a clear error instead of being modified. Existing databases are adopted automatically. (BUG-32)
+            </change>
             <change author="eudoxia0">
                 Update dependencies.
             </change>
             <change author="overcuriousity">
                 The `serve` subcommand no longer requires a TOML config file. Collection directories can be passed as arguments for local use without git syncing. Added `hashcards.example.toml` documenting the config format.
+            </change>
+            <change author="claude">
+                `hashcards stats` now defaults to JSON output. Requesting `--format html` is an error (it was never implemented and previously printed a note to stderr while exiting successfully).
             </change>
         </changed>
     </unreleased>

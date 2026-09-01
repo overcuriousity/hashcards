@@ -6,8 +6,10 @@ use maud::Markup;
 use maud::html;
 
 use crate::cmd::drill::template::page_template;
+use crate::cmd::serve::href::safe_href;
 use crate::collection::Collection;
 use crate::error::Fallible;
+use crate::flash::Flash;
 use crate::types::card_hash::CardHash;
 use crate::types::date::Date;
 use crate::types::timestamp::Timestamp;
@@ -29,12 +31,22 @@ pub struct DeckNode {
 impl DeckNode {
     /// Total cards in this node and all descendants.
     pub fn total_cards_recursive(&self) -> usize {
-        self.total_cards + self.children.iter().map(|c| c.total_cards_recursive()).sum::<usize>()
+        self.total_cards
+            + self
+                .children
+                .iter()
+                .map(|c| c.total_cards_recursive())
+                .sum::<usize>()
     }
 
     /// Due cards in this node and all descendants.
     pub fn due_today_recursive(&self) -> usize {
-        self.due_today + self.children.iter().map(|c| c.due_today_recursive()).sum::<usize>()
+        self.due_today
+            + self
+                .children
+                .iter()
+                .map(|c| c.due_today_recursive())
+                .sum::<usize>()
     }
 }
 
@@ -135,7 +147,13 @@ fn insert_into_tree(
         }
     };
 
-    insert_into_tree(&mut node.children[child_idx], segments, depth + 1, full_path, counts);
+    insert_into_tree(
+        &mut node.children[child_idx],
+        segments,
+        depth + 1,
+        full_path,
+        counts,
+    );
 }
 
 /// Render the deck browser page for a collection.
@@ -147,13 +165,23 @@ pub fn render_browse_page(
     tree: &DeckNode,
     hedge_urls: &HashMap<String, String>,
     bookmark_count: usize,
+    interrupted_sessions_closed: usize,
+    flash: Option<Flash>,
 ) -> Markup {
     let total_due = tree.due_today_recursive();
     page_template(html! {
+        @if let Some(f) = &flash { (f.render()) }
         div.browse {
             div.browse-header {
                 a.back-link href="/" { "\u{2190} Collections" }
                 h1 { (collection_name) }
+            }
+            @if interrupted_sessions_closed > 0 {
+                p.notice {
+                    (format!(
+                        "{interrupted_sessions_closed} interrupted session(s) from an earlier run were closed. All reviews already made were kept; interrupted sessions cannot be resumed because the card queue is not saved."
+                    ))
+                }
             }
             @if tree.children.is_empty() {
                 p.empty { "No decks found in this collection." }
@@ -185,8 +213,11 @@ pub fn render_browse_page(
                         }
                     }
                 }
-                @if bookmark_count > 0 {
-                    div.bookmark-bar {
+                div.bookmark-bar {
+                    a.btn.btn-secondary href=(format!("/collection/{slug}/stats")) {
+                        "Stats"
+                    }
+                    @if bookmark_count > 0 {
                         a.btn.btn-secondary href=(format!("/collection/{slug}/bookmarks")) {
                             "\u{2605} Bookmarks (" (bookmark_count) ")"
                         }
@@ -204,7 +235,11 @@ fn render_deck_node(node: &DeckNode, depth: usize, hedge_urls: &HashMap<String, 
     let total = node.total_cards_recursive();
     let due = node.due_today_recursive();
     let has_children = !node.children.is_empty();
-    let edit_url = if !has_children { hedge_urls.get(&node.path) } else { None };
+    let edit_url = if !has_children {
+        hedge_urls.get(&node.path).and_then(|url| safe_href(url))
+    } else {
+        None
+    };
 
     html! {
         div.deck-node {
@@ -317,3 +352,33 @@ function updateDrillButton() {
     btn.disabled = totalDue === 0;
 }
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn browse_page_never_links_unsafe_edit_urls() {
+        // Regression test for BUG-24 (render-time guard on edit links).
+        let tree = DeckNode {
+            name: String::new(),
+            path: String::new(),
+            total_cards: 0,
+            due_today: 0,
+            children: vec![DeckNode {
+                name: "deck".to_string(),
+                path: "deck".to_string(),
+                total_cards: 1,
+                due_today: 1,
+                children: vec![],
+            }],
+        };
+        let mut hedge_urls: HashMap<String, String> = HashMap::new();
+        hedge_urls.insert("deck".to_string(), "javascript:alert(1)".to_string());
+        let html = render_browse_page("Coll", "coll", &tree, &hedge_urls, 0, 0, None).into_string();
+        assert!(
+            !html.contains(r#"href="javascript:"#),
+            "unsafe scheme must not become an edit link: {html}"
+        );
+    }
+}

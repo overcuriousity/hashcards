@@ -32,6 +32,7 @@ use crate::cmd::serve::server::start_serve;
 use crate::cmd::stats::StatsFormat;
 use crate::cmd::stats::print_stats;
 use crate::error::Fallible;
+use crate::types::performance::Jitter;
 use crate::types::timestamp::Timestamp;
 use crate::utils::wait_for_server;
 
@@ -66,6 +67,10 @@ enum Command {
         /// Whether or not to bury siblings. Default is true.
         #[arg(long)]
         bury_siblings: Option<bool>,
+        /// Fractional random jitter applied to review intervals, to diffuse
+        /// review peaks (0.0 to 0.5). Default is 0.05 (plus or minus 5%).
+        #[arg(long, default_value_t = Jitter::DEFAULT_FRACTION)]
+        jitter: f64,
     },
     /// Check the integrity of a collection.
     Check {
@@ -76,7 +81,7 @@ enum Command {
     Stats {
         /// Path to the collection directory. By default, the current working directory is used.
         directory: Option<String>,
-        /// Which output format to use.
+        /// Which output format to use. "html" opens the stats page in the browser.
         #[arg(long, default_value_t = StatsFormat::Html)]
         format: StatsFormat,
     },
@@ -115,8 +120,10 @@ See hashcards.example.toml for the configuration format.")]
         config: Option<String>,
         /// Collection directories to serve (used when no config file is provided).
         directories: Vec<String>,
-        /// Bind address (used when no --config is given; default: 0.0.0.0).
-        #[arg(long, default_value = "0.0.0.0")]
+        /// Bind address (used when no --config is given; default: 127.0.0.1).
+        /// Set to 0.0.0.0 to listen on all interfaces. WARNING: hashcards has
+        /// no authentication.
+        #[arg(long, default_value = "127.0.0.1")]
         host: String,
         /// Port number (used when no --config is given; default: 8000).
         #[arg(long, default_value_t = 8000)]
@@ -151,6 +158,7 @@ pub async fn entrypoint() -> Fallible<()> {
             open_browser,
             answer_controls,
             bury_siblings,
+            jitter,
         } => {
             if open_browser.unwrap_or(true) {
                 // Start a separate task to open the browser once the server is up.
@@ -178,6 +186,7 @@ pub async fn entrypoint() -> Fallible<()> {
                 shuffle: true,
                 answer_controls,
                 bury_siblings: bury_siblings.unwrap_or(true),
+                jitter: Jitter::new(jitter)?,
             };
             start_server(config).await
         }
@@ -208,8 +217,9 @@ fn resolve_serve_config(
 ) -> Fallible<ResolvedServeConfig> {
     // Explicit --config: load that file
     if let Some(path) = config_path {
-        let canonical = std::fs::canonicalize(&path)
-            .map_err(|_| crate::error::ErrorReport::new(format!("Config file not found: {path}")))?;
+        let canonical = std::fs::canonicalize(&path).map_err(|_| {
+            crate::error::ErrorReport::new(format!("Config file not found: {path}"))
+        })?;
         let config = load_config(Path::new(&path))?;
         return Ok(ResolvedServeConfig::from_toml(config)?.with_config_path(canonical));
     }
@@ -248,6 +258,23 @@ fn resolve_serve_config(
         data_dir: Some(data_dir),
         config_path: None,
         hedgedoc_entries: Vec::new(),
+        session_timeout_minutes: 1440,
         _temp_dir: Some(std::sync::Arc::new(temp_tracker)),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_stats_default_format_is_html() {
+        let cmd = Command::try_parse_from(["hashcards", "stats"]).unwrap();
+        match cmd {
+            Command::Stats { format, .. } => {
+                assert!(matches!(format, StatsFormat::Html));
+            }
+            _ => panic!("expected the stats command"),
+        }
     }
+}

@@ -160,6 +160,9 @@ Check the integrity of a collection.
 $ hashcards check [DIRECTORY]
 ```
 
+If the collection contains byte-identical duplicate cards, `check` prints a
+warning for each one, naming both file:line locations.
+
 ### `orphans`
 
 Manage orphan cards (cards that exist in the database, but not in the
@@ -197,7 +200,7 @@ $ hashcards serve --config hashcards.toml
 Options:
 
 - `--config=<PATH>`: Path to a TOML configuration file.
-- `--host=<HOST>`: Bind address (default: `0.0.0.0`).
+- `--host=<HOST>`: Bind address (default: `127.0.0.1`). Set to `0.0.0.0` to listen on all interfaces. **Warning:** hashcards has no authentication — anyone who can reach the port can read your cards and edit the underlying files.
 - `--port=<PORT>`: Port number (default: `8000`).
 
 **Priority:** if explicit `--config` is given, it is used. Otherwise, if one or more directories are passed as arguments, they are served directly without a config file. If neither is given and a `hashcards.toml` exists in the current directory, that is used. If none of these apply, an error is printed.
@@ -262,6 +265,56 @@ desire: this is also vanity and vexation of spirit.
 
 — [Ecclesiastes] [6]:[9]
 ```
+
+Square brackets are reserved for cloze deletions inside `C:` cards. The
+exact rules:
+
+- `[text]` marks a cloze deletion. It must be non-empty and must close on
+  the same line it opens.
+- `\[` and `\]` produce literal square brackets.
+- Image syntax (`![alt](path)`) is passed through to Markdown untouched.
+- Link syntax (`[text](url)`) is passed through to Markdown untouched: a
+  bracket group immediately followed by `(` is treated as a link, not a
+  deletion.
+- Nested brackets (`[[a]]`) and deletions left open at the end of a line
+  are parse errors.
+
+Each bracketed deletion becomes its own card. A cloze card's identity (its
+hash) is derived from the card's text, the deleted substring, and — when the
+same substring is deleted more than once — an occurrence index. It does not
+depend on byte offsets or on the machine's CPU architecture, so a
+`hashcards.db` written on one computer works on any other.
+
+### Term-Definition Cards
+
+Term-definition pairs start with the `T:` and `D:` tags:
+
+```
+T: Monoid
+D: A semigroup with an identity element.
+```
+
+This is shorthand: at parse time, the pair expands into two ordinary
+front-back cards, one in each direction:
+
+```
+Q: Define: Monoid
+A: A semigroup with an identity element.
+
+---
+
+Q: Term for: A semigroup with an identity element.
+A: Monoid
+```
+
+The generated cards are indistinguishable from hand-written ones — same
+content, same hashes — so converting between the shorthand and the explicit
+form preserves review history. Like questions and answers, terms and
+definitions can span multiple lines.
+
+Note that lines starting with `T:` or `D:` are now card tags everywhere,
+just like `Q:` and `A:`; to use such text literally inside a card, don't
+start a line with it.
 
 ### Separators
 
@@ -419,9 +472,10 @@ For more control, create a `hashcards.toml` (see `hashcards.example.toml` for th
 
 ```toml
 [server]
-host = "0.0.0.0"
+host = "127.0.0.1"
 port = 8000
 data_dir = "/var/lib/hashcards"
+session_timeout_minutes = 1440
 
 [git]
 repo_url = "https://github.com/user/flashcards.git"
@@ -441,9 +495,19 @@ name = "Mathematics"
 path = "math"
 ```
 
+By default the server binds to `127.0.0.1` and is only reachable from the local machine. To expose it on the network (for example on a home server), set `host = "0.0.0.0"` explicitly. **Warning:** hashcards has no authentication — anyone who can reach the port can read your cards and edit the underlying files. Only do this on a trusted network or behind an authenticating reverse proxy.
+
 When a `[git]` section is present, the server clones the repository into `{data_dir}/repo` on startup and syncs it periodically. Databases are stored in `{data_dir}/db`. A "Sync Now" button on the landing page triggers an immediate sync.
 
 The `[git]` section is optional. Omitting it disables git syncing; collection paths are then resolved relative to `{data_dir}/repo` (or you can pass directories directly on the command line instead).
+
+The `[server]` section also accepts:
+
+- `session_timeout_minutes`: drill sessions idle for longer than this are evicted and their database session row is closed; progress already graded is kept (each grade is written immediately). Default: `1440` (24 hours). `0` disables eviction.
+
+### Single-user semantics
+
+Serve mode assumes a single user per collection. Drill sessions are keyed by collection, so two browsers (or tabs) pointed at the same collection share one drill session: both see the same card, and a grade from either advances the shared queue. There is no per-client session isolation and no authentication. If a session is abandoned, it is evicted after `session_timeout_minutes` of inactivity; every grade given before that is already persisted.
 
 ### Defaults
 

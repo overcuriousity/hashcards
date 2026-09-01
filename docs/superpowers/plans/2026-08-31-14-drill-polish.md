@@ -44,7 +44,7 @@ Note: SPEC.md also asks for "a dedicated `update_bookmark_note` for the notes fo
 - Consumes: `Database::insert_bookmark(card_hash, note, now)`, `Database::update_bookmark_note(card_hash, note)`, `Database::get_bookmark(card_hash)` — all existing, signatures unchanged.
 - Produces: `insert_bookmark` with insert-if-absent semantics (an existing bookmark row is left completely untouched). No signature change; no other task depends on this one.
 
-- [ ] **Step 1: Write the failing regression test**
+- [x] **Step 1: Write the failing regression test**
 
 Add to the tests module in `src/db.rs`, next to `test_bookmark_crud`:
 
@@ -88,12 +88,12 @@ This needs `NaiveDate` in scope inside the tests module. The tests module alread
 
 (`chrono` is already a dependency — `src/types/timestamp.rs` uses it. `Timestamp::new` is `#[cfg(test)]`-only, which is exactly this context. `Timestamp` derives `PartialEq`, so `assert_eq!` on `created_at` works.)
 
-- [ ] **Step 2: Run the test and see it fail**
+- [x] **Step 2: Run the test and see it fail**
 
 Run: `cargo test test_rebookmark_preserves_note_and_created_at`
 Expected: FAIL on the `bm.note` assertion — `insert or replace` replaced the row, so `note` is `None` (and `created_at` is `later`).
 
-- [ ] **Step 3: Implement the fix**
+- [x] **Step 3: Implement the fix**
 
 In `src/db.rs`, replace the doc comment and SQL of `insert_bookmark` (currently at lines 400-413):
 
@@ -118,12 +118,12 @@ In `src/db.rs`, replace the doc comment and SQL of `insert_bookmark` (currently 
 
 (`card_hash` is the primary key of `bookmarks` — see `src/schema.sql` — so `on conflict (card_hash)` is the right conflict target. The only production caller is `src/cmd/drill/post.rs:160`; the notes form goes through `update_bookmark_note`, so nothing loses the ability to change a note.)
 
-- [ ] **Step 4: Run the tests and see them pass**
+- [x] **Step 4: Run the tests and see them pass**
 
 Run: `cargo test --lib db`
 Expected: PASS, including `test_rebookmark_preserves_note_and_created_at`, `test_bookmark_crud`, `test_bookmark_cascade_delete`, `test_rename_card_hash_cascades_bookmark`.
 
-- [ ] **Step 5: Update CHANGELOG.xml**
+- [x] **Step 5: Update CHANGELOG.xml**
 
 In `CHANGELOG.xml`, append inside the existing `<unreleased><fixed>` list:
 
@@ -133,7 +133,7 @@ In `CHANGELOG.xml`, append inside the existing `<unreleased><fixed>` list:
             </change>
 ```
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/db.rs CHANGELOG.xml
@@ -158,7 +158,7 @@ Do **not** touch `ServerState.session_started_at` (`src/cmd/drill/state.rs:35`),
 - Consumes: nothing from other tasks.
 - Produces: `pub fn handle_action(mutable: &mut MutableState, action: Action) -> Fallible<ActionResult>` and `fn finish_session(mutable: &mut MutableState) -> Fallible<()>`. Task 3 and Task 5 read this file but do not call these; serve's `handlers.rs:396` is updated here.
 
-- [ ] **Step 1: Remove the parameter from `finish_session` and `handle_action`**
+- [x] **Step 1: Remove the parameter from `finish_session` and `handle_action`**
 
 In `src/cmd/drill/post.rs`:
 
@@ -185,7 +185,7 @@ Update the two internal calls (`post.rs:141` and `post.rs:217`) to `finish_sessi
 
 If `Timestamp` is now unused in any `use` list in `post.rs`, remove the import (it is still used by `Timestamp::now()` in the grade and finish paths, so in practice it stays).
 
-- [ ] **Step 2: Update the serve call site**
+- [x] **Step 2: Update the serve call site**
 
 In `src/cmd/serve/handlers.rs:396`:
 
@@ -193,7 +193,7 @@ In `src/cmd/serve/handlers.rs:396`:
     handle_action(&mut session.mutable, action)?;
 ```
 
-- [ ] **Step 3: Update the tests in `post.rs`**
+- [x] **Step 3: Update the tests in `post.rs`**
 
 The four tests currently create `let now = Timestamp::now();` and pass it as the second argument. Change each call to the two-argument form and delete the now-unused `now` binding, e.g.:
 
@@ -209,12 +209,12 @@ The four tests currently create `let now = Timestamp::now();` and pass it as the
 
 Apply the same change to `test_home_returns_home`, `test_shutdown_returns_continue_when_unfinished`, and `test_reveal_sets_flag`.
 
-- [ ] **Step 4: Build and run the full test suite**
+- [x] **Step 4: Build and run the full test suite**
 
 Run: `cargo build && cargo test`
 Expected: clean build with no unused-variable/unused-import warnings in `post.rs` or `handlers.rs`; all tests PASS.
 
-- [ ] **Step 5: Update CHANGELOG.xml**
+- [x] **Step 5: Update CHANGELOG.xml**
 
 Append inside `<unreleased><changed>`:
 
@@ -224,7 +224,7 @@ Append inside `<unreleased><changed>`:
             </change>
 ```
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/cmd/drill/post.rs src/cmd/serve/handlers.rs CHANGELOG.xml
@@ -246,7 +246,7 @@ git commit -m "refactor: remove dead session_started_at threading from drill act
 - Consumes: `MutableState::new(db, session_id, cache, cards)` (`src/cmd/drill/state.rs:55`), `Database::close_session(session_id, ended_at)` (`src/db.rs:342`), `Database::get_reviews_for_session(session_id) -> Fallible<Vec<ReviewRow>>` (`src/db.rs:502`, returns only non-voided reviews — matching the void-not-delete rule), `Database::insert_review_and_update_performance` (`src/db.rs:259`), `update_performance` (`src/types/performance.rs`).
 - Produces: `pub fn finalize_interrupted_session(mutable: &MutableState) -> Fallible<String>` in `src/cmd/drill/server.rs`. No other task calls it.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Add at the bottom of `src/cmd/drill/server.rs`:
 
@@ -305,12 +305,12 @@ mod tests {
 
 (`CardHash::hash_bytes` needs `use crate::types::card_hash::CardHash;` — already imported at the top of `server.rs`. `Fallible`, `Database`, `Timestamp`, `MutableState` are likewise already imported there and arrive via `use super::*;`.)
 
-- [ ] **Step 2: Run the test and see it fail**
+- [x] **Step 2: Run the test and see it fail**
 
 Run: `cargo test test_finalize_interrupted_session_closes_row_and_summarizes`
 Expected: FAIL to compile with "cannot find function `finalize_interrupted_session`" — the function does not exist yet. (This is the failing-first step; the behavioral regression — `start_server` returning an error on interrupt — is asserted gone in Step 4's code review of the tail, since exercising a real signal is out of scope by design.)
 
-- [ ] **Step 3: Implement `finalize_interrupted_session`**
+- [x] **Step 3: Implement `finalize_interrupted_session`**
 
 Add to `src/cmd/drill/server.rs`, just below `start_server`:
 
@@ -328,7 +328,7 @@ pub fn finalize_interrupted_session(mutable: &MutableState) -> Fallible<String> 
 }
 ```
 
-- [ ] **Step 4: Rewrite the tail of `start_server`**
+- [x] **Step 4: Rewrite the tail of `start_server`**
 
 Replace `src/cmd/drill/server.rs:218-231` (from the `// Check if session was complete...` comment through the closing brace of the `else` block):
 
@@ -350,12 +350,12 @@ Also remove `use crate::error::fail;` from the imports at the top of `server.rs`
 
 Note: the pre-existing `state.mutable.lock().unwrap()` at `server.rs:219` stays as-is — the `.lock().unwrap()` sweep is BUG-50 (PR 6), out of scope here.
 
-- [ ] **Step 5: Run the tests and see them pass**
+- [x] **Step 5: Run the tests and see them pass**
 
 Run: `cargo test --lib cmd::drill`
 Expected: PASS, including the new test and the existing drill server tests in `src/cmd/drill/mod.rs`.
 
-- [ ] **Step 6: Update CHANGELOG.xml**
+- [x] **Step 6: Update CHANGELOG.xml**
 
 Append inside `<unreleased><fixed>`:
 
@@ -365,7 +365,7 @@ Append inside `<unreleased><fixed>`:
             </change>
 ```
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add src/cmd/drill/server.rs CHANGELOG.xml
@@ -392,7 +392,7 @@ Deriving instead of storing keeps Undo, session finish, and the grade path all c
 - Consumes: `MutableState.reviews`, `Review.card`, `Card::hash()` — all existing.
 - Produces: `pub fn progress(&self) -> (usize, usize)` on `MutableState` returning `(first_graded, repeats)`. **Task 5 calls exactly this.**
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Add at the bottom of `src/cmd/drill/state.rs`:
 
@@ -456,12 +456,12 @@ mod tests {
 
 (`Card`, `Grade`, `Performance`, `Timestamp` are already imported at the top of `state.rs` and arrive via `use super::*;`. `Card` and `Review` derive `Clone`. The deck name is a plain `String` — `DeckName` is `pub type DeckName = String` in `src/types/aliases.rs`.)
 
-- [ ] **Step 2: Run the test and see it fail**
+- [x] **Step 2: Run the test and see it fail**
 
 Run: `cargo test test_progress_counts_first_grades_and_repeats`
 Expected: FAIL to compile with "no method named `progress` found for struct `MutableState`".
 
-- [ ] **Step 3: Implement `MutableState::progress`**
+- [x] **Step 3: Implement `MutableState::progress`**
 
 In `src/cmd/drill/state.rs`, add to the imports at the top:
 
@@ -493,12 +493,12 @@ and add the method inside the existing `impl MutableState` block (below `new`):
     }
 ```
 
-- [ ] **Step 4: Run the tests and see them pass**
+- [x] **Step 4: Run the tests and see them pass**
 
 Run: `cargo test --lib cmd::drill::state`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/cmd/drill/state.rs
@@ -521,7 +521,7 @@ Render the counter next to the bar and drive the bar from `progress()` instead o
 - Consumes: `MutableState::progress() -> (usize, usize)` from Task 4.
 - Produces: `pub fn progress_text(first_graded: usize, total_cards: usize, repeats: usize) -> String` in `src/cmd/drill/get.rs` (pure; unit-tested). Markup gains `div.progress` wrapping a new `div.progress-text` and the existing `div.progress-bar`.
 
-- [ ] **Step 1: Write the failing tests for the text format**
+- [x] **Step 1: Write the failing tests for the text format**
 
 `get.rs` has no tests module yet; add one at the bottom of `src/cmd/drill/get.rs`:
 
@@ -542,12 +542,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run the tests and see them fail**
+- [x] **Step 2: Run the tests and see them fail**
 
 Run: `cargo test test_progress_text_formats`
 Expected: FAIL to compile with "cannot find function `progress_text`".
 
-- [ ] **Step 3: Implement `progress_text`**
+- [x] **Step 3: Implement `progress_text`**
 
 Add to `src/cmd/drill/get.rs` (above `render_session_page`):
 
@@ -564,12 +564,12 @@ pub fn progress_text(first_graded: usize, total_cards: usize, repeats: usize) ->
 }
 ```
 
-- [ ] **Step 4: Run the tests and see them pass**
+- [x] **Step 4: Run the tests and see them pass**
 
 Run: `cargo test test_progress_text_formats`
 Expected: PASS.
 
-- [ ] **Step 5: Wire it into `render_session_page`**
+- [x] **Step 5: Wire it into `render_session_page`**
 
 In `src/cmd/drill/get.rs`, replace lines 88-92 (from `let undo_disabled…` through `let progress_bar_style…`):
 
@@ -603,7 +603,7 @@ Then replace the header block in the markup (lines 145-155):
             }
 ```
 
-- [ ] **Step 6: Style the text**
+- [x] **Step 6: Style the text**
 
 In `src/cmd/drill/style.css`, inside the `.root { .header { … } }` block, add alongside the existing `.progress-bar` rule (which keeps working — CSS nesting produces descendant selectors, and the bar is still a descendant of `.header`):
 
@@ -621,12 +621,12 @@ In `src/cmd/drill/style.css`, inside the `.root { .header { … } }` block, add 
         }
 ```
 
-- [ ] **Step 7: Run the full test suite**
+- [x] **Step 7: Run the full test suite**
 
 Run: `cargo test`
 Expected: PASS (the drill e2e tests in `src/cmd/drill/mod.rs` fetch pages and must still render).
 
-- [ ] **Step 8: Update CHANGELOG.xml**
+- [x] **Step 8: Update CHANGELOG.xml**
 
 Append inside `<unreleased><added>`:
 
@@ -636,7 +636,7 @@ Append inside `<unreleased><added>`:
             </change>
 ```
 
-- [ ] **Step 9: Commit**
+- [x] **Step 9: Commit**
 
 ```bash
 git add src/cmd/drill/get.rs src/cmd/drill/style.css CHANGELOG.xml

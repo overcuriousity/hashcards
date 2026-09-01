@@ -15,7 +15,15 @@ create table cards (
 create table sessions (
     session_id integer primary key,
     started_at text not null,
-    ended_at text not null
+    ended_at text not null,
+    -- Heartbeat: stamped whenever the owning process serves a page or
+    -- handles an action. Lets the startup sweep tell a session abandoned by
+    -- a crash from one still live in another process.
+    last_seen_at text,
+    -- Explicit "this row has been closed" marker. `ended_at = started_at`
+    -- cannot serve as one: a session whose reviews were all undone is
+    -- rewritten back to that value and would be re-detected forever.
+    closed integer not null default 0
 ) strict;
 
 create table reviews (
@@ -36,7 +44,8 @@ create table reviews (
     interval_days integer not null,
     due_date text not null,
     duration_ms integer,
-    voided integer not null default 0
+    voided integer not null default 0,
+    reviewed_date text generated always as (substr(reviewed_at, 1, 10)) virtual
 ) strict;
 
 create table bookmarks (
@@ -46,4 +55,17 @@ create table bookmarks (
         on delete cascade,
     note text,
     created_at text not null
+) strict;
+
+create index idx_reviews_card_hash on reviews (card_hash);
+create index idx_reviews_session_id on reviews (session_id);
+create index idx_reviews_reviewed_date on reviews (reviewed_date);
+
+create table schema_version (
+    version integer not null
+) strict;
+
+create table meta (
+    key text primary key,
+    value text not null
 ) strict;

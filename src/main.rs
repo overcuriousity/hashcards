@@ -17,6 +17,7 @@ mod cmd;
 mod collection;
 mod db;
 mod error;
+mod flash;
 mod fsrs;
 #[cfg(test)]
 mod helper;

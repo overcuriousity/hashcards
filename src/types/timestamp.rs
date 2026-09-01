@@ -15,6 +15,7 @@
 use std::fmt::Display;
 use std::fmt::Formatter;
 
+use chrono::Duration;
 use chrono::Local;
 use chrono::NaiveDateTime;
 use chrono::SubsecRound;
@@ -47,6 +48,11 @@ impl Timestamp {
     /// The current timestamp in the user's local time.
     pub fn now() -> Self {
         Self(Local::now().naive_local().trunc_subsecs(3))
+    }
+
+    /// This timestamp shifted `minutes` into the past.
+    pub fn minus_minutes(self, minutes: i64) -> Self {
+        Self((self.0 - Duration::minutes(minutes)).trunc_subsecs(3))
     }
 
     /// The date component of this timestamp.

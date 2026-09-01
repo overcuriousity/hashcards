@@ -1,13 +1,13 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::Mutex;
+
+use parking_lot::Mutex;
 
 use axum::Router;
 use axum::routing::get;
 use axum::routing::post;
 use tokio::net::TcpListener;
-use tokio::signal;
 use tokio::sync::RwLock;
 
 use crate::cmd::drill::hljs::HLJS_CSS_URL;
@@ -21,16 +21,21 @@ use crate::cmd::drill::katex::katex_css_handler;
 use crate::cmd::drill::katex::katex_font_handler;
 use crate::cmd::drill::katex::katex_js_handler;
 use crate::cmd::drill::katex::katex_mhchem_js_handler;
-use crate::cmd::serve::config::ResolvedCollection;
-use crate::cmd::serve::config::ResolvedGit;
-use crate::cmd::serve::config::ResolvedServeConfig;
-use crate::cmd::serve::git::clone_or_pull;
-use crate::cmd::serve::git::spawn_sync_task;
+use crate::cmd::drill::template::icon_192_handler;
+use crate::cmd::drill::template::icon_512_handler;
+use crate::cmd::drill::template::manifest_handler;
 use crate::cmd::serve::bookmarks::bookmark_delete_handler;
 use crate::cmd::serve::bookmarks::bookmark_list_handler;
 use crate::cmd::serve::bookmarks::bookmark_note_handler;
+use crate::cmd::serve::config::ResolvedCollection;
+use crate::cmd::serve::hedgedoc::check_startup_slug_collisions;
+use crate::db::Database;
+use crate::cmd::serve::config::ResolvedGit;
+use crate::cmd::serve::config::ResolvedServeConfig;
 use crate::cmd::serve::edit::edit_get_handler;
 use crate::cmd::serve::edit::edit_post_handler;
+use crate::cmd::serve::git::clone_or_pull;
+use crate::cmd::serve::git::spawn_sync_task;
 use crate::cmd::serve::handlers::collection_file_handler;
 use crate::cmd::serve::handlers::collection_get_handler;
 use crate::cmd::serve::handlers::collection_post_handler;
@@ -43,16 +48,95 @@ use crate::cmd::serve::handlers::hedgedoc_sync_now_handler;
 use crate::cmd::serve::handlers::sync_handler;
 use crate::cmd::serve::hedgedoc::build_combined_infos;
 use crate::cmd::serve::hedgedoc::build_note;
-use crate::cmd::serve::hedgedoc::build_source;
+use crate::cmd::serve::hedgedoc::build_source_lossless;
+use crate::cmd::serve::hedgedoc::error_note;
 use crate::cmd::serve::hedgedoc::source_uri_from_url;
 use crate::cmd::serve::hedgedoc::spawn_hedgedoc_sync_task;
-use crate::cmd::drill::template::icon_192_handler;
-use crate::cmd::drill::template::icon_512_handler;
-use crate::cmd::drill::template::manifest_handler;
 use crate::cmd::serve::landing::landing_handler;
 use crate::cmd::serve::state::AppState;
+use crate::cmd::serve::state::HedgedocSource;
+use crate::cmd::serve::state::SharedSession;
+use crate::cmd::serve::state::evict_idle_sessions;
+use crate::cmd::serve::stats::collection_stats_handler;
+use crate::cmd::signals::terminate_signal;
+use crate::error::ErrorReport;
 use crate::error::Fallible;
 use crate::types::timestamp::Timestamp;
+
+/// How long a session's heartbeat must have been silent before the startup
+/// sweep treats it as abandoned. Generous on purpose: closing a session that
+/// is merely idle in another process is worse than leaving a crashed one open
+/// until the next restart. This does not eliminate the race, only shrinks its
+/// window: a CLI `drill` session idle longer than this, in a database this
+/// server also serves, is closed if `serve` happens to restart during that
+/// window. Accepted tradeoff — any fixed cutoff has some such window.
+const SESSION_STALE_MINUTES: i64 = 60;
+
+/// Close session rows left dangling by a crash or restart, across every
+/// collection this server serves, and return the per-slug counts so the deck
+/// browser can report them once.
+///
+/// A collection whose database cannot be opened is skipped with a log line
+/// rather than failing startup: an unreadable database is the deck browser's
+/// problem to report, not a reason to refuse to serve everything else.
+///
+/// Each collection's database is independent, so the sweeps run on their own
+/// threads rather than one after another: a server with many collections
+/// would otherwise have its startup delayed in proportion to how many it
+/// serves.
+fn sweep_dangling_sessions(
+    config: &ResolvedServeConfig,
+    hedgedoc_sources: &[HedgedocSource],
+) -> HashMap<String, usize> {
+    // Only sessions whose heartbeat has been silent this long are presumed
+    // dead. A CLI `drill` sharing the database stamps its heartbeat as the
+    // user works, so a live session is never swept out from under it.
+    let stale_before = Timestamp::now().minus_minutes(SESSION_STALE_MINUTES);
+    let collections: Vec<&ResolvedCollection> = config
+        .collections
+        .iter()
+        .chain(hedgedoc_sources.iter().map(|s| &s.collection))
+        .collect();
+
+    let results: Vec<(String, Fallible<usize>)> = std::thread::scope(|scope| {
+        let handles: Vec<_> = collections
+            .into_iter()
+            .map(|rc| {
+                scope.spawn(move || {
+                    let closed = (|| {
+                        let db_path = rc.db_path.to_str().ok_or_else(|| {
+                            ErrorReport::new(format!(
+                                "Database path is not valid UTF-8: {}",
+                                rc.db_path.display()
+                            ))
+                        })?;
+                        Database::new(db_path).and_then(|db| db.close_dangling_sessions(stale_before))
+                    })();
+                    (rc.slug.clone(), closed)
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().expect("sweep thread panicked"))
+            .collect()
+    });
+
+    let mut counts = HashMap::new();
+    for (slug, closed) in results {
+        match closed {
+            Ok(0) => {}
+            Ok(n) => {
+                log::info!("Closed {n} interrupted session(s) for collection '{slug}'");
+                counts.insert(slug, n);
+            }
+            Err(e) => {
+                log::error!("Could not close interrupted sessions for collection '{slug}': {e}")
+            }
+        }
+    }
+    counts
+}
 
 pub async fn start_serve(config: ResolvedServeConfig) -> Fallible<()> {
     // Git mode: clone/pull repo and create data directories
@@ -68,6 +152,8 @@ pub async fn start_serve(config: ResolvedServeConfig) -> Fallible<()> {
                 repo_url: git.repo_url.clone(),
                 branch: git.branch.clone(),
                 poll_interval_minutes: git.poll_interval_minutes,
+                commit_author_name: git.commit_author_name.clone(),
+                commit_author_email: git.commit_author_email.clone(),
                 repo_dir: git.repo_dir.clone(),
                 db_dir: git.db_dir.clone(),
             })
@@ -87,37 +173,29 @@ pub async fn start_serve(config: ResolvedServeConfig) -> Fallible<()> {
     let data_dir: Option<PathBuf> = config.data_dir.clone();
 
     let hedgedoc_sources_init = if let Some(ref dd) = data_dir {
-        let mut sources = Vec::new();
+        let mut sources: Vec<HedgedocSource> = Vec::new();
         for entry in &config.hedgedoc_entries {
-            let maybe_source_uri = source_uri_from_url(&entry.url);
-            let maybe_collection = maybe_source_uri.as_ref().and_then(|source_uri| {
-                sources
-                    .iter()
-                    .find(|s: &&crate::cmd::serve::state::HedgedocSource| &s.source_uri == source_uri)
-                    .map(|s| s.collection.clone())
-            });
-
-            if let Some(collection) = maybe_collection {
-                match build_note(&entry.url, &collection).await {
-                    Ok(note) => {
-                        if let Some(source_uri) = maybe_source_uri {
-                            if let Some(existing) =
-                                sources.iter_mut().find(|s| s.source_uri == source_uri)
-                            {
-                                existing.notes.push(note);
-                            }
+            let existing_idx = source_uri_from_url(&entry.url)
+                .and_then(|source_uri| sources.iter().position(|s| s.source_uri == source_uri));
+            match existing_idx {
+                Some(idx) => {
+                    // Additional note for an already-built source. build_note
+                    // reports sync failures via `last_error` rather than
+                    // erroring, and even a hard error keeps the entry (BUG-40).
+                    let collection = sources[idx].collection.clone();
+                    match build_note(&entry.url, &collection).await {
+                        Ok(note) => sources[idx].notes.push(note),
+                        Err(e) => {
+                            log::error!("Failed to initialize HedgeDoc note {}: {e}", entry.url);
+                            sources[idx]
+                                .notes
+                                .push(error_note(&entry.url, e.to_string()));
                         }
                     }
-                    Err(e) => {
-                        log::error!("Failed to initialize HedgeDoc source {}: {e}", entry.url)
-                    }
                 }
-                continue;
-            }
-
-            match build_source(&entry.url, dd).await {
-                Ok(s) => sources.push(s),
-                Err(e) => log::error!("Failed to initialize HedgeDoc source {}: {e}", entry.url),
+                // First note for this source (or unparseable URL):
+                // build_source_lossless never drops the entry.
+                None => sources.push(build_source_lossless(&entry.url, dd).await),
             }
         }
         sources
@@ -167,6 +245,18 @@ pub async fn start_serve(config: ResolvedServeConfig) -> Fallible<()> {
     } else {
         None
     };
+    // BUG-43: refuse to start if two collections share a URL slug. Routing
+    // prefers configured collections, so a collision silently addresses the
+    // wrong database rather than failing visibly.
+    check_startup_slug_collisions(&config.collections, &hedgedoc_sources_init)?;
+
+    // FEAT-03: close session rows left open by a crash or restart, once, at
+    // startup. They cannot be resumed (the card queue lives only in memory),
+    // so they are closed with all persisted reviews kept. This must not run
+    // per request: the predicate cannot distinguish a crashed session from a
+    // live one, and a CLI `drill` may be running against the same database.
+    let interrupted_closed = sweep_dangling_sessions(&config, &hedgedoc_sources_init);
+
     let hedgedoc_sources = Arc::new(Mutex::new(hedgedoc_sources_init));
     let hedgedoc_last_synced = Arc::new(Mutex::new(hedgedoc_last_synced_init));
 
@@ -178,7 +268,12 @@ pub async fn start_serve(config: ResolvedServeConfig) -> Fallible<()> {
         hedgedoc_sources: hedgedoc_sources.clone(),
         hedgedoc_last_synced: hedgedoc_last_synced.clone(),
         config_path,
+        // Counts were just computed above, so the stamp starts fresh.
+        counts_refreshed_at: Arc::new(Mutex::new(Some(Timestamp::now()))),
+        interrupted_closed: Arc::new(Mutex::new(interrupted_closed)),
     };
+
+    spawn_session_eviction_task(state.sessions.clone(), config.session_timeout_minutes);
 
     // Spawn background git sync task (only in git mode)
     if let Some(git) = sync_git {
@@ -212,10 +307,8 @@ pub async fn start_serve(config: ResolvedServeConfig) -> Fallible<()> {
         .route("/collection/{slug}", get(collection_get_handler))
         .route("/collection/{slug}", post(collection_post_handler))
         .route("/collection/{slug}/start", post(collection_start_handler))
-        .route(
-            "/collection/{slug}/bookmarks",
-            get(bookmark_list_handler),
-        )
+        .route("/collection/{slug}/stats", get(collection_stats_handler))
+        .route("/collection/{slug}/bookmarks", get(bookmark_list_handler))
         .route(
             "/collection/{slug}/bookmarks/{hash}/delete",
             post(bookmark_delete_handler),
@@ -224,14 +317,8 @@ pub async fn start_serve(config: ResolvedServeConfig) -> Fallible<()> {
             "/collection/{slug}/bookmarks/{hash}/note",
             post(bookmark_note_handler),
         )
-        .route(
-            "/collection/{slug}/edit/{hash}",
-            get(edit_get_handler),
-        )
-        .route(
-            "/collection/{slug}/edit/{hash}",
-            post(edit_post_handler),
-        )
+        .route("/collection/{slug}/edit/{hash}", get(edit_get_handler))
+        .route("/collection/{slug}/edit/{hash}", post(edit_post_handler))
         .route(
             "/collection/{slug}/file/{*path}",
             get(collection_file_handler),
@@ -265,7 +352,6 @@ pub async fn start_serve(config: ResolvedServeConfig) -> Fallible<()> {
     Ok(())
 }
 
-
 async fn script_handler() -> (
     axum::http::StatusCode,
     [(axum::http::HeaderName, &'static str); 1],
@@ -298,8 +384,43 @@ async fn style_handler() -> (
 }
 
 async fn shutdown_signal() {
-    signal::ctrl_c()
-        .await
-        .expect("failed to install Ctrl+C handler");
+    terminate_signal().await;
     log::debug!("Received shutdown signal");
+}
+
+/// Periodically evict drill sessions idle past the configured timeout,
+/// closing their DB session rows (BUG-08).
+fn spawn_session_eviction_task(
+    sessions: Arc<Mutex<HashMap<String, SharedSession>>>,
+    timeout_minutes: u64,
+) {
+    if timeout_minutes == 0 {
+        log::debug!("Idle session eviction disabled (session_timeout_minutes = 0)");
+        return;
+    }
+    tokio::spawn(async move {
+        // Check at a quarter of the timeout, capped at every 10 minutes.
+        let tick_secs = (timeout_minutes * 60 / 4).clamp(1, 600);
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(tick_secs));
+        ticker.tick().await;
+        loop {
+            ticker.tick().await;
+            let sessions = sessions.clone();
+            match tokio::task::spawn_blocking(move || {
+                evict_idle_sessions(&sessions, timeout_minutes, Timestamp::now())
+            })
+            .await
+            {
+                Ok(evicted) if !evicted.is_empty() => {
+                    log::info!(
+                        "Evicted {} idle drill session(s): {}",
+                        evicted.len(),
+                        evicted.join(", ")
+                    );
+                }
+                Ok(_) => {}
+                Err(e) => log::error!("Session eviction task failed: {e}"),
+            }
+        }
+    });
 }

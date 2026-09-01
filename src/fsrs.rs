@@ -71,7 +71,7 @@ impl TryFrom<String> for Grade {
             "hard" => Ok(Grade::Hard),
             "good" => Ok(Grade::Good),
             "easy" => Ok(Grade::Easy),
-            _ => fail("invalid grade string: {value}"),
+            _ => fail(format!("invalid grade string: {value}")),
         }
     }
 }
@@ -412,5 +412,16 @@ mod tests {
         for s in invalid_strings {
             assert!(Grade::try_from(s.to_string()).is_err());
         }
+    }
+
+    /// Regression test for BUG-29: the error message must contain the actual
+    /// offending value, not the literal string "{value}".
+    #[test]
+    fn test_invalid_grade_error_contains_value() {
+        let result = Grade::try_from("bogus".to_string());
+        let err = result.err().unwrap();
+        let msg = err.to_string();
+        assert!(msg.contains("bogus"), "message was: {msg}");
+        assert!(!msg.contains("{value}"), "message was: {msg}");
     }
 }

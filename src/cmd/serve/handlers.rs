@@ -1,10 +1,15 @@
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
+use parking_lot::Mutex;
+
 use axum::Form;
 use axum::extract::Path;
+use axum::extract::Query;
 use axum::extract::State;
 use axum::http::HeaderName;
 use axum::http::StatusCode;
@@ -13,12 +18,15 @@ use axum::response::Html;
 use axum::response::Redirect;
 use maud::html;
 
+use crate::flash::Flash;
+
 use crate::cmd::drill::cache::Cache;
 use crate::cmd::drill::get::CompletionAction;
 use crate::cmd::drill::get::RenderContext;
 use crate::cmd::drill::get::render_completion_page;
 use crate::cmd::drill::get::render_session_page;
 use crate::cmd::drill::post::Action;
+use crate::cmd::drill::post::ActionResult;
 use crate::cmd::drill::post::FormData;
 use crate::cmd::drill::post::handle_action;
 use crate::cmd::drill::server::escape_js_string_literal;
@@ -27,39 +35,56 @@ use crate::cmd::drill::template::page_template;
 use crate::cmd::drill::template::page_template_with_script;
 use crate::cmd::serve::browse::build_deck_tree;
 use crate::cmd::serve::browse::render_browse_page;
-use crate::cmd::serve::config::HedgedocEntry;
+use crate::cmd::run_blocking;
 use crate::cmd::serve::config::ResolvedCollection;
 use crate::cmd::serve::git::clone_or_pull;
 use crate::cmd::serve::hedgedoc::build_combined_infos;
 use crate::cmd::serve::hedgedoc::build_note;
 use crate::cmd::serve::hedgedoc::build_source;
+use crate::cmd::serve::hedgedoc::cleanup_after_delete;
+use crate::cmd::serve::hedgedoc::commit_add;
+use crate::cmd::serve::hedgedoc::commit_delete;
 use crate::cmd::serve::hedgedoc::create_minimal_config;
-use crate::cmd::serve::hedgedoc::all_hedgedoc_entries;
-use crate::cmd::serve::hedgedoc::persist_hedgedoc_entries;
+use crate::cmd::serve::hedgedoc::find_slug_collision;
+use crate::cmd::serve::hedgedoc::normalize_hedgedoc_url;
+use crate::cmd::serve::hedgedoc::slug_for_source_uri;
 use crate::cmd::serve::hedgedoc::source_uri_from_url;
 use crate::cmd::serve::hedgedoc::sync_source;
 use crate::cmd::serve::state::AppState;
 use crate::cmd::serve::state::DrillSession;
+use crate::cmd::serve::state::SharedSession;
 use crate::collection::Collection;
+use crate::db::Database;
+use crate::error::ErrorReport;
 use crate::error::Fallible;
+use crate::error::fail;
 use crate::media::load::MediaLoader;
 use crate::rng::TinyRng;
 use crate::rng::shuffle;
 use crate::types::card::Card;
 use crate::types::card_hash::CardHash;
 use crate::types::date::Date;
+use crate::types::performance::Jitter;
 use crate::types::timestamp::Timestamp;
-use crate::db::Database;
 
+/// Run blocking filesystem/SQLite work on tokio's blocking thread pool.
+///
+/// Serve handlers parse collections from disk and touch SQLite; doing that
+/// on the async executor stalls every other request (BUG-44). Pattern as in
+/// `git.rs` (`spawn_blocking` in `spawn_sync_task`).
 pub async fn collection_get_handler(
     State(state): State<AppState>,
     Path(slug): Path<String>,
+    Query(query): Query<HashMap<String, String>>,
 ) -> (StatusCode, Html<String>) {
+    let flash = Flash::from_query(&query);
     // Determine whether this slug is known before calling the inner function,
     // so we can return 404 for unknown collections vs. 500 for real errors.
-    let known = find_collection(&state, &slug).is_some()
-        || state.sessions.lock().unwrap().contains_key(&slug);
-    match collection_get_inner(&state, &slug) {
+    let known =
+        find_collection(&state, &slug).is_some() || state.sessions.lock().contains_key(&slug);
+    let state2 = state.clone();
+    let slug2 = slug.clone();
+    match run_blocking(move || collection_get_inner(&state2, &slug2, flash)).await {
         Ok(html) => (StatusCode::OK, Html(html)),
         Err(e) => {
             let status = if known {
@@ -80,9 +105,17 @@ pub async fn collection_get_handler(
     }
 }
 
-fn collection_get_inner(state: &AppState, slug: &str) -> Fallible<String> {
-    // Take the session out of the map so the lock is not held during rendering.
-    let session = state.sessions.lock().unwrap().remove(slug);
+fn collection_get_inner(state: &AppState, slug: &str, flash: Option<Flash>) -> Fallible<String> {
+    // Clone the Arc out of the map so the map lock is not held during
+    // rendering; the session itself stays in the map even if rendering fails.
+    let session: Option<SharedSession> = state.sessions.lock().get(slug).cloned();
+
+    // A concurrent Home action (or eviction) may have removed this session
+    // from the map, and closed its DB row, between the clone above and the
+    // lock below; `is_detached` is how removers report that (see the
+    // `detached` field's doc comment). Treat it exactly like "no session in
+    // the map" rather than rendering a stale session or touching its row.
+    let session = session.filter(|s| !s.lock().is_detached());
 
     let Some(session) = session else {
         // No active session: show the deck browser.
@@ -94,7 +127,7 @@ fn collection_get_inner(state: &AppState, slug: &str) -> Fallible<String> {
         // share the same deck name the edit link is suppressed for that deck to
         // avoid pointing at an arbitrary note.
         let hedge_urls: std::collections::HashMap<String, String> = {
-            let sources = state.hedgedoc_sources.lock().unwrap();
+            let sources = state.hedgedoc_sources.lock();
             let mut map = std::collections::HashMap::new();
             let mut dupes: HashSet<String> = HashSet::new();
             for (deck_name, url) in sources
@@ -118,11 +151,38 @@ fn collection_get_inner(state: &AppState, slug: &str) -> Fallible<String> {
                 rc.db_path.display()
             ))
         })?;
-        let bookmark_count = Database::new(db_path)?.count_bookmarks()?;
-        let html = render_browse_page(&rc.name, slug, &tree, &hedge_urls, bookmark_count);
+        let db = Database::new(db_path)?;
+        // FEAT-03: report the session rows the startup sweep closed. The
+        // sweep itself runs once, at startup: it cannot tell a crashed
+        // session from a live one, and `serve` may share a database with a
+        // running CLI `drill`, so doing it per request would stamp
+        // `ended_at` on a session that is still going. Taking the entry also
+        // means the notice appears once instead of on every visit.
+        let interrupted_closed = state.interrupted_closed.lock().remove(slug).unwrap_or(0);
+        let bookmark_count = db.count_bookmarks()?;
+        let html = render_browse_page(
+            &rc.name,
+            slug,
+            &tree,
+            &hedge_urls,
+            bookmark_count,
+            interrupted_closed,
+            flash,
+        );
         return Ok(html.into_string());
     };
 
+    let mut session = session.lock();
+    // BUG-08: stamp activity so the eviction task only reaps idle sessions.
+    session.last_activity_at = Timestamp::now();
+    // BUG-14: start the per-card timer when the card is served.
+    session.mutable.mark_card_shown();
+    // Heartbeat, so another process's startup sweep can tell this session
+    // apart from one abandoned by a crash.
+    let session_id = session.mutable.session_id;
+    if let Err(e) = session.mutable.db.touch_session(session_id, Timestamp::now()) {
+        log::debug!("could not stamp session heartbeat: {e}");
+    }
     let form_action = format!("/collection/{slug}");
     let file_url_prefix = format!("/collection/{slug}/file");
     let ctx = RenderContext {
@@ -139,10 +199,12 @@ fn collection_get_inner(state: &AppState, slug: &str) -> Fallible<String> {
     } else {
         render_session_page(&ctx, &session.mutable)?
     };
+    let body = html! {
+        @if let Some(f) = &flash { (f.render()) }
+        (body)
+    };
     let script_url = format!("/collection/{slug}/script.js");
     let html = page_template_with_script(&script_url, body);
-    // Put the session back now that rendering is done.
-    state.sessions.lock().unwrap().insert(slug.to_owned(), session);
     Ok(html.into_string())
 }
 
@@ -150,7 +212,7 @@ pub(super) fn find_collection(state: &AppState, slug: &str) -> Option<ResolvedCo
     if let Some(rc) = state.config.collections.iter().find(|c| c.slug == slug) {
         return Some(rc.clone());
     }
-    let sources = state.hedgedoc_sources.lock().unwrap();
+    let sources = state.hedgedoc_sources.lock();
     sources
         .iter()
         .find(|s| s.collection.slug == slug)
@@ -215,11 +277,15 @@ pub async fn collection_start_handler(
     Path(slug): Path<String>,
     Form(form): Form<StartDrillForm>,
 ) -> Redirect {
-    match collection_start_inner(&state, &slug, form.decks, form.limit) {
+    let state2 = state.clone();
+    let slug2 = slug.clone();
+    match run_blocking(move || collection_start_inner(&state2, &slug2, form.decks, form.limit))
+        .await
+    {
         Ok(()) => Redirect::to(&format!("/collection/{slug}")),
         Err(e) => {
             log::error!("error starting drill for collection {slug}: {e}");
-            Redirect::to(&format!("/collection/{slug}"))
+            Flash::error(e.to_string()).redirect(&format!("/collection/{slug}"))
         }
     }
 }
@@ -230,13 +296,32 @@ fn collection_start_inner(
     selected_decks: Vec<String>,
     limit: Option<usize>,
 ) -> Fallible<()> {
-    // Remove any existing session before doing DB work.
-    state.sessions.lock().unwrap().remove(slug);
+    if selected_decks.is_empty() {
+        return fail("Select at least one deck.");
+    }
+    // FEAT-03: never silently discard an unfinished session. The redirect
+    // to /collection/{slug} lands on the running session; the user must
+    // End it (or let BUG-08 eviction reap it) before starting a new one.
+    {
+        let mut sessions = state.sessions.lock();
+        if let Some(existing) = sessions.get(slug) {
+            if existing.lock().mutable.finished_at.is_none() {
+                return Ok(());
+            }
+        }
+        // Finished sessions are replaced.
+        if let Some(previous) = sessions.remove(slug) {
+            previous.lock().detach();
+        }
+    }
 
     // Create the session outside the lock (may do filesystem/DB work).
     let session = create_session(state, slug, &selected_decks, limit)?;
     if let Some(s) = session {
-        state.sessions.lock().unwrap().insert(slug.to_string(), s);
+        state
+            .sessions
+            .lock()
+            .insert(slug.to_string(), Arc::new(Mutex::new(s)));
     }
     Ok(())
 }
@@ -290,10 +375,14 @@ fn create_session(
         return Ok(None);
     }
 
-    // Shuffle
+    // Seed a session RNG, used for shuffling and interval jitter.
     let seed = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap()
+        .map_err(|e| {
+            ErrorReport::new(format!(
+                "The system clock is set before the Unix epoch: {e}"
+            ))
+        })?
         .as_nanos() as u64;
     let mut rng = TinyRng::from_seed(seed);
     due_cards = shuffle(due_cards, &mut rng);
@@ -320,7 +409,14 @@ fn create_session(
         collection.macros,
         session_started_at,
         answer_controls,
-        MutableState::new(collection.db, session_id, cache, due_cards),
+        MutableState::new(
+            collection.db,
+            session_id,
+            cache,
+            due_cards,
+            Jitter::new(state.config.defaults.jitter)?,
+            rng,
+        ),
     )))
 }
 
@@ -344,23 +440,46 @@ pub async fn collection_post_handler(
     Path(slug): Path<String>,
     Form(form): Form<FormData>,
 ) -> Redirect {
-    match collection_post_inner(&state, &slug, form.action) {
+    let state2 = state.clone();
+    let slug2 = slug.clone();
+    match run_blocking(move || collection_post_inner(&state2, &slug2, form)).await {
         Ok(redirect) => redirect,
         Err(e) => {
             log::error!("error handling action for collection {slug}: {e}");
-            Redirect::to(&format!("/collection/{slug}"))
+            Flash::error(e.to_string()).redirect(&format!("/collection/{slug}"))
         }
     }
 }
 
-fn collection_post_inner(state: &AppState, slug: &str, action: Action) -> Fallible<Redirect> {
+fn collection_post_inner(state: &AppState, slug: &str, form: FormData) -> Fallible<Redirect> {
+    let action = form.action;
+    let submitted_undo: Option<i64> = form.undo_review;
+    let submitted_card: Option<CardHash> = match form.card.as_deref() {
+        Some(hex) => match CardHash::from_hex(hex) {
+            Ok(hash) => Some(hash),
+            Err(_) => {
+                log::debug!("ignoring grade with unparseable card hash for collection {slug}");
+                return Ok(Flash::error(
+                    "That grade carried an invalid card reference and was ignored.",
+                )
+                .redirect(&format!("/collection/{slug}")));
+            }
+        },
+        None => None,
+    };
     // Home action: close the session and drop it without needing to hold the
     // global lock during DB work.
     if matches!(action, Action::Home) {
-        let session = state.sessions.lock().unwrap().remove(slug);
+        let session = state.sessions.lock().remove(slug);
         if let Some(s) = session {
+            let mut s = s.lock();
+            s.detach();
             if s.mutable.finished_at.is_none() {
-                if let Err(e) = s.mutable.db.close_session(s.mutable.session_id, Timestamp::now()) {
+                if let Err(e) = s
+                    .mutable
+                    .db
+                    .close_session(s.mutable.session_id, Timestamp::now())
+                {
                     log::error!(
                         "failed to close session {} for collection {slug}: {e}",
                         s.mutable.session_id
@@ -370,33 +489,95 @@ fn collection_post_inner(state: &AppState, slug: &str, action: Action) -> Fallib
         }
 
         // Snapshot inputs, then compute + update in background (don't block response).
-        let sources_snapshot = state.hedgedoc_sources.lock().unwrap().clone();
+        let sources_snapshot = state.hedgedoc_sources.lock().clone();
         let static_collections = state.config.collections.clone();
         let collections_clone = state.collections.clone();
+        let counts_refreshed_at = state.counts_refreshed_at.clone();
         tokio::spawn(async move {
-            let combined = build_combined_infos(&static_collections, &sources_snapshot);
-            *collections_clone.write().await = combined;
+            match tokio::task::spawn_blocking(move || {
+                build_combined_infos(&static_collections, &sources_snapshot)
+            })
+            .await
+            {
+                Ok(combined) => {
+                    *collections_clone.write().await = combined;
+                    *counts_refreshed_at.lock() = Some(Timestamp::now());
+                }
+                Err(e) => log::error!("Collection count refresh failed: {e}"),
+            }
         });
 
         return Ok(Redirect::to("/"));
     }
 
-    // Take ownership of the session so we can release the global lock before
-    // handle_action does any DB work.
-    let mut session = match state.sessions.lock().unwrap().remove(slug) {
+    // Lock the session in place: the map lock is released immediately, the
+    // per-slug lock is held for the DB work, and an error leaves the session
+    // in the map untouched.
+    let session: SharedSession = match state.sessions.lock().get(slug).cloned() {
         Some(s) => s,
         None => return Ok(Redirect::to(&format!("/collection/{slug}"))),
     };
+    let mut guard = session.lock();
+
+    // Re-check that this is still the session the map holds for `slug`: a
+    // concurrent Home request may have removed it (and closed its DB row)
+    // while we were waiting for the session lock, a concurrent start may have
+    // replaced it with a new drill, or the idle sweep may have evicted it.
+    //
+    // This must not re-read the sessions map: taking the map lock here, while
+    // the session lock is held, inverts the global order (map, then session)
+    // that `evict_idle_sessions` and the landing page follow, and two
+    // `parking_lot` mutexes with no timeout deadlock the server outright.
+    // Every removal marks the session instead, under the map lock, so the
+    // flag is all we need.
+    if guard.is_detached() {
+        return Ok(
+            Flash::error("The session has ended, so that action was ignored.")
+                .redirect(&format!("/collection/{slug}")),
+        );
+    }
+
+    let session = &mut *guard;
+    // BUG-08: stamp activity so the eviction task only reaps idle sessions.
+    session.last_activity_at = Timestamp::now();
 
     // `Action::Home` returned early above, and it is the only action for which
     // `handle_action` yields `ActionResult::Home`. Every action reaching here
-    // therefore leaves the session running, so the result needs no dispatch and
-    // session closing lives solely in that early return, where it cannot drift
-    // out of step with a second copy.
-    handle_action(&mut session.mutable, session.session_started_at, action)?;
+    // leaves the session running; the only result needing dispatch is
+    // `ContinueWithFlash`, which carries a one-shot message for the user.
+    let result = handle_action(&mut session.mutable, action, submitted_card, submitted_undo)?;
 
-    state.sessions.lock().unwrap().insert(slug.to_owned(), session);
-    Ok(Redirect::to(&format!("/collection/{slug}")))
+    // BUG-45: a finished session changes due counts; refresh them in the
+    // background so the landing page is up to date.
+    if matches!(result, ActionResult::SessionFinished) {
+        let sources_snapshot = state.hedgedoc_sources.lock().clone();
+        let static_collections = state.config.collections.clone();
+        let collections_clone = state.collections.clone();
+        let counts_refreshed_at = state.counts_refreshed_at.clone();
+        tokio::spawn(async move {
+            match tokio::task::spawn_blocking(move || {
+                build_combined_infos(&static_collections, &sources_snapshot)
+            })
+            .await
+            {
+                Ok(combined) => {
+                    *collections_clone.write().await = combined;
+                    *counts_refreshed_at.lock() = Some(Timestamp::now());
+                }
+                Err(e) => log::error!("Collection count refresh failed: {e}"),
+            }
+        });
+    }
+
+    match result {
+        ActionResult::ContinueWithFlash(flash) => {
+            Ok(flash.redirect(&format!("/collection/{slug}")))
+        }
+        ActionResult::Ignored(reason) => {
+            Ok(Flash::error(reason).redirect(&format!("/collection/{slug}")))
+        }
+        _ => Ok(Redirect::to(&format!("/collection/{slug}"))),
+    }
 }
 
 pub async fn collection_file_handler(
@@ -414,7 +595,17 @@ pub async fn collection_file_handler(
         }
     };
 
-    let loader = MediaLoader::new(coll_dir);
+    let loader = match MediaLoader::new(coll_dir) {
+        Ok(loader) => loader,
+        Err(error) => {
+            log::error!("Failed to create media loader: {error}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                [(CONTENT_TYPE, "text/plain")],
+                b"Internal Server Error".to_vec(),
+            );
+        }
+    };
     let validated_path: PathBuf = match loader.validate(&path) {
         Ok(p) => p,
         Err(_) => {
@@ -457,18 +648,21 @@ pub async fn collection_script_handler(
     State(state): State<AppState>,
     Path(slug): Path<String>,
 ) -> (StatusCode, [(HeaderName, &'static str); 1], String) {
-    let sessions = state.sessions.lock().unwrap();
-    let macros = match sessions.get(&slug) {
-        Some(session) => &session.macros,
+    let session: Option<SharedSession> = state.sessions.lock().get(&slug).cloned();
+    let macros: Vec<(String, String)> = match session {
+        Some(session) => session.lock().macros.clone(),
         None => {
             // No active session; serve script without macros
-            let content = format!("let MACROS = {{}};\n\n{}", include_str!("../drill/script.js"));
+            let content = format!(
+                "let MACROS = {{}};\n\n{}",
+                include_str!("../drill/script.js")
+            );
             return (StatusCode::OK, [(CONTENT_TYPE, "text/javascript")], content);
         }
     };
     let mut content = String::new();
     content.push_str("let MACROS = {};\n");
-    for (name, definition) in macros {
+    for (name, definition) in &macros {
         let name = escape_js_string_literal(name);
         let definition = escape_js_string_literal(definition);
         content.push_str(&format!("MACROS['{name}'] = '{definition}';\n"));
@@ -481,22 +675,36 @@ pub async fn collection_script_handler(
 pub async fn sync_handler(State(state): State<AppState>) -> Redirect {
     let git = match &state.config.git {
         Some(git) => git,
-        None => return Redirect::to("/"),
+        None => {
+            return Flash::error("Sync is not available: no git repository is configured.")
+                .redirect("/");
+        }
     };
 
     match clone_or_pull(&git.repo_url, &git.branch, &git.repo_dir).await {
         Ok(()) => {
-            let sources_snapshot = state.hedgedoc_sources.lock().unwrap().clone();
-            let combined = build_combined_infos(&state.config.collections, &sources_snapshot);
-            *state.collections.write().await = combined;
-            *state.last_synced.lock().unwrap() = Some(Timestamp::now());
+            let sources_snapshot = state.hedgedoc_sources.lock().clone();
+            let static_collections = state.config.collections.clone();
+            match tokio::task::spawn_blocking(move || {
+                build_combined_infos(&static_collections, &sources_snapshot)
+            })
+            .await
+            {
+                Ok(combined) => {
+                    *state.collections.write().await = combined;
+                    *state.counts_refreshed_at.lock() = Some(Timestamp::now());
+                }
+                Err(e) => log::error!("Manual sync failed to compute collection counts: {e}"),
+            }
+            *state.last_synced.lock() = Some(Timestamp::now());
             log::debug!("Manual sync completed successfully");
+            Flash::success("Sync complete.").redirect("/")
         }
         Err(e) => {
             log::error!("Manual sync failed: {e}");
+            Flash::error(format!("Sync failed: {e}")).redirect("/")
         }
     }
-    Redirect::to("/")
 }
 
 // ---- HedgeDoc management handlers ----
@@ -504,12 +712,14 @@ pub async fn sync_handler(State(state): State<AppState>) -> Redirect {
 /// Render the HedgeDoc source management page.
 pub async fn hedgedoc_manage_handler(
     State(state): State<AppState>,
+    Query(query): Query<HashMap<String, String>>,
 ) -> (StatusCode, Html<String>) {
     use crate::cmd::serve::hedgedoc_ui::render_manage_page;
-    let sources = state.hedgedoc_sources.lock().unwrap();
-    let last_synced = *state.hedgedoc_last_synced.lock().unwrap();
+    let flash = Flash::from_query(&query);
+    let sources = state.hedgedoc_sources.lock();
+    let last_synced = *state.hedgedoc_last_synced.lock();
     let config_available = state.config.data_dir.is_some();
-    let html = render_manage_page(&sources, last_synced, config_available);
+    let html = render_manage_page(&sources, last_synced, config_available, flash);
     (StatusCode::OK, Html(html.into_string()))
 }
 
@@ -523,45 +733,38 @@ pub async fn hedgedoc_add_handler(
     State(state): State<AppState>,
     Form(form): Form<AddHedgedocForm>,
 ) -> Redirect {
-    // Normalize URL: strip trailing slashes and parse to remove query/fragment
-    // so that equivalent URLs (e.g. with/without trailing slash) are treated as
-    // the same note and don't map to different on-disk filenames.
-    let url = {
-        let trimmed = form.url.trim();
-        if trimmed.is_empty() {
-            return Redirect::to("/hedgedoc");
-        }
-        match reqwest::Url::parse(trimmed) {
-            Ok(mut parsed) => {
-                parsed.set_query(None);
-                parsed.set_fragment(None);
-                // Drop trailing empty path segment (trailing slash)
-                if let Ok(mut segs) = parsed.path_segments_mut() {
-                    segs.pop_if_empty();
-                }
-                parsed.to_string()
-            }
-            Err(_) => trimmed.to_string(),
-        }
+    // Normalize and validate the URL at storage time (BUG-24): strip
+    // query/fragment/trailing slash so equivalent URLs dedupe, and reject
+    // anything that is not a well-formed HTTPS URL so no raw string is
+    // ever persisted or rendered into an href.
+    if form.url.trim().is_empty() {
+        return Flash::error("Enter a HedgeDoc URL.").redirect("/hedgedoc");
+    }
+    let url = match normalize_hedgedoc_url(&form.url) {
+        Ok(url) => url,
+        Err(e) => return Flash::error(e.to_string()).redirect("/hedgedoc"),
     };
 
     let data_dir = match &state.config.data_dir {
         Some(d) => d.clone(),
         None => {
             log::error!("Cannot add HedgeDoc source: no data_dir configured");
-            return Redirect::to("/hedgedoc");
+            return Flash::error(
+                "Cannot add HedgeDoc source: no data directory is configured. Start hashcards with --config.",
+            )
+            .redirect("/hedgedoc");
         }
     };
 
     // Check for duplicate URL.
     {
-        let sources = state.hedgedoc_sources.lock().unwrap();
+        let sources = state.hedgedoc_sources.lock();
         if sources
             .iter()
             .flat_map(|s| s.notes.iter())
             .any(|n| n.url == url)
         {
-            return Redirect::to("/hedgedoc");
+            return Flash::error("This note is already added.").redirect("/hedgedoc");
         }
     }
 
@@ -569,12 +772,24 @@ pub async fn hedgedoc_add_handler(
         Some(uri) => uri,
         None => {
             log::error!("Failed to parse HedgeDoc source URI from {url}");
-            return Redirect::to("/hedgedoc");
+            return Flash::error(format!("Could not parse a HedgeDoc note URL from: {url}"))
+                .redirect("/hedgedoc");
         }
     };
 
+    // BUG-43: refuse to create a source whose slug collides with a configured
+    // collection; find_collection would route it to the wrong database.
+    let new_slug = slug_for_source_uri(&source_uri);
+    if let Some(existing) = find_slug_collision(&new_slug, &state.config.collections) {
+        return Flash::error(format!(
+            "Cannot add this HedgeDoc source: its collection slug '{new_slug}' collides with the configured collection '{}'. Rename that collection or use a different source.",
+            existing.name
+        ))
+        .redirect("/hedgedoc");
+    }
+
     let existing_collection = {
-        let sources = state.hedgedoc_sources.lock().unwrap();
+        let sources = state.hedgedoc_sources.lock();
         sources
             .iter()
             .find(|s| s.source_uri == source_uri)
@@ -589,7 +804,8 @@ pub async fn hedgedoc_add_handler(
             Ok(note) => new_note = Some(note),
             Err(e) => {
                 log::error!("Failed to add HedgeDoc note {url}: {e}");
-                return Redirect::to("/hedgedoc");
+                return Flash::error(format!("Failed to add HedgeDoc note: {e}"))
+                    .redirect("/hedgedoc");
             }
         }
     } else {
@@ -597,59 +813,32 @@ pub async fn hedgedoc_add_handler(
             Ok(source) => new_source = Some(source),
             Err(e) => {
                 log::error!("Failed to add HedgeDoc source {url}: {e}");
-                return Redirect::to("/hedgedoc");
+                return Flash::error(format!("Failed to add HedgeDoc source: {e}"))
+                    .redirect("/hedgedoc");
             }
         }
     }
 
-    // Compute what the new entries list would be without mutating shared state yet.
-    // This lets us persist to disk first; we only update in-memory state after success.
-    let new_entries: Vec<HedgedocEntry> = {
-        let sources = state.hedgedoc_sources.lock().unwrap();
-        if new_source.is_some() {
-            if sources
-                .iter()
-                .flat_map(|s| s.notes.iter())
-                .any(|n| n.url == url)
-            {
-                return Redirect::to("/hedgedoc");
-            }
-        } else if new_note.is_some() {
-            if let Some(src) = sources.iter().find(|s| s.source_uri == source_uri) {
-                if src.notes.iter().any(|n| n.url == url) {
-                    return Redirect::to("/hedgedoc");
-                }
-            }
-        }
-        let mut updated = sources.clone();
-        if let Some(ref source) = new_source {
-            updated.push(source.clone());
-        } else if let Some(ref note) = new_note {
-            if let Some(src) = updated.iter_mut().find(|s| s.source_uri == source_uri) {
-                src.notes.push(note.clone());
-            }
-        }
-        all_hedgedoc_entries(&updated)
-    };
-
     // Get or create config path outside the lock, using spawn_blocking for the
     // filesystem work so we don't block the async runtime.
-    let maybe_config_path = state.config_path.lock().unwrap().clone();
+    let maybe_config_path = state.config_path.lock().clone();
     let config_path = match maybe_config_path {
         Some(p) => p,
         None => {
             let data_dir_owned = data_dir.clone();
-            let p = match tokio::task::spawn_blocking(move || create_minimal_config(&data_dir_owned))
-                .await
-                .map_err(|e| crate::error::ErrorReport::new(format!("Config creation task panicked: {e}")))
-            {
-                Ok(Ok(p)) => p,
-                Ok(Err(e)) | Err(e) => {
-                    log::error!("Failed to create minimal config file: {e}");
-                    return Redirect::to("/hedgedoc");
-                }
-            };
-            *state.config_path.lock().unwrap() = Some(p.clone());
+            let p =
+                match tokio::task::spawn_blocking(move || create_minimal_config(&data_dir_owned))
+                    .await
+                    .map_err(|e| ErrorReport::new(format!("Config creation task panicked: {e}")))
+                {
+                    Ok(Ok(p)) => p,
+                    Ok(Err(e)) | Err(e) => {
+                        log::error!("Failed to create minimal config file: {e}");
+                        return Flash::error(format!("Failed to create config file: {e}"))
+                            .redirect("/hedgedoc");
+                    }
+                };
+            *state.config_path.lock() = Some(p.clone());
             // The config now references the temp data dir; stop cleanup on exit.
             if let Some(tracker) = state.config._temp_dir.as_ref() {
                 tracker.dismiss();
@@ -658,45 +847,56 @@ pub async fn hedgedoc_add_handler(
         }
     };
 
-    // Persist to TOML via spawn_blocking (atomic write).
+    // BUG-39: duplicate check + mutation + persist under ONE lock, persisting
+    // from the post-mutation state. spawn_blocking because commit_add writes
+    // the config file while holding the lock.
+    let sources_arc = state.hedgedoc_sources.clone();
     let config_path_owned = config_path.clone();
-    let entries_owned = new_entries.clone();
-    if let Err(e) = tokio::task::spawn_blocking(move || persist_hedgedoc_entries(&config_path_owned, &entries_owned))
-        .await
-        .map_err(|e| crate::error::ErrorReport::new(format!("Persist task panicked: {e}")))
-        .and_then(|r| r)
+    let url_owned = url.clone();
+    let source_uri_owned = source_uri.clone();
+    let snapshot = match tokio::task::spawn_blocking(move || {
+        commit_add(
+            &sources_arc,
+            Some(config_path_owned.as_path()),
+            &url_owned,
+            &source_uri_owned,
+            new_source,
+            new_note,
+        )
+    })
+    .await
+    .map_err(|e| ErrorReport::new(format!("HedgeDoc add task panicked: {e}")))
+    .and_then(|r| r)
     {
-        log::error!("Failed to persist HedgeDoc entries to config: {e}");
-        return Redirect::to("/hedgedoc");
-    }
-
-    // Persist succeeded: now update in-memory state.
-    {
-        let mut sources = state.hedgedoc_sources.lock().unwrap();
-        if let Some(source) = new_source {
-            sources.push(source);
-        } else if let Some(note) = new_note {
-            if let Some(src) = sources.iter_mut().find(|s| s.source_uri == source_uri) {
-                src.notes.push(note);
-            }
+        Ok(snapshot) => snapshot,
+        Err(e) => {
+            log::error!("Failed to add HedgeDoc source {url}: {e}");
+            return Flash::error(e.to_string()).redirect("/hedgedoc");
         }
-    }
+    };
 
-    // Refresh combined collection infos.
-    let sources_snapshot = state.hedgedoc_sources.lock().unwrap().clone();
-    let combined = build_combined_infos(&state.config.collections, &sources_snapshot);
-    *state.collections.write().await = combined;
+    // Refresh combined collection infos from the committed snapshot.
+    let static_collections = state.config.collections.clone();
+    let snapshot_for_counts = snapshot.clone();
+    match tokio::task::spawn_blocking(move || {
+        build_combined_infos(&static_collections, &snapshot_for_counts)
+    })
+    .await
+    {
+        Ok(combined) => *state.collections.write().await = combined,
+        Err(e) => log::error!("Failed to compute collection counts: {e}"),
+    }
 
     // Update last synced time if the newly added note fetched without error.
-    if sources_snapshot
+    if snapshot
         .iter()
         .flat_map(|s| s.notes.iter())
         .any(|n| n.url == url && n.last_error.is_none())
     {
-        *state.hedgedoc_last_synced.lock().unwrap() = Some(Timestamp::now());
+        *state.hedgedoc_last_synced.lock() = Some(Timestamp::now());
     }
 
-    Redirect::to("/hedgedoc")
+    Flash::success("HedgeDoc source added.").redirect("/hedgedoc")
 }
 
 #[derive(serde::Deserialize)]
@@ -709,53 +909,51 @@ pub async fn hedgedoc_delete_handler(
     State(state): State<AppState>,
     Form(form): Form<DeleteHedgedocForm>,
 ) -> Redirect {
-    // Phase 1: compute the post-deletion entries without mutating shared state.
-    let (remaining, new_sources) = {
-        let sources = state.hedgedoc_sources.lock().unwrap();
-        let mut working = sources.clone();
-        for src in working.iter_mut() {
-            src.notes.retain(|n| n.url != form.url);
+    let maybe_config_path: Option<PathBuf> = state.config_path.lock().clone();
+    let sources_arc = state.hedgedoc_sources.clone();
+    let url = form.url.clone();
+    // BUG-39: mutation + persist under one lock (see commit_delete).
+    // BUG-42: on-disk cleanup runs in the same blocking task.
+    let (snapshot, message) = match tokio::task::spawn_blocking(move || {
+        let outcome = commit_delete(&sources_arc, maybe_config_path.as_deref(), &url)?;
+        let message = cleanup_after_delete(&outcome);
+        Ok::<_, ErrorReport>((outcome.snapshot, message))
+    })
+    .await
+    .map_err(|e| ErrorReport::new(format!("HedgeDoc delete task panicked: {e}")))
+    .and_then(|r| r)
+    {
+        Ok(pair) => pair,
+        Err(e) => {
+            log::error!("Failed to delete HedgeDoc source {}: {e}", form.url);
+            return Flash::error(e.to_string()).redirect("/hedgedoc");
         }
-        working.retain(|s| !s.notes.is_empty());
-        let entries = all_hedgedoc_entries(&working);
-        (entries, working)
     };
 
-    // Phase 2: persist to TOML if config file is available, via spawn_blocking.
-    // Extract config path before any await so the MutexGuard is dropped first.
-    let maybe_config_path: Option<std::path::PathBuf> = state.config_path.lock().unwrap().clone();
-    let persist_ok = if let Some(config_path) = maybe_config_path {
-        let remaining_for_persist = remaining.clone();
-        match tokio::task::spawn_blocking(move || persist_hedgedoc_entries(&config_path, &remaining_for_persist))
-            .await
-        {
-            Ok(Ok(())) => true,
-            Ok(Err(e)) => { log::error!("Failed to persist HedgeDoc entries after deletion: {e}"); false }
-            Err(e) => { log::error!("Persist task panicked after deletion: {e}"); false }
-        }
-    } else {
-        true // no config file to persist to, treat as success
-    };
-
-    // Phase 3: only update in-memory state if persist succeeded (or was not needed).
-    if persist_ok {
-        *state.hedgedoc_sources.lock().unwrap() = new_sources.clone();
-        let combined = build_combined_infos(&state.config.collections, &new_sources);
-        *state.collections.write().await = combined;
+    let static_collections = state.config.collections.clone();
+    let snapshot_for_counts = snapshot.clone();
+    match tokio::task::spawn_blocking(move || {
+        build_combined_infos(&static_collections, &snapshot_for_counts)
+    })
+    .await
+    {
+        Ok(combined) => *state.collections.write().await = combined,
+        Err(e) => log::error!("Failed to compute collection counts: {e}"),
     }
 
-    Redirect::to("/hedgedoc")
+    Flash::success(message).redirect("/hedgedoc")
 }
 
 /// Manually re-sync all HedgeDoc sources.
 pub async fn hedgedoc_sync_now_handler(State(state): State<AppState>) -> Redirect {
     if state.config.data_dir.is_none() {
-        return Redirect::to("/hedgedoc");
+        return Flash::error("HedgeDoc sync is not available: no data directory is configured.")
+            .redirect("/hedgedoc");
     }
 
     // Collect URLs to sync (release lock before awaiting).
     let entries: Vec<(String, ResolvedCollection)> = {
-        let sources = state.hedgedoc_sources.lock().unwrap();
+        let sources = state.hedgedoc_sources.lock();
         sources
             .iter()
             .flat_map(|s| {
@@ -772,7 +970,7 @@ pub async fn hedgedoc_sync_now_handler(State(state): State<AppState>) -> Redirec
         match sync_source(url, rc).await {
             Ok((deck_name, file_name)) => {
                 any_success = true;
-                let mut sources = state.hedgedoc_sources.lock().unwrap();
+                let mut sources = state.hedgedoc_sources.lock();
                 for src in sources.iter_mut() {
                     if let Some(note) = src.notes.iter_mut().find(|n| &n.url == url) {
                         note.deck_name = deck_name.clone();
@@ -785,7 +983,7 @@ pub async fn hedgedoc_sync_now_handler(State(state): State<AppState>) -> Redirec
             Err(e) => {
                 let msg = e.to_string();
                 log::error!("Manual HedgeDoc sync failed for {url}: {msg}");
-                let mut sources = state.hedgedoc_sources.lock().unwrap();
+                let mut sources = state.hedgedoc_sources.lock();
                 for src in sources.iter_mut() {
                     if let Some(note) = src.notes.iter_mut().find(|n| &n.url == url) {
                         note.last_error = Some(msg.clone());
@@ -796,12 +994,139 @@ pub async fn hedgedoc_sync_now_handler(State(state): State<AppState>) -> Redirec
         }
     }
 
-    let sources_snapshot = state.hedgedoc_sources.lock().unwrap().clone();
-    let combined = build_combined_infos(&state.config.collections, &sources_snapshot);
-    *state.collections.write().await = combined;
+    let sources_snapshot = state.hedgedoc_sources.lock().clone();
+    let static_collections = state.config.collections.clone();
+    match tokio::task::spawn_blocking(move || {
+        build_combined_infos(&static_collections, &sources_snapshot)
+    })
+    .await
+    {
+        Ok(combined) => *state.collections.write().await = combined,
+        Err(e) => log::error!("Failed to compute collection counts: {e}"),
+    }
     if any_success {
-        *state.hedgedoc_last_synced.lock().unwrap() = Some(Timestamp::now());
+        *state.hedgedoc_last_synced.lock() = Some(Timestamp::now());
     }
 
-    Redirect::to("/hedgedoc")
+    if any_success || entries.is_empty() {
+        Flash::success("HedgeDoc sync finished.").redirect("/hedgedoc")
+    } else {
+        Flash::error("HedgeDoc sync failed for all notes; see the statuses below.")
+            .redirect("/hedgedoc")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+    use std::time::Instant;
+
+    use std::collections::HashMap;
+
+    use super::collection_get_inner;
+    use super::run_blocking;
+    use crate::cmd::drill::server::AnswerControls;
+    use crate::cmd::drill::state::MutableState;
+    use crate::cmd::serve::config::ResolvedServeConfig;
+    use crate::cmd::serve::state::AppState;
+    use crate::cmd::serve::state::DrillSession;
+    use crate::db::Database;
+    use crate::error::ErrorReport;
+    use crate::error::Fallible;
+    use crate::rng::TinyRng;
+    use crate::types::performance::Jitter;
+    use crate::types::timestamp::Timestamp;
+
+    fn test_state(coll_dir: &std::path::Path) -> Fallible<AppState> {
+        let config = ResolvedServeConfig::from_directories(
+            vec![coll_dir.display().to_string()],
+            "127.0.0.1".to_string(),
+            0,
+        )?;
+        Ok(AppState {
+            config: std::sync::Arc::new(config),
+            collections: std::sync::Arc::new(tokio::sync::RwLock::new(Vec::new())),
+            sessions: std::sync::Arc::new(parking_lot::Mutex::new(HashMap::new())),
+            last_synced: std::sync::Arc::new(parking_lot::Mutex::new(None)),
+            hedgedoc_sources: std::sync::Arc::new(parking_lot::Mutex::new(Vec::new())),
+            hedgedoc_last_synced: std::sync::Arc::new(parking_lot::Mutex::new(None)),
+            config_path: std::sync::Arc::new(parking_lot::Mutex::new(None)),
+            counts_refreshed_at: std::sync::Arc::new(parking_lot::Mutex::new(None)),
+            interrupted_closed: std::sync::Arc::new(parking_lot::Mutex::new(HashMap::new())),
+        })
+    }
+
+    /// Regression: a session removed from the map between the GET handler's
+    /// clone and its lock (a concurrent Home action, or eviction) must not be
+    /// rendered as if it were still live. `collection_post_inner` already
+    /// guarded this with an `is_detached` check; `collection_get_inner` did
+    /// not, so it would render the stale session and re-stamp its (already
+    /// closed) DB row's heartbeat.
+    #[test]
+    fn test_detached_session_renders_browse_page_not_stale_session() -> Fallible<()> {
+        let dir = tempfile::tempdir()?;
+        let coll_dir = dir.path().canonicalize()?;
+        std::fs::write(coll_dir.join("Deck.md"), "Q: One\nA: 1\n")?;
+
+        let state = test_state(&coll_dir)?;
+        let slug = state.config.collections[0].slug.clone();
+        let db_path = state.config.collections[0].db_path.clone();
+        let db_str = db_path
+            .to_str()
+            .ok_or_else(|| ErrorReport::new("non-utf8 db path"))?;
+
+        let started_at = Timestamp::now();
+        let db = Database::new(db_str)?;
+        let session_id = db.create_session(started_at)?;
+        let mutable = MutableState::new(
+            db,
+            session_id,
+            crate::cmd::drill::cache::Cache::new(),
+            Vec::new(),
+            Jitter::none(),
+            TinyRng::from_seed(1),
+        );
+        let session = std::sync::Arc::new(parking_lot::Mutex::new(DrillSession::new(
+            coll_dir.clone(),
+            Vec::new(),
+            started_at,
+            AnswerControls::Full,
+            mutable,
+        )));
+        session.lock().detach();
+        state.sessions.lock().insert(slug.clone(), session);
+
+        let html = collection_get_inner(&state, &slug, None)?;
+        assert!(
+            html.contains(r#"class="browse""#),
+            "detached session must fall back to the deck browser page, got: {html}"
+        );
+        Ok(())
+    }
+
+    /// Regression test (BUG-44): serve handlers used to run collection
+    /// parsing and SQLite work inline on the async executor, so one slow
+    /// request stalled every other request. `run_blocking` must move that
+    /// work off the executor: on a single-threaded runtime, a concurrent
+    /// timer still fires while the blocking closure sleeps.
+    #[tokio::test(flavor = "current_thread")]
+    async fn run_blocking_does_not_stall_the_executor() -> Fallible<()> {
+        let started = Instant::now();
+        let slow = tokio::spawn(run_blocking(|| {
+            std::thread::sleep(Duration::from_millis(800));
+            Ok(())
+        }));
+
+        // This timer shares the single executor thread with the task above.
+        // It can only fire promptly if the sleep is not on that thread.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "the executor was blocked for {:?}",
+            started.elapsed()
+        );
+
+        slow.await
+            .map_err(|e| crate::error::ErrorReport::new(format!("join failed: {e}")))?
+    }
 }

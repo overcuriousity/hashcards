@@ -41,6 +41,18 @@ body {
         justify-content: center;
         align-items: center;
 
+        .progress {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .progress-text {
+            font-size: 14px;
+            color: #555;
+        }
+
         .progress-bar {
             width: min(300px, 80vw);
             height: 24px;
@@ -1196,4 +1208,142 @@ body {
             padding-left: 48px;
         }
     }
+}
+
+.flash {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    max-width: 800px;
+    margin: 16px auto;
+    padding: 12px 16px;
+    border: 1px solid;
+    border-radius: 8px;
+    font-size: 14px;
+}
+
+.flash-message {
+    flex: 1;
+}
+
+.flash-dismiss {
+    background: none;
+    border: none;
+    font-size: 18px;
+    line-height: 1;
+    padding: 0 4px;
+    cursor: pointer;
+    color: inherit;
+}
+
+.flash-error {
+    background: #fff4f1;
+    border-color: #f3c5bd;
+    color: #7a271a;
+}
+
+.flash-success {
+    background: #f0fdf4;
+    border-color: #bbe5c8;
+    color: #027a48;
+}
+
+.error {
+    max-width: 800px;
+    margin: 48px auto;
+    padding: 24px;
+    border: 1px solid #f3c5bd;
+    border-radius: 8px;
+    background: #fff4f1;
+    color: #7a271a;
+
+    h1 {
+        margin-bottom: 12px;
+    }
+
+    p {
+        margin-bottom: 8px;
+    }
+
+    a {
+        color: inherit;
+        font-weight: 600;
+    }
+}
+
+.browse .notice {
+    background: #fff8e1;
+    border: 1px solid #e0c97f;
+    border-radius: 4px;
+    padding: 0.5em 1em;
+}
+
+/* ---- Stats page (FEAT-02) ---- */
+
+.stats-page {
+    max-width: 720px;
+    margin: 0 auto;
+    padding: 1rem;
+}
+
+.stats-header h1 {
+    margin: 0.5rem 0 1.5rem 0;
+}
+
+.stats-section {
+    margin-bottom: 2rem;
+}
+
+.bar-chart {
+    display: flex;
+    align-items: flex-end;
+    gap: 1px;
+    height: 120px;
+    border-bottom: 1px solid #999;
+}
+
+.bar-slot {
+    flex: 1 1 0;
+    display: flex;
+    align-items: flex-end;
+    height: 100%;
+}
+
+.bar-slot .bar {
+    width: 100%;
+    background: #444;
+    min-height: 1px;
+}
+
+.grade-dist {
+    width: 100%;
+    max-width: 480px;
+}
+
+.grade-dist .key {
+    padding-right: 1em;
+}
+
+.grade-dist .val {
+    padding-right: 1em;
+    text-align: right;
+}
+
+.grade-dist .bar-cell {
+    width: 60%;
+}
+
+.grade-dist .hbar {
+    height: 0.8em;
+    background: #444;
+}
+
+.table-scroll {
+    overflow-x: auto;
+}
+
+.deck-stats th,
+.deck-stats td {
+    padding: 0.2em 1.2em 0.2em 0;
+    text-align: left;
 }

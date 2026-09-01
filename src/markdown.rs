@@ -15,13 +15,13 @@
 use percent_encoding::AsciiSet;
 use percent_encoding::CONTROLS;
 use percent_encoding::utf8_percent_encode;
-use reqwest::Url;
 use pulldown_cmark::CowStr;
 use pulldown_cmark::Event;
 use pulldown_cmark::Options;
 use pulldown_cmark::Parser;
 use pulldown_cmark::Tag;
 use pulldown_cmark::html::push_html;
+use reqwest::Url;
 
 use crate::error::ErrorReport;
 use crate::error::Fallible;
@@ -29,12 +29,7 @@ use crate::media::resolve::MediaResolver;
 
 /// Characters that must be percent-encoded in a URL path segment.
 /// Encodes control characters plus space, #, ?, %, and / (RFC 3986).
-const PATH_SEGMENT: &AsciiSet = &CONTROLS
-    .add(b' ')
-    .add(b'#')
-    .add(b'?')
-    .add(b'%')
-    .add(b'/');
+const PATH_SEGMENT: &AsciiSet = &CONTROLS.add(b' ').add(b'#').add(b'?').add(b'%').add(b'/');
 
 const AUDIO_EXTENSIONS: [&str; 4] = ["mp3", "wav", "ogg", "m4a"];
 
@@ -44,6 +39,15 @@ fn is_audio_file(url: &str) -> bool {
     } else {
         false
     }
+}
+
+/// Escape a string for interpolation into a double-quoted HTML attribute.
+fn escape_attribute(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
 }
 
 /// Configuration for Markdown rendering.
@@ -74,7 +78,13 @@ pub fn markdown_to_html(config: &MarkdownRenderConfig, markdown: &str) -> Fallib
                     Event::Html(CowStr::Boxed(
                         format!(
                             r#"<audio controls src="{}" title="{}"></audio>"#,
-                            url, title
+                            // BUG-23: `PATH_SEGMENT` does not encode `"`, so
+                            // the URL needs attribute escaping just as much as
+                            // the title does. Without it a media file whose
+                            // name contains a quote closes `src` early and
+                            // injects arbitrary attributes.
+                            escape_attribute(&url),
+                            escape_attribute(&title)
                         )
                         .into_boxed_str(),
                     ))
@@ -118,7 +128,10 @@ fn modify_url(url: &str, config: &MarkdownRenderConfig) -> Fallible<String> {
         // and produces a canonicalized string that is safe to embed in HTML.
         Err(ResolveError::ExternalUrl) => {
             let parsed = Url::parse(url).map_err(|err| {
-                ErrorReport::new(format!("External media URL is invalid ('{}'): {}", url, err))
+                ErrorReport::new(format!(
+                    "External media URL is invalid ('{}'): {}",
+                    url, err
+                ))
             })?;
             if parsed.scheme() != "http" && parsed.scheme() != "https" {
                 return Err(ErrorReport::new(format!(
@@ -157,8 +170,10 @@ mod tests {
         let coll_path: PathBuf = create_tmp_directory()?;
         let abs_deck_path: PathBuf = coll_path.join("deck.md");
         let image_path: PathBuf = coll_path.join("image.png");
+        let audio_path: PathBuf = coll_path.join("audio.mp3");
         std::fs::write(&abs_deck_path, "")?;
         std::fs::write(&image_path, "")?;
+        std::fs::write(&audio_path, "")?;
         let config = MarkdownRenderConfig {
             resolver: MediaResolverBuilder::new()
                 .with_collection_path(coll_path)?
@@ -177,6 +192,33 @@ mod tests {
         assert_eq!(
             html,
             "<p><img src=\"http://localhost:1234/file/image.png\" alt=\"alt\" /></p>\n"
+        );
+        Ok(())
+    }
+
+    /// Regression: a media filename containing a double quote must not be
+    /// able to close the `src` attribute and inject further attributes into
+    /// the generated `<audio>` element.
+    #[test]
+    fn test_audio_url_is_attribute_escaped() -> Fallible<()> {
+        let coll_path: PathBuf = create_tmp_directory()?;
+        let abs_deck_path: PathBuf = coll_path.join("deck.md");
+        let evil_name = r#"x" onerror="alert(1).mp3"#;
+        std::fs::write(&abs_deck_path, "")?;
+        std::fs::write(coll_path.join(evil_name), "")?;
+        let config = MarkdownRenderConfig {
+            resolver: MediaResolverBuilder::new()
+                .with_collection_path(coll_path)?
+                .with_deck_path(PathBuf::from("deck.md"))?
+                .build()?,
+            file_url_prefix: "http://localhost:1234/file".to_string(),
+        };
+        // Angle-bracket destinations let a name with quotes and spaces
+        // through CommonMark's inline-image syntax.
+        let html = markdown_to_html(&config, &format!("![](<@/{evil_name}>)"))?;
+        assert!(
+            !html.contains(r#"onerror="alert(1)"#),
+            "attribute injection through the audio src: {html}"
         );
         Ok(())
     }
@@ -221,6 +263,24 @@ mod tests {
         let config = make_test_config()?;
         let result = markdown_to_html(&config, markdown);
         assert!(result.is_err(), "non-http external URL should be rejected");
+        Ok(())
+    }
+
+    #[test]
+    fn test_audio_title_is_attribute_escaped() -> Fallible<()> {
+        // Regression test for BUG-23: the markdown image title is interpolated
+        // into an HTML attribute; `"` and `<` must be escaped.
+        let markdown = r#"![alt](@/audio.mp3 "a \" <b> title")"#;
+        let config = make_test_config()?;
+        let html = markdown_to_html(&config, markdown)?;
+        assert!(
+            html.contains(r#"title="a &quot; &lt;b&gt; title""#),
+            "title must be attribute-escaped: {html}"
+        );
+        assert!(
+            !html.contains(r#"<b> title"#),
+            "raw markup from the title must not appear in output: {html}"
+        );
         Ok(())
     }
 }

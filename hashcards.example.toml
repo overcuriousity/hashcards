@@ -4,18 +4,27 @@
 # See also: hashcards serve --help
 
 [server]
-# host = "0.0.0.0"                    # Bind address (default: 0.0.0.0)
+# host = "127.0.0.1"                  # Bind address (default: 127.0.0.1).
+                                      # Set to "0.0.0.0" to listen on all
+                                      # interfaces. WARNING: hashcards has no
+                                      # authentication; anyone who can reach
+                                      # the port can read and edit your cards.
 # port = 8000                         # Port number (default: 8000)
 data_dir = "/var/lib/hashcards"       # Directory for repo clone and databases
+
+# session_timeout_minutes = 1440       # Evict drill sessions idle this long; 0 disables (default: 1440)
 
 [git]
 repo_url = "https://github.com/user/flashcards.git"
 # branch = "main"                     # Branch to track (default: main)
 # poll_interval_minutes = 30          # Sync interval; 0 to disable (default: 30)
+# commit_author_name = "hashcards web edit"     # Author of auto-commits for in-browser edits
+# commit_author_email = "hashcards@localhost"   # Author email for those commits
 
 [defaults]
 # answer_controls = "full"            # "full" or "binary" (default: full)
 # bury_siblings = true                # Hide sibling cards in same session (default: true)
+# jitter = 0.05                       # Random +/- fraction applied to review intervals (0.0 to 0.5, default: 0.05)
 
 # Define one or more collections. Paths are relative to {data_dir}/repo.
 

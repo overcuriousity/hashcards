@@ -1,41 +1,122 @@
+use std::collections::HashMap;
+
+use axum::extract::Query;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::Html;
 use maud::Markup;
 use maud::html;
 
+use chrono::Duration;
+
 use crate::cmd::drill::template::page_template;
+use crate::cmd::serve::hedgedoc::build_combined_infos;
 use crate::cmd::serve::state::AppState;
 use crate::cmd::serve::state::CollectionInfo;
+use crate::flash::Flash;
 use crate::types::timestamp::Timestamp;
 
-pub async fn landing_handler(State(state): State<AppState>) -> (StatusCode, Html<String>) {
+/// True when the cached collection counts are older than the poll interval.
+pub fn counts_are_stale(last: Option<Timestamp>, now: Timestamp, interval_minutes: u64) -> bool {
+    match last {
+        None => true,
+        Some(last) => {
+            now.into_inner() - last.into_inner() >= Duration::minutes(interval_minutes as i64)
+        }
+    }
+}
+
+pub async fn landing_handler(
+    State(state): State<AppState>,
+    Query(query): Query<HashMap<String, String>>,
+) -> (StatusCode, Html<String>) {
+    let flash = Flash::from_query(&query);
+
+    // BUG-45: recompute counts when they are older than the poll interval.
+    let interval_minutes = state
+        .config
+        .git
+        .as_ref()
+        .map(|g| g.poll_interval_minutes)
+        .unwrap_or(30);
+    let stale = {
+        let last = state.counts_refreshed_at.lock();
+        counts_are_stale(*last, Timestamp::now(), interval_minutes)
+    };
+    if stale && interval_minutes > 0 {
+        let static_collections = state.config.collections.clone();
+        let sources_snapshot = state.hedgedoc_sources.lock().clone();
+        match tokio::task::spawn_blocking(move || {
+            build_combined_infos(&static_collections, &sources_snapshot)
+        })
+        .await
+        {
+            Ok(combined) => {
+                *state.collections.write().await = combined;
+                *state.counts_refreshed_at.lock() = Some(Timestamp::now());
+            }
+            Err(e) => log::error!("Failed to refresh collection counts: {e}"),
+        }
+    }
+
     let collections = state.collections.read().await;
-    let last_synced = *state.last_synced.lock().unwrap();
-    let hedgedoc_last_synced = *state.hedgedoc_last_synced.lock().unwrap();
+    let last_synced = *state.last_synced.lock();
+    let hedgedoc_last_synced = *state.hedgedoc_last_synced.lock();
     let git_enabled = state.config.git.is_some();
-    let hedgedoc_count = state.hedgedoc_sources.lock().unwrap().len();
+    let hedgedoc_count = state.hedgedoc_sources.lock().len();
     let config_available = state.config.data_dir.is_some();
-    let html = render_landing_page(
-        &collections,
+    // FEAT-03: surface running sessions so they can be resumed rather than
+    // silently restarted.
+    let resume: HashMap<String, usize> = {
+        let sessions = state.sessions.lock();
+        sessions
+            .iter()
+            .filter_map(|(slug, s)| {
+                let session = s.lock();
+                if session.mutable.finished_at.is_none() {
+                    Some((slug.clone(), session.mutable.cards.len()))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    };
+    let status = LandingStatus {
         last_synced,
         git_enabled,
         hedgedoc_count,
         hedgedoc_last_synced,
         config_available,
-    );
+    };
+    let html = render_landing_page(&collections, &resume, &status, flash);
     (StatusCode::OK, Html(html.into_string()))
 }
 
-fn render_landing_page(
-    collections: &[CollectionInfo],
+/// The server-status details shown under the collection list: whether git
+/// and the config file are in play, and when each source last synced.
+struct LandingStatus {
     last_synced: Option<Timestamp>,
     git_enabled: bool,
     hedgedoc_count: usize,
     hedgedoc_last_synced: Option<Timestamp>,
     config_available: bool,
+}
+
+fn render_landing_page(
+    collections: &[CollectionInfo],
+    resume: &HashMap<String, usize>,
+    status: &LandingStatus,
+    flash: Option<Flash>,
 ) -> Markup {
+    let LandingStatus {
+        last_synced,
+        git_enabled,
+        hedgedoc_count,
+        hedgedoc_last_synced,
+        config_available,
+    } = *status;
     page_template(html! {
+        @if let Some(f) = &flash { (f.render()) }
         div.landing {
             h1 { "hashcards" }
             @if git_enabled {
@@ -84,12 +165,16 @@ fn render_landing_page(
                     }
                     tbody {
                         @for coll in collections {
-                            tr class=@if coll.due_today == 0 { "muted" } {
+                            tr class=@if coll.due_today == 0 && !resume.contains_key(&coll.slug) { "muted" } {
                                 td { (coll.name.clone()) }
                                 td.num { (coll.due_today) }
                                 td.num { (coll.total_cards) }
                                 td {
-                                    @if coll.due_today > 0 {
+                                    @if let Some(remaining) = resume.get(&coll.slug) {
+                                        a.drill-link.btn.btn-primary href=(format!("/collection/{}", coll.slug)) {
+                                            (format!("Resume session ({remaining} cards remaining)"))
+                                        }
+                                    } @else if coll.due_today > 0 {
                                         a.drill-link.btn.btn-primary href=(format!("/collection/{}", coll.slug)) {
                                             "Drill"
                                         }
@@ -104,4 +189,23 @@ fn render_landing_page(
             }
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::Fallible;
+
+    /// BUG-45: counts older than the poll interval are stale; missing
+    /// counts are always stale.
+    #[test]
+    fn test_counts_are_stale() -> Fallible<()> {
+        let t0 = Timestamp::try_from("2026-01-01T10:00:00.000".to_string())?;
+        let t29 = Timestamp::try_from("2026-01-01T10:29:00.000".to_string())?;
+        let t30 = Timestamp::try_from("2026-01-01T10:30:00.000".to_string())?;
+        assert!(counts_are_stale(None, t0, 30));
+        assert!(!counts_are_stale(Some(t0), t29, 30));
+        assert!(counts_are_stale(Some(t0), t30, 30));
+        Ok(())
+    }
 }
