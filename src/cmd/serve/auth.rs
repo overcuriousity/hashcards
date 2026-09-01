@@ -9,7 +9,10 @@ use axum_extra::extract::cookie::SignedCookieJar;
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::cmd::serve::config::ResolvedOidc;
 use crate::cmd::serve::state::AppState;
+use crate::error::ErrorReport;
+use crate::error::Fallible;
 use crate::types::timestamp::Timestamp;
 
 const SESSION_COOKIE: &str = "hc_session";
@@ -122,6 +125,72 @@ pub(super) fn take_flow_cookie(jar: SignedCookieJar) -> Option<(SignedCookieJar,
     Some((jar, payload.state))
 }
 
+/// Discovery (`CoreClient::from_provider_metadata`) always sets the
+/// authorization endpoint and may set the token/userinfo endpoints
+/// (guaranteed present by the OIDC spec, but typed as "maybe" by the
+/// crate); the type-state parameters below must match exactly what that
+/// call produces, or the type simply won't match.
+type DiscoveredCoreClient = openidconnect::core::CoreClient<
+    openidconnect::EndpointSet,
+    openidconnect::EndpointNotSet,
+    openidconnect::EndpointNotSet,
+    openidconnect::EndpointNotSet,
+    openidconnect::EndpointMaybeSet,
+    openidconnect::EndpointMaybeSet,
+>;
+
+pub(super) struct OidcRuntime {
+    client: DiscoveredCoreClient,
+    scopes: Vec<openidconnect::Scope>,
+}
+
+pub(super) async fn build_oidc_runtime(config: &ResolvedOidc) -> Fallible<OidcRuntime> {
+    use openidconnect::ClientId;
+    use openidconnect::ClientSecret;
+    use openidconnect::IssuerUrl;
+    use openidconnect::RedirectUrl;
+    use openidconnect::Scope;
+    use openidconnect::core::CoreClient;
+    use openidconnect::core::CoreProviderMetadata;
+
+    // Redirects disabled: discovery/token requests should not follow
+    // redirects to third-party hosts (SSRF hardening), matching current
+    // openidconnect guidance for the caller-supplied HTTP client.
+    let http_client = openidconnect::reqwest::ClientBuilder::new()
+        .redirect(openidconnect::reqwest::redirect::Policy::none())
+        .connect_timeout(std::time::Duration::from_secs(5))
+        .build()
+        .map_err(|e| ErrorReport::new(format!("failed to build OIDC HTTP client: {e}")))?;
+
+    let issuer_url = IssuerUrl::new(config.issuer_url.clone())
+        .map_err(|e| ErrorReport::new(format!("invalid [oidc].issuer_url: {e}")))?;
+
+    let metadata = CoreProviderMetadata::discover_async(issuer_url, &http_client)
+        .await
+        .map_err(|e| {
+            ErrorReport::new(format!(
+                "failed to discover OIDC provider metadata at [oidc].issuer_url: {e}"
+            ))
+        })?;
+
+    let redirect_url = RedirectUrl::new(format!(
+        "{}/auth/callback",
+        config.external_url.trim_end_matches('/')
+    ))
+    .map_err(|e| ErrorReport::new(format!("invalid [oidc].external_url: {e}")))?;
+
+    let client = CoreClient::from_provider_metadata(
+        metadata,
+        ClientId::new(config.client_id.clone()),
+        Some(ClientSecret::new(config.client_secret.clone())),
+    )
+    .set_redirect_uri(redirect_url);
+
+    let scopes = config.scopes.iter().cloned().map(Scope::new).collect();
+
+    Ok(OidcRuntime { client, scopes })
+}
+
 pub(super) struct MissingSession;
 
 impl IntoResponse for MissingSession {
@@ -185,5 +254,22 @@ mod tests {
         let (_, taken) = take_flow_cookie(jar).expect("flow cookie should be readable");
         assert_eq!(taken.csrf_token, "csrf");
         assert_eq!(taken.return_to, "/collection/japanese");
+    }
+
+    #[tokio::test]
+    async fn test_build_oidc_runtime_fails_clearly_on_bad_issuer() {
+        let config = ResolvedOidc {
+            issuer_url: "http://127.0.0.1:1".to_string(), // nothing listens here
+            client_id: "abc".to_string(),
+            client_secret: "secret".to_string(),
+            external_url: "https://hashcards.example.com".to_string(),
+            session_secret: "a-very-long-random-session-secret-value".to_string(),
+            scopes: vec!["openid".to_string(), "email".to_string()],
+        };
+        let result = build_oidc_runtime(&config).await;
+        assert!(
+            result.is_err(),
+            "expected discovery against a closed port to fail"
+        );
     }
 }
