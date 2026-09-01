@@ -651,4 +651,180 @@ mod tests {
         assert!(body.contains("Test Collection"), "body: {body}");
         Ok(())
     }
+
+    #[tokio::test]
+    async fn test_cross_user_collection_access_is_404() -> Fallible<()> {
+        use crate::cmd::serve::config::DefaultsSection;
+        use crate::cmd::serve::config::ResolvedCollection;
+        use crate::cmd::serve::config::ResolvedServeConfig;
+        use crate::cmd::serve::server::start_serve;
+
+        let client_secret = "test-client-secret-value";
+        // The mock always claims this email — every login in this test is
+        // "as Alice."
+        let idp_port = spawn_mock_oidc_provider("alice@example.com", client_secret).await?;
+
+        let alice_dir = tempfile::tempdir()?;
+        std::fs::write(alice_dir.path().join("Alpha.md"), "Q: What is 1+1?\nA: 2\n")?;
+        let bob_dir = tempfile::tempdir()?;
+        std::fs::write(bob_dir.path().join("Beta.md"), "Q: What is 2+2?\nA: 4\n")?;
+
+        let port = portpicker::pick_unused_port().expect("no free port for serve");
+        let config = ResolvedServeConfig {
+            host: "127.0.0.1".to_string(),
+            port,
+            git: None,
+            defaults: DefaultsSection::default(),
+            collections: vec![
+                ResolvedCollection {
+                    name: "Alice's Deck".to_string(),
+                    slug: "alice-deck".to_string(),
+                    coll_dir: alice_dir.path().to_path_buf(),
+                    db_path: alice_dir.path().join("hashcards.db"),
+                    owner: Some("alice@example.com".to_string()),
+                },
+                ResolvedCollection {
+                    name: "Bob's Deck".to_string(),
+                    slug: "bob-deck".to_string(),
+                    coll_dir: bob_dir.path().to_path_buf(),
+                    db_path: bob_dir.path().join("hashcards.db"),
+                    owner: Some("bob@example.com".to_string()),
+                },
+            ],
+            data_dir: None,
+            config_path: None,
+            hedgedoc_entries: Vec::new(),
+            session_timeout_minutes: 1440,
+            oidc: Some(ResolvedOidc {
+                issuer_url: format!("http://127.0.0.1:{idp_port}"),
+                client_id: "test-client".to_string(),
+                client_secret: client_secret.to_string(),
+                external_url: format!("http://127.0.0.1:{port}"),
+                session_secret: "a-very-long-random-session-secret-value".to_string(),
+                scopes: vec!["openid".to_string(), "email".to_string()],
+            }),
+            _temp_dir: None,
+        };
+        tokio::spawn(async move { start_serve(config).await });
+        crate::utils::wait_for_server("127.0.0.1", port).await?;
+
+        let client = reqwest::Client::builder().cookie_store(true).build()?;
+
+        // Log in as Alice by visiting her own collection first.
+        let response = client
+            .get(format!("http://127.0.0.1:{port}/collection/alice-deck"))
+            .send()
+            .await?;
+        assert!(response.status().is_success());
+
+        // Alice requesting Bob's slug gets 404, not Bob's content.
+        let response = client
+            .get(format!("http://127.0.0.1:{port}/collection/bob-deck"))
+            .send()
+            .await?;
+        assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND);
+
+        // The landing page lists only Alice's collection.
+        let response = client.get(format!("http://127.0.0.1:{port}/")).send().await?;
+        let body = response.text().await?;
+        assert!(body.contains("Alice's Deck"), "body: {body}");
+        assert!(!body.contains("Bob's Deck"), "body: {body}");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_logout_clears_session() -> Fallible<()> {
+        use crate::cmd::serve::config::DefaultsSection;
+        use crate::cmd::serve::config::ResolvedCollection;
+        use crate::cmd::serve::config::ResolvedServeConfig;
+        use crate::cmd::serve::server::start_serve;
+
+        let client_secret = "test-client-secret-value";
+        let idp_port = spawn_mock_oidc_provider("me@example.com", client_secret).await?;
+
+        let dir = tempfile::tempdir()?;
+        std::fs::write(dir.path().join("Alpha.md"), "Q: What is 1+1?\nA: 2\n")?;
+
+        let port = portpicker::pick_unused_port().expect("no free port for serve");
+        let config = ResolvedServeConfig {
+            host: "127.0.0.1".to_string(),
+            port,
+            git: None,
+            defaults: DefaultsSection::default(),
+            collections: vec![ResolvedCollection {
+                name: "Test Collection".to_string(),
+                slug: "test-collection".to_string(),
+                coll_dir: dir.path().to_path_buf(),
+                db_path: dir.path().join("hashcards.db"),
+                owner: Some("me@example.com".to_string()),
+            }],
+            data_dir: None,
+            config_path: None,
+            hedgedoc_entries: Vec::new(),
+            session_timeout_minutes: 1440,
+            oidc: Some(ResolvedOidc {
+                issuer_url: format!("http://127.0.0.1:{idp_port}"),
+                client_id: "test-client".to_string(),
+                client_secret: client_secret.to_string(),
+                external_url: format!("http://127.0.0.1:{port}"),
+                session_secret: "a-very-long-random-session-secret-value".to_string(),
+                scopes: vec!["openid".to_string(), "email".to_string()],
+            }),
+            _temp_dir: None,
+        };
+        tokio::spawn(async move { start_serve(config).await });
+        crate::utils::wait_for_server("127.0.0.1", port).await?;
+
+        // Redirects disabled so each hop's own response (and its Set-Cookie
+        // headers) is inspectable; the cookie jar still accumulates cookies
+        // across these manual requests since it lives on the client, not
+        // tied to redirect-following.
+        let client = reqwest::Client::builder()
+            .cookie_store(true)
+            .redirect(reqwest::redirect::Policy::none())
+            .build()?;
+
+        // Manually follow the login chain: collection -> /auth/login ->
+        // mock /authorize -> /auth/callback -> collection.
+        let mut url = format!("http://127.0.0.1:{port}/collection/test-collection");
+        for _ in 0..5 {
+            let response = client.get(&url).send().await?;
+            if response.status().is_success() {
+                break;
+            }
+            url = response
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|v| v.to_str().ok())
+                .map(|s| {
+                    if s.starts_with('/') {
+                        format!("http://127.0.0.1:{port}{s}")
+                    } else {
+                        s.to_string()
+                    }
+                })
+                .ok_or_else(|| ErrorReport::new("expected a Location header while logging in"))?;
+        }
+
+        // Now logged in: /auth/logout's own response (not a followed
+        // redirect target) must clear the session cookie.
+        let response = client
+            .get(format!("http://127.0.0.1:{port}/auth/logout"))
+            .send()
+            .await?;
+        let cookies: Vec<String> = response
+            .headers()
+            .get_all(reqwest::header::SET_COOKIE)
+            .iter()
+            .map(|v| v.to_str().unwrap_or_default().to_string())
+            .collect();
+        let jar_has_session = cookies.iter().any(|s| {
+            s.starts_with("hc_session=") && (s.contains("Max-Age=0") || s.contains("hc_session=;"))
+        });
+        assert!(
+            jar_has_session,
+            "expected /auth/logout to clear the hc_session cookie, got: {cookies:?}"
+        );
+        Ok(())
+    }
 }
