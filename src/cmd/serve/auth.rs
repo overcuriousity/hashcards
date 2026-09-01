@@ -408,6 +408,8 @@ impl axum::extract::OptionalFromRequestParts<AppState> for CurrentUser {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
     use axum_extra::extract::cookie::Key;
 
     use super::*;
@@ -466,5 +468,187 @@ mod tests {
             result.is_err(),
             "expected discovery against a closed port to fail"
         );
+    }
+
+    // ── Mock OIDC provider ──────────────────────────────────────────────
+    //
+    // A minimal stand-in IdP for exercising the full login round trip
+    // without a real Nextcloud. It signs ID tokens with HS256, using the
+    // client secret as the HMAC key (an OIDC-standard "confidential
+    // client" signing mode openidconnect itself supports) — this avoids
+    // needing an RSA keypair and a JWKS endpoint with real key material,
+    // while still exercising the whole discovery -> authorize -> token ->
+    // ID-token-verification chain for real.
+
+    #[derive(Clone)]
+    struct MockIdpState {
+        issuer: String,
+        client_secret: String,
+        /// The `nonce` from the most recent `/authorize` request, so `/token`
+        /// can embed the same value in the ID token it issues (a real IdP
+        /// would derive this from the authorization code it minted).
+        last_nonce: std::sync::Arc<Mutex<Option<String>>>,
+        email: String,
+    }
+
+    #[derive(serde::Serialize)]
+    struct MockClaims {
+        iss: String,
+        sub: String,
+        aud: String,
+        exp: i64,
+        iat: i64,
+        nonce: Option<String>,
+        email: String,
+    }
+
+    async fn mock_discovery_handler(
+        axum::extract::State(state): axum::extract::State<MockIdpState>,
+    ) -> axum::Json<serde_json::Value> {
+        axum::Json(serde_json::json!({
+            "issuer": state.issuer,
+            "authorization_endpoint": format!("{}/authorize", state.issuer),
+            "token_endpoint": format!("{}/token", state.issuer),
+            "jwks_uri": format!("{}/jwks", state.issuer),
+            "response_types_supported": ["code"],
+            "subject_types_supported": ["public"],
+            "id_token_signing_alg_values_supported": ["HS256"],
+            "scopes_supported": ["openid", "email", "profile"],
+        }))
+    }
+
+    async fn mock_jwks_handler() -> axum::Json<serde_json::Value> {
+        axum::Json(serde_json::json!({ "keys": [] }))
+    }
+
+    async fn mock_authorize_handler(
+        axum::extract::State(state): axum::extract::State<MockIdpState>,
+        axum::extract::Query(query): axum::extract::Query<std::collections::HashMap<String, String>>,
+    ) -> axum::response::Redirect {
+        *state.last_nonce.lock().unwrap() = query.get("nonce").cloned();
+        let redirect_uri = query.get("redirect_uri").cloned().unwrap_or_default();
+        let oauth_state = query.get("state").cloned().unwrap_or_default();
+        axum::response::Redirect::to(&format!(
+            "{redirect_uri}?code=test-code&state={oauth_state}"
+        ))
+    }
+
+    async fn mock_token_handler(
+        axum::extract::State(state): axum::extract::State<MockIdpState>,
+    ) -> axum::Json<serde_json::Value> {
+        let nonce = state.last_nonce.lock().unwrap().clone();
+        let now = chrono::Utc::now().timestamp();
+        let claims = MockClaims {
+            iss: state.issuer.clone(),
+            sub: state.email.clone(),
+            aud: "test-client".to_string(),
+            exp: now + 300,
+            iat: now,
+            nonce,
+            email: state.email.clone(),
+        };
+        let id_token = jsonwebtoken::encode(
+            &jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256),
+            &claims,
+            &jsonwebtoken::EncodingKey::from_secret(state.client_secret.as_bytes()),
+        )
+        .expect("HS256 signing cannot fail for well-formed claims");
+        axum::Json(serde_json::json!({
+            "access_token": "test-access-token",
+            "token_type": "Bearer",
+            "expires_in": 300,
+            "id_token": id_token,
+        }))
+    }
+
+    /// Starts a mock OIDC provider on a local port, claiming `email` for
+    /// whoever logs in. Returns the port.
+    async fn spawn_mock_oidc_provider(email: &str, client_secret: &str) -> Fallible<u16> {
+        let port = portpicker::pick_unused_port().expect("no free port for mock IdP");
+        let state = MockIdpState {
+            issuer: format!("http://127.0.0.1:{port}"),
+            client_secret: client_secret.to_string(),
+            last_nonce: std::sync::Arc::new(Mutex::new(None)),
+            email: email.to_string(),
+        };
+        let app = axum::Router::new()
+            .route(
+                "/.well-known/openid-configuration",
+                axum::routing::get(mock_discovery_handler),
+            )
+            .route("/jwks", axum::routing::get(mock_jwks_handler))
+            .route("/authorize", axum::routing::get(mock_authorize_handler))
+            .route("/token", axum::routing::post(mock_token_handler))
+            .with_state(state);
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+        crate::utils::wait_for_server("127.0.0.1", port).await?;
+        Ok(port)
+    }
+
+    #[tokio::test]
+    async fn test_oidc_login_round_trip() -> Fallible<()> {
+        use crate::cmd::serve::config::DefaultsSection;
+        use crate::cmd::serve::config::ResolvedCollection;
+        use crate::cmd::serve::config::ResolvedServeConfig;
+        use crate::cmd::serve::server::start_serve;
+
+        let client_secret = "test-client-secret-value";
+        let idp_port = spawn_mock_oidc_provider("me@example.com", client_secret).await?;
+
+        let dir = tempfile::tempdir()?;
+        std::fs::write(dir.path().join("Alpha.md"), "Q: What is 1+1?\nA: 2\n")?;
+
+        let port = portpicker::pick_unused_port().expect("no free port for serve");
+        let config = ResolvedServeConfig {
+            host: "127.0.0.1".to_string(),
+            port,
+            git: None,
+            defaults: DefaultsSection::default(),
+            collections: vec![ResolvedCollection {
+                name: "Test Collection".to_string(),
+                slug: "test-collection".to_string(),
+                coll_dir: dir.path().to_path_buf(),
+                db_path: dir.path().join("hashcards.db"),
+                owner: Some("me@example.com".to_string()),
+            }],
+            data_dir: None,
+            config_path: None,
+            hedgedoc_entries: Vec::new(),
+            session_timeout_minutes: 1440,
+            oidc: Some(ResolvedOidc {
+                issuer_url: format!("http://127.0.0.1:{idp_port}"),
+                client_id: "test-client".to_string(),
+                client_secret: client_secret.to_string(),
+                external_url: format!("http://127.0.0.1:{port}"),
+                session_secret: "a-very-long-random-session-secret-value".to_string(),
+                scopes: vec!["openid".to_string(), "email".to_string()],
+            }),
+            _temp_dir: None,
+        };
+        tokio::spawn(async move { start_serve(config).await });
+        crate::utils::wait_for_server("127.0.0.1", port).await?;
+
+        let client = reqwest::Client::builder().cookie_store(true).build()?;
+
+        // Unauthenticated: /collection/test-collection -> /auth/login ->
+        // mock /authorize -> /auth/callback -> back to the collection page,
+        // all followed automatically as ordinary HTTP redirects.
+        let response = client
+            .get(format!(
+                "http://127.0.0.1:{port}/collection/test-collection"
+            ))
+            .send()
+            .await?;
+        assert!(
+            response.status().is_success(),
+            "status: {}",
+            response.status()
+        );
+        let body = response.text().await?;
+        assert!(body.contains("Test Collection"), "body: {body}");
+        Ok(())
     }
 }
