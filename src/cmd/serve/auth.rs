@@ -139,7 +139,7 @@ type DiscoveredCoreClient = openidconnect::core::CoreClient<
     openidconnect::EndpointMaybeSet,
 >;
 
-pub(super) struct OidcRuntime {
+pub(crate) struct OidcRuntime {
     client: DiscoveredCoreClient,
     scopes: Vec<openidconnect::Scope>,
 }
@@ -189,6 +189,153 @@ pub(super) async fn build_oidc_runtime(config: &ResolvedOidc) -> Fallible<OidcRu
     let scopes = config.scopes.iter().cloned().map(Scope::new).collect();
 
     Ok(OidcRuntime { client, scopes })
+}
+
+pub(super) async fn login_handler(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    axum::extract::Query(query): axum::extract::Query<std::collections::HashMap<String, String>>,
+    jar: SignedCookieJar,
+) -> Result<(SignedCookieJar, axum::response::Redirect), Response> {
+    use openidconnect::AuthenticationFlow;
+    use openidconnect::CsrfToken;
+    use openidconnect::Nonce;
+    use openidconnect::PkceCodeChallenge;
+    use openidconnect::core::CoreResponseType;
+
+    let Some(runtime) = &state.oidc else {
+        return Err((StatusCode::NOT_FOUND, "OIDC is not configured").into_response());
+    };
+
+    let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
+    let return_to = query
+        .get("return_to")
+        .cloned()
+        .unwrap_or_else(|| "/".to_string());
+
+    let mut auth_request = runtime.client.authorize_url(
+        AuthenticationFlow::<CoreResponseType>::AuthorizationCode,
+        CsrfToken::new_random,
+        Nonce::new_random,
+    );
+    for scope in &runtime.scopes {
+        auth_request = auth_request.add_scope(scope.clone());
+    }
+    let (authorize_url, csrf_token, nonce) =
+        auth_request.set_pkce_challenge(pkce_challenge).url();
+
+    let flow_state = OidcFlowState {
+        csrf_token: csrf_token.secret().clone(),
+        nonce: nonce.secret().clone(),
+        pkce_verifier: pkce_verifier.secret().clone(),
+        return_to,
+    };
+    let jar = set_flow_cookie(jar, &flow_state);
+
+    Ok((jar, axum::response::Redirect::to(authorize_url.as_str())))
+}
+
+pub(super) async fn callback_handler(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    axum::extract::Query(query): axum::extract::Query<std::collections::HashMap<String, String>>,
+    jar: SignedCookieJar,
+) -> Result<(SignedCookieJar, axum::response::Redirect), Response> {
+    use openidconnect::AuthorizationCode;
+    use openidconnect::Nonce;
+    use openidconnect::PkceCodeVerifier;
+    use openidconnect::TokenResponse;
+
+    let Some(runtime) = &state.oidc else {
+        return Err((StatusCode::NOT_FOUND, "OIDC is not configured").into_response());
+    };
+
+    let (jar, flow) = take_flow_cookie(jar).ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            "Login session expired or was not started here. Try logging in again.",
+        )
+            .into_response()
+    })?;
+
+    let code = query
+        .get("code")
+        .cloned()
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "Missing authorization code").into_response())?;
+    let returned_state = query.get("state").cloned().unwrap_or_default();
+    if returned_state != flow.csrf_token {
+        return Err(
+            (StatusCode::BAD_REQUEST, "Login state mismatch — please try again").into_response(),
+        );
+    }
+
+    let http_client = openidconnect::reqwest::ClientBuilder::new()
+        .redirect(openidconnect::reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("OIDC HTTP client error: {e}"),
+            )
+                .into_response()
+        })?;
+
+    let token_response = runtime
+        .client
+        .exchange_code(AuthorizationCode::new(code))
+        .map_err(|e| {
+            (
+                StatusCode::BAD_GATEWAY,
+                format!("failed to build token exchange request: {e}"),
+            )
+                .into_response()
+        })?
+        .set_pkce_verifier(PkceCodeVerifier::new(flow.pkce_verifier))
+        .request_async(&http_client)
+        .await
+        .map_err(|e| {
+            (StatusCode::BAD_GATEWAY, format!("OIDC token exchange failed: {e}")).into_response()
+        })?;
+
+    let id_token = token_response.id_token().ok_or_else(|| {
+        (
+            StatusCode::BAD_GATEWAY,
+            "OIDC provider did not return an ID token",
+        )
+            .into_response()
+    })?;
+    let claims = id_token
+        .claims(&runtime.client.id_token_verifier(), &Nonce::new(flow.nonce))
+        .map_err(|e| {
+            (StatusCode::BAD_GATEWAY, format!("ID token validation failed: {e}")).into_response()
+        })?;
+
+    let email = claims
+        .email()
+        .ok_or_else(|| {
+            (
+                StatusCode::BAD_GATEWAY,
+                "OIDC provider did not return an email claim; add the `email` scope on the \
+                 provider side",
+            )
+                .into_response()
+        })?
+        .as_str()
+        .to_lowercase();
+
+    let jar = set_session_cookie(jar, &email);
+    Ok((jar, axum::response::Redirect::to(&flow.return_to)))
+}
+
+pub(super) async fn logout_handler(
+    jar: SignedCookieJar,
+) -> (SignedCookieJar, axum::response::Redirect) {
+    let jar = clear_session_cookie(jar);
+    // RP-initiated logout (redirecting to the IdP's own end-session
+    // endpoint) would need discovering with a metadata type that carries
+    // `end_session_endpoint`, which CoreProviderMetadata does not — out of
+    // scope for now; clearing the local session cookie is sufficient to
+    // log the user out of hashcards itself.
+    let target = "/".to_string();
+    (jar, axum::response::Redirect::to(&target))
 }
 
 pub(super) struct MissingSession;

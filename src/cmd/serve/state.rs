@@ -10,6 +10,7 @@ use tokio::sync::RwLock;
 
 use crate::cmd::drill::server::AnswerControls;
 use crate::cmd::drill::state::MutableState;
+use crate::cmd::serve::auth::OidcRuntime;
 use crate::cmd::serve::config::ResolvedCollection;
 use crate::cmd::serve::config::ResolvedServeConfig;
 use crate::types::timestamp::Timestamp;
@@ -42,6 +43,9 @@ pub struct AppState {
     /// cookie read/write, since the auth routes and middleware that use it
     /// are only ever registered when `[oidc]` is configured.
     pub session_key: Key,
+    /// Set when `[oidc]` is configured. Gates every route except `/auth/*`
+    /// behind login and scopes collections/notes to their `owner`.
+    pub oidc: Option<Arc<OidcRuntime>>,
 }
 
 pub struct CollectionInfo {

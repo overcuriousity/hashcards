@@ -25,6 +25,7 @@ use crate::cmd::drill::katex::katex_mhchem_js_handler;
 use crate::cmd::drill::template::icon_192_handler;
 use crate::cmd::drill::template::icon_512_handler;
 use crate::cmd::drill::template::manifest_handler;
+use crate::cmd::serve::auth::build_oidc_runtime;
 use crate::cmd::serve::bookmarks::bookmark_delete_handler;
 use crate::cmd::serve::bookmarks::bookmark_list_handler;
 use crate::cmd::serve::bookmarks::bookmark_note_handler;
@@ -263,6 +264,13 @@ pub async fn start_serve(config: ResolvedServeConfig) -> Fallible<()> {
     let hedgedoc_sources = Arc::new(Mutex::new(hedgedoc_sources_init));
     let hedgedoc_last_synced = Arc::new(Mutex::new(hedgedoc_last_synced_init));
 
+    // Discovery happens once at startup, not lazily on the first login
+    // attempt, so a broken [oidc] config fails fast with a clear error.
+    let oidc = match &config.oidc {
+        Some(o) => Some(Arc::new(build_oidc_runtime(o).await?)),
+        None => None,
+    };
+
     let state = AppState {
         config: config.clone(),
         collections: Arc::new(RwLock::new(collection_infos)),
@@ -278,6 +286,7 @@ pub async fn start_serve(config: ResolvedServeConfig) -> Fallible<()> {
             Some(o) => Key::derive_from(o.session_secret.as_bytes()),
             None => Key::generate(),
         },
+        oidc,
     };
 
     spawn_session_eviction_task(state.sessions.clone(), config.session_timeout_minutes);
