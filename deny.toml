@@ -4,11 +4,39 @@
 exclude-dev = true
 
 [licenses]
+# ISC and MIT-0 are permissive, OSI-approved and FSF-free, and impose no
+# obligation beyond what MIT already does. They arrive with the rustls TLS
+# stack `reqwest` pulls in (ring, untrusted, rustls-webpki, webpki-root-certs,
+# aws-lc-rs, aws-lc-sys).
+#
+# CDLA-Permissive-2.0 covers `webpki-roots`, which ships Mozilla's CA root
+# store — data rather than code, hence a data licence. It is permissive: use,
+# modification and redistribution for any purpose, asking only that the
+# disclaimer travel with the data.
 allow = [
     "MIT",
+    "MIT-0",
     "Apache-2.0",
     "BSD-2-Clause",
     "BSD-3-Clause",
+    "CDLA-Permissive-2.0",
+    "ISC",
     "Unicode-3.0",
     "Zlib"
+]
+
+[advisories]
+ignore = [
+    # RUSTSEC-2023-0071 — "Marvin Attack", a timing sidechannel in the `rsa`
+    # crate, reached through openidconnect's ID token verification.
+    #
+    # The sidechannel is in RSA *private key* operations (decryption and
+    # signing). hashcards is an OIDC client: it verifies ID token signatures
+    # with the identity provider's public key and never holds an RSA private
+    # key, so there is no secret for the attack to recover.
+    #
+    # There is no patched release to move to — the fix requires reworking the
+    # crate's bignum arithmetic and has not shipped for the 0.9.x line that
+    # openidconnect 4 depends on. Revisit when `rsa` publishes a fix.
+    "RUSTSEC-2023-0071",
 ]
