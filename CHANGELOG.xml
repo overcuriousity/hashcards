@@ -1,5 +1,10 @@
 <changelog>
     <unreleased>
+        <added>
+            <change author="claude">
+                Optional OIDC authentication for `serve` mode: an `[oidc]` config section gates every route except `/auth/*` behind login (validated against Nextcloud), and each `[[collection]]`/`[[hedgedoc]]` entry declares an `owner` (matched against the OIDC `email` claim) so each user sees only their own collections. Sessions are stateless signed cookies; no server-side session store. Absent `[oidc]`, `serve` behaves exactly as before. `drill` mode is unaffected. In-browser edit commits are attributed to the logged-in user when OIDC is on.
+            </change>
+        </added>
         <fixed>
             <change author="claude">
                 Fixed four Windows-only test failures surfaced by the Windows CI job: a collection path with a root but no drive prefix (e.g. `/etc`) is now rejected as absolute on every platform, not just Unix, closing a directory-traversal check that Windows' path-joining rules could otherwise bypass. A git-backed edit test no longer canonicalizes its temp path before handing it to `git clone`, which misread Windows' `\\?\` verbatim-path prefix as a UNC hostname. A double-quote-in-filename attribute-escaping test is now skipped on Windows, where filesystems refuse to create such a file in the first place.
