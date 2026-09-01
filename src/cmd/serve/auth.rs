@@ -252,7 +252,7 @@ pub(super) async fn login_handler(
     axum::extract::State(state): axum::extract::State<AppState>,
     axum::extract::Query(query): axum::extract::Query<std::collections::HashMap<String, String>>,
     jar: SignedCookieJar,
-) -> Result<(SignedCookieJar, axum::response::Redirect), Response> {
+) -> Response {
     use openidconnect::AuthenticationFlow;
     use openidconnect::CsrfToken;
     use openidconnect::Nonce;
@@ -260,7 +260,7 @@ pub(super) async fn login_handler(
     use openidconnect::core::CoreResponseType;
 
     let Some(runtime) = &state.oidc else {
-        return Err((StatusCode::NOT_FOUND, "OIDC is not configured").into_response());
+        return (StatusCode::NOT_FOUND, "OIDC is not configured").into_response();
     };
 
     let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
@@ -287,114 +287,120 @@ pub(super) async fn login_handler(
     };
     let jar = set_flow_cookie(jar, &flow_state, runtime.secure_cookies);
 
-    Ok((jar, axum::response::Redirect::to(authorize_url.as_str())))
+    (jar, axum::response::Redirect::to(authorize_url.as_str())).into_response()
 }
 
 pub(super) async fn callback_handler(
     axum::extract::State(state): axum::extract::State<AppState>,
     axum::extract::Query(query): axum::extract::Query<std::collections::HashMap<String, String>>,
     jar: SignedCookieJar,
-) -> Result<(SignedCookieJar, axum::response::Redirect), Response> {
+) -> Response {
     use openidconnect::AuthorizationCode;
     use openidconnect::Nonce;
     use openidconnect::PkceCodeVerifier;
     use openidconnect::TokenResponse;
 
     let Some(runtime) = &state.oidc else {
-        return Err((StatusCode::NOT_FOUND, "OIDC is not configured").into_response());
+        return (StatusCode::NOT_FOUND, "OIDC is not configured").into_response();
     };
 
-    let (jar, flow) = take_flow_cookie(jar).ok_or_else(|| {
-        (
+    let Some((jar, flow)) = take_flow_cookie(jar) else {
+        return (
             StatusCode::BAD_REQUEST,
             "Login session expired or was not started here. Try logging in again.",
         )
-            .into_response()
-    })?;
+            .into_response();
+    };
 
-    let code = query
-        .get("code")
-        .cloned()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "Missing authorization code").into_response())?;
+    let Some(code) = query.get("code").cloned() else {
+        return (StatusCode::BAD_REQUEST, "Missing authorization code").into_response();
+    };
     let returned_state = query.get("state").cloned().unwrap_or_default();
     if returned_state != flow.csrf_token {
-        return Err((
+        return (
             StatusCode::BAD_REQUEST,
             "Login state mismatch — please try again",
         )
-            .into_response());
+            .into_response();
     }
 
-    let http_client = openidconnect::reqwest::ClientBuilder::new()
+    let http_client = match openidconnect::reqwest::ClientBuilder::new()
         .redirect(openidconnect::reqwest::redirect::Policy::none())
         .build()
-        .map_err(|e| {
-            (
+    {
+        Ok(client) => client,
+        Err(e) => {
+            return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("OIDC HTTP client error: {e}"),
             )
-                .into_response()
-        })?;
+                .into_response();
+        }
+    };
 
-    let token_response = runtime
-        .client
-        .exchange_code(AuthorizationCode::new(code))
-        .map_err(|e| {
-            (
+    let exchange = match runtime.client.exchange_code(AuthorizationCode::new(code)) {
+        Ok(request) => request,
+        Err(e) => {
+            return (
                 StatusCode::BAD_GATEWAY,
                 format!("failed to build token exchange request: {e}"),
             )
-                .into_response()
-        })?
+                .into_response();
+        }
+    };
+    let token_response = match exchange
         .set_pkce_verifier(PkceCodeVerifier::new(flow.pkce_verifier))
         .request_async(&http_client)
         .await
-        .map_err(|e| {
-            (
+    {
+        Ok(response) => response,
+        Err(e) => {
+            return (
                 StatusCode::BAD_GATEWAY,
                 format!("OIDC token exchange failed: {e}"),
             )
-                .into_response()
-        })?;
+                .into_response();
+        }
+    };
 
-    let id_token = token_response.id_token().ok_or_else(|| {
-        (
+    let Some(id_token) = token_response.id_token() else {
+        return (
             StatusCode::BAD_GATEWAY,
             "OIDC provider did not return an ID token",
         )
-            .into_response()
-    })?;
-    let claims = id_token
-        .claims(&runtime.client.id_token_verifier(), &Nonce::new(flow.nonce))
-        .map_err(|e| {
-            (
+            .into_response();
+    };
+    let claims = match id_token.claims(&runtime.client.id_token_verifier(), &Nonce::new(flow.nonce))
+    {
+        Ok(claims) => claims,
+        Err(e) => {
+            return (
                 StatusCode::BAD_GATEWAY,
                 format!("ID token validation failed: {e}"),
             )
-                .into_response()
-        })?;
+                .into_response();
+        }
+    };
 
-    let email = claims
-        .email()
-        .ok_or_else(|| {
-            (
-                StatusCode::BAD_GATEWAY,
-                "OIDC provider did not return an email claim; add the `email` scope on the \
-                 provider side",
-            )
-                .into_response()
-        })?
-        .as_str()
-        .to_lowercase();
+    let Some(email) = claims.email() else {
+        return (
+            StatusCode::BAD_GATEWAY,
+            "OIDC provider did not return an email claim; add the `email` scope on the \
+             provider side",
+        )
+            .into_response();
+    };
+    let email = email.as_str().to_lowercase();
 
     let jar = set_session_cookie(jar, &email, runtime.secure_cookies);
     // The flow cookie is signed, so `return_to` cannot have been tampered
     // with since `login_handler` validated it — re-checking here keeps the
     // guarantee local to the redirect that acts on it.
-    Ok((
+    (
         jar,
         axum::response::Redirect::to(&safe_return_to(&flow.return_to)),
-    ))
+    )
+        .into_response()
 }
 
 pub(super) async fn logout_handler(

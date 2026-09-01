@@ -580,9 +580,9 @@ mod tests {
         // guaranteed-absolute path instead.
         let data_dir = current_dir()?.join("var-lib-hashcards");
         let toml = format!(
-            "[server]\ndata_dir = \"{}\"\n\n\
+            "[server]\ndata_dir = {:?}\n\n\
              [[collection]]\nname = \"Japanese\"\npath = \"japanese\"\n",
-            data_dir.display()
+            &data_dir
         );
         let config: ServeConfig = toml::from_str(&toml)?;
         let resolved = ResolvedServeConfig::from_toml(config)?;
@@ -656,7 +656,7 @@ path = "beta"
     fn test_oidc_requires_owner_on_every_collection() -> Fallible<()> {
         let data_dir = current_dir()?.join("var-lib-hashcards-oidc-owner-test");
         let toml_str = format!(
-            "[server]\ndata_dir = \"{}\"\n\n\
+            "[server]\ndata_dir = {:?}\n\n\
              [oidc]\n\
              issuer_url = \"https://idp.example.com\"\n\
              client_id = \"abc\"\n\
@@ -666,7 +666,7 @@ path = "beta"
              [[collection]]\n\
              name = \"Japanese\"\n\
              path = \"japanese\"\n",
-            data_dir.display()
+            &data_dir
         );
         let config: ServeConfig = toml::from_str(&toml_str)?;
         match ResolvedServeConfig::from_toml(config) {
@@ -686,7 +686,7 @@ path = "beta"
     fn test_oidc_with_owner_on_every_collection_loads() -> Fallible<()> {
         let data_dir = current_dir()?.join("var-lib-hashcards-oidc-owner-ok-test");
         let toml_str = format!(
-            "[server]\ndata_dir = \"{}\"\n\n\
+            "[server]\ndata_dir = {:?}\n\n\
              [oidc]\n\
              issuer_url = \"https://idp.example.com\"\n\
              client_id = \"abc\"\n\
@@ -697,7 +697,7 @@ path = "beta"
              name = \"Japanese\"\n\
              path = \"japanese\"\n\
              owner = \"Me@Example.com\"\n",
-            data_dir.display()
+            &data_dir
         );
         let config: ServeConfig = toml::from_str(&toml_str)?;
         let resolved = ResolvedServeConfig::from_toml(config)?;
@@ -715,11 +715,11 @@ path = "beta"
     fn test_no_oidc_owner_field_is_inert() -> Fallible<()> {
         let data_dir = current_dir()?.join("var-lib-hashcards-no-oidc-test");
         let toml_str = format!(
-            "[server]\ndata_dir = \"{}\"\n\n\
+            "[server]\ndata_dir = {:?}\n\n\
              [[collection]]\n\
              name = \"Japanese\"\n\
              path = \"japanese\"\n",
-            data_dir.display()
+            &data_dir
         );
         let config: ServeConfig = toml::from_str(&toml_str)?;
         let resolved = ResolvedServeConfig::from_toml(config)?;
@@ -735,7 +735,7 @@ path = "beta"
     fn test_short_session_secret_is_rejected() -> Fallible<()> {
         let data_dir = current_dir()?.join("var-lib-hashcards-short-secret-test");
         let toml_str = format!(
-            "[server]\ndata_dir = \"{}\"\n\n\
+            "[server]\ndata_dir = {:?}\n\n\
              [oidc]\n\
              issuer_url = \"https://idp.example.com\"\n\
              client_id = \"abc\"\n\
@@ -746,7 +746,7 @@ path = "beta"
              name = \"Japanese\"\n\
              path = \"japanese\"\n\
              owner = \"me@example.com\"\n",
-            data_dir.display()
+            &data_dir
         );
         let config: ServeConfig = toml::from_str(&toml_str)?;
         match ResolvedServeConfig::from_toml(config) {
@@ -765,12 +765,12 @@ path = "beta"
     fn test_owner_without_oidc_is_rejected() -> Fallible<()> {
         let data_dir = current_dir()?.join("var-lib-hashcards-owner-no-oidc-test");
         let toml_str = format!(
-            "[server]\ndata_dir = \"{}\"\n\n\
+            "[server]\ndata_dir = {:?}\n\n\
              [[collection]]\n\
              name = \"Japanese\"\n\
              path = \"japanese\"\n\
              owner = \"me@example.com\"\n",
-            data_dir.display()
+            &data_dir
         );
         let config: ServeConfig = toml::from_str(&toml_str)?;
         match ResolvedServeConfig::from_toml(config) {
@@ -789,7 +789,7 @@ path = "beta"
     fn test_hedgedoc_owner_is_lowercased() -> Fallible<()> {
         let data_dir = current_dir()?.join("var-lib-hashcards-hedgedoc-owner-case-test");
         let toml_str = format!(
-            "[server]\ndata_dir = \"{}\"\n\n\
+            "[server]\ndata_dir = {:?}\n\n\
              [oidc]\n\
              issuer_url = \"https://idp.example.com\"\n\
              client_id = \"abc\"\n\
@@ -799,7 +799,7 @@ path = "beta"
              [[hedgedoc]]\n\
              url = \"https://pad.example.com/abc\"\n\
              owner = \"Me@Example.com\"\n",
-            data_dir.display()
+            &data_dir
         );
         let config: ServeConfig = toml::from_str(&toml_str)?;
         let resolved = ResolvedServeConfig::from_toml(config)?;
@@ -807,6 +807,26 @@ path = "beta"
             resolved.hedgedoc_entries[0].owner.as_deref(),
             Some("me@example.com")
         );
+        Ok(())
+    }
+
+    /// Windows CI regression: `data_dir` is interpolated into TOML with
+    /// `{:?}`, not `{}`, so a path containing backslashes stays a valid TOML
+    /// basic string. Formatting it raw produced `data_dir = "D:\a\..."`,
+    /// which the parser rejects as a bad escape. This test runs everywhere so
+    /// the fix cannot regress on a Linux-only run.
+    #[test]
+    fn test_windows_style_data_dir_survives_toml_formatting() -> Fallible<()> {
+        let data_dir = PathBuf::from(r"D:\a\hashcards-web\var-lib-hashcards");
+        let toml_str = format!(
+            "[server]\ndata_dir = {:?}\n\n\
+             [[collection]]\n\
+             name = \"Japanese\"\n\
+             path = \"japanese\"\n",
+            &data_dir
+        );
+        let config: ServeConfig = toml::from_str(&toml_str)?;
+        assert_eq!(PathBuf::from(&config.server.data_dir), data_dir);
         Ok(())
     }
 }
