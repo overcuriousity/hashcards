@@ -508,15 +508,16 @@ pub fn commit_delete(
     let mut updated = guard.clone();
     // Matched on (url, owner): deleting your own note must never remove
     // another user's note with the same URL.
-    let matches = |s: &HedgedocSource| s.note.url == url && s.collection.owner.as_deref() == owner;
+    let is_target =
+        |s: &HedgedocSource| s.note.url == url && s.collection.owner.as_deref() == owner;
     let Some(removed) = updated
         .iter()
-        .find(|s| matches(s))
+        .find(|s| is_target(s))
         .map(|s| s.collection.clone())
     else {
         return fail(format!("No HedgeDoc source with this URL: {url}"));
     };
-    updated.retain(|s| !matches(s));
+    updated.retain(|s| !is_target(s));
     if let Some(path) = config_path {
         persist_hedgedoc_entries(path, &all_hedgedoc_entries(&updated))?;
     }

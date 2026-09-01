@@ -264,10 +264,10 @@ pub(super) async fn login_handler(
     };
 
     let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
-    let return_to = query
-        .get("return_to")
-        .map(|raw| safe_return_to(raw))
-        .unwrap_or_else(|| "/".to_string());
+    let return_to = match query.get("return_to") {
+        Some(raw) => safe_return_to(raw),
+        None => "/".to_string(),
+    };
 
     let mut auth_request = runtime.client.authorize_url(
         AuthenticationFlow::<CoreResponseType>::AuthorizationCode,
