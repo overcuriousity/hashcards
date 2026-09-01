@@ -137,32 +137,31 @@ pub(super) fn set_flow_cookie(
     jar.add(cookie)
 }
 
-/// Consumes the flow cookie: returns the jar with it removed, and the state
-/// it held, if it was present and unexpired.
+/// Consumes the flow cookie: returns the jar with the cookie removed, plus
+/// the state it held when it was present and unexpired.
 ///
-/// The jar is returned on the `Err` side too, so a malformed or expired
-/// cookie is still cleared from the browser rather than left to linger until
-/// its own `Max-Age` lapses.
-pub(super) fn take_flow_cookie(
-    jar: SignedCookieJar,
-) -> Result<(SignedCookieJar, OidcFlowState), SignedCookieJar> {
+/// The jar comes back either way, so a malformed or expired cookie is still
+/// cleared from the browser rather than left to linger until its own
+/// `Max-Age` lapses. (A `Result` would carry the jar in its `Err` variant,
+/// which is large enough to trip `clippy::result_large_err`.)
+pub(super) fn take_flow_cookie(jar: SignedCookieJar) -> (SignedCookieJar, Option<OidcFlowState>) {
     let Some(cookie) = jar.get(FLOW_COOKIE) else {
-        return Err(jar);
+        return (jar, None);
     };
     let mut removal = Cookie::from(FLOW_COOKIE);
     removal.set_path("/");
     let jar = jar.remove(removal);
 
     let Ok(payload) = serde_json::from_str::<FlowPayload>(cookie.value()) else {
-        return Err(jar);
+        return (jar, None);
     };
     let Ok(expires_at) = Timestamp::try_from(payload.expires_at) else {
-        return Err(jar);
+        return (jar, None);
     };
     if expires_at.into_inner() < Timestamp::now().into_inner() {
-        return Err(jar);
+        return (jar, None);
     }
-    Ok((jar, payload.state))
+    (jar, Some(payload.state))
 }
 
 /// Shown when a non-GET request arrives with no valid session. A 303 would
@@ -343,20 +342,18 @@ pub(super) async fn callback_handler(
         return (StatusCode::NOT_FOUND, "OIDC is not configured").into_response();
     };
 
-    let (jar, flow) = match take_flow_cookie(jar) {
-        Ok(pair) => pair,
-        // The jar carries the removal of the stale cookie, so it is cleared
-        // even on this path.
-        Err(jar) => {
-            return (
-                jar,
-                (
-                    StatusCode::BAD_REQUEST,
-                    "Login session expired or was not started here. Try logging in again.",
-                ),
-            )
-                .into_response();
-        }
+    // The jar carries the removal of the cookie either way, so a stale one is
+    // cleared even on the failure path.
+    let (jar, flow) = take_flow_cookie(jar);
+    let Some(flow) = flow else {
+        return (
+            jar,
+            (
+                StatusCode::BAD_REQUEST,
+                "Login session expired or was not started here. Try logging in again.",
+            ),
+        )
+            .into_response();
     };
 
     let Some(code) = query.get("code").cloned() else {
@@ -584,7 +581,8 @@ mod tests {
             return_to: "/collection/japanese".to_string(),
         };
         let jar = set_flow_cookie(jar, &state, true);
-        let (_, taken) = take_flow_cookie(jar).expect("flow cookie should be readable");
+        let (_, taken) = take_flow_cookie(jar);
+        let taken = taken.expect("flow cookie should be readable");
         assert_eq!(taken.csrf_token, "csrf");
         assert_eq!(taken.return_to, "/collection/japanese");
     }
@@ -1035,9 +1033,11 @@ mod tests {
         let value = serde_json::to_string(&payload).expect("serializable");
         let jar = jar.add(Cookie::new(FLOW_COOKIE, value));
 
-        let Err(jar) = take_flow_cookie(jar) else {
-            panic!("an expired flow cookie must not be accepted");
-        };
+        let (jar, state) = take_flow_cookie(jar);
+        assert!(
+            state.is_none(),
+            "an expired flow cookie must not be accepted"
+        );
         assert!(
             jar.get(FLOW_COOKIE).is_none(),
             "the stale cookie must be removed from the jar"
@@ -1049,7 +1049,8 @@ mod tests {
     fn test_missing_flow_cookie_returns_the_jar() {
         let key = Key::generate();
         let jar = SignedCookieJar::new(key);
-        assert!(matches!(take_flow_cookie(jar), Err(_)));
+        let (_, state) = take_flow_cookie(jar);
+        assert!(state.is_none());
     }
 
     /// A non-GET request with no session must not be redirected: `Redirect`
