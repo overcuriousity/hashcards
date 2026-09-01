@@ -31,6 +31,9 @@ use crate::cmd::drill::post::FormData;
 use crate::cmd::drill::post::handle_action;
 use crate::cmd::drill::server::escape_js_string_literal;
 use crate::cmd::drill::state::MutableState;
+use crate::cmd::drill::state::SessionDb;
+use crate::cmd::drill::state::SessionDbs;
+use crate::cmd::drill::state::SessionSource;
 use crate::cmd::drill::template::page_template;
 use crate::cmd::drill::template::page_template_with_script;
 use crate::cmd::run_blocking;
@@ -38,6 +41,8 @@ use crate::cmd::serve::auth::CurrentUser;
 use crate::cmd::serve::browse::build_deck_tree;
 use crate::cmd::serve::browse::render_browse_page;
 use crate::cmd::serve::config::ResolvedCollection;
+use crate::cmd::serve::decks::ResolvedCustomDeck;
+use crate::cmd::serve::decks::find_custom_deck;
 use crate::cmd::serve::git::clone_or_pull;
 use crate::cmd::serve::hedgedoc::apply_sync_result;
 use crate::cmd::serve::hedgedoc::build_combined_infos;
@@ -84,7 +89,7 @@ pub async fn collection_get_handler(
     // A slug that isn't the caller's (wrong owner, or doesn't exist at all)
     // 404s before touching the session map, so an active session belonging
     // to a different owner is never reachable by slug alone.
-    if find_collection(&state, &slug, owner.as_deref()).is_none() {
+    if find_drill_target(&state, &slug, owner.as_deref()).is_none() {
         return (StatusCode::NOT_FOUND, collection_not_found_page());
     }
     let state2 = state.clone();
@@ -139,6 +144,13 @@ fn collection_get_inner(
     let session = session.filter(|s| !s.lock().is_detached());
 
     let Some(session) = session else {
+        // A custom deck has a fixed membership, so it gets a start page
+        // rather than the collection's deck tree.
+        if let Some(deck) = find_custom_deck(&state.custom_decks.lock(), slug, owner) {
+            let sources = deck_sources(state, &deck, owner);
+            let due = due_card_count(&sources)?;
+            return Ok(render_custom_deck_page(&deck, &sources, due, flash).into_string());
+        }
         // No active session: show the deck browser.
         let rc = find_collection(state, slug, owner)
             .ok_or_else(|| crate::error::ErrorReport::new(format!("Unknown collection: {slug}")))?;
@@ -193,12 +205,7 @@ fn collection_get_inner(
     session.mutable.mark_card_shown();
     // Heartbeat, so another process's startup sweep can tell this session
     // apart from one abandoned by a crash.
-    let session_id = session.mutable.session_id;
-    if let Err(e) = session
-        .mutable
-        .db
-        .touch_session(session_id, Timestamp::now())
-    {
+    if let Err(e) = session.mutable.dbs.touch_all(Timestamp::now()) {
         log::debug!("could not stamp session heartbeat: {e}");
     }
     let form_action = format!("/collection/{slug}");
@@ -224,6 +231,56 @@ fn collection_get_inner(
     let script_url = format!("/collection/{slug}/script.js");
     let html = page_template_with_script(&script_url, body);
     Ok(html.into_string())
+}
+
+/// Every slug that can be drilled: a configured collection (or HedgeDoc
+/// note, which is one too) or a user-assembled cross-collection deck.
+pub(super) enum DrillTarget {
+    Collection(ResolvedCollection),
+    Deck(ResolvedCustomDeck),
+}
+
+/// Resolve a drillable slug, scoped to `owner`. Collections win over decks;
+/// startup validation refuses a config where the two could collide.
+pub(super) fn find_drill_target(
+    state: &AppState,
+    slug: &str,
+    owner: Option<&str>,
+) -> Option<DrillTarget> {
+    if let Some(rc) = find_collection(state, slug, owner) {
+        return Some(DrillTarget::Collection(rc));
+    }
+    let decks = state.custom_decks.lock();
+    find_custom_deck(&decks, slug, owner).map(DrillTarget::Deck)
+}
+
+/// The collections a custom deck draws on, each with the decks it wants.
+///
+/// Members naming a collection the caller no longer owns (renamed, removed,
+/// or never theirs) are skipped rather than failing the whole deck: a stale
+/// member should not make the rest of a deck undrillable.
+pub(super) fn deck_sources(
+    state: &AppState,
+    deck: &ResolvedCustomDeck,
+    owner: Option<&str>,
+) -> Vec<SessionSourceSpec> {
+    let mut by_collection: Vec<SessionSourceSpec> = Vec::new();
+    for member in &deck.members {
+        let Some(rc) = find_collection(state, &member.collection_slug, owner) else {
+            continue;
+        };
+        match by_collection
+            .iter_mut()
+            .find(|s| s.collection.slug == rc.slug)
+        {
+            Some(existing) => existing.decks.push(member.deck_name.clone()),
+            None => by_collection.push(SessionSourceSpec {
+                collection: rc,
+                decks: vec![member.deck_name.clone()],
+            }),
+        }
+    }
+    by_collection
 }
 
 /// Looks up a collection by slug, scoped to `owner` (the caller's email, or
@@ -332,14 +389,15 @@ fn collection_start_inner(
     limit: Option<usize>,
     owner: Option<&str>,
 ) -> Fallible<()> {
-    if selected_decks.is_empty() {
+    // The slug must be the caller's own before anything else happens —
+    // including before touching an existing session under that slug, which
+    // could otherwise belong to a different owner.
+    let target = find_drill_target(state, slug, owner)
+        .ok_or_else(|| ErrorReport::new(format!("Unknown collection: {slug}")))?;
+    // A custom deck's membership is fixed when it is saved, so it carries no
+    // deck checkboxes; a collection needs at least one.
+    if matches!(target, DrillTarget::Collection(_)) && selected_decks.is_empty() {
         return fail("Select at least one deck.");
-    }
-    // The slug must be the caller's own collection before anything else
-    // happens — including before touching an existing session under that
-    // slug, which could otherwise belong to a different owner.
-    if find_collection(state, slug, owner).is_none() {
-        return fail(format!("Unknown collection: {slug}"));
     }
     // FEAT-03: never silently discard an unfinished session. The redirect
     // to /collection/{slug} lands on the running session; the user must
@@ -358,7 +416,27 @@ fn collection_start_inner(
     }
 
     // Create the session outside the lock (may do filesystem/DB work).
-    let session = create_session(state, slug, &selected_decks, limit, owner)?;
+    let session = match target {
+        DrillTarget::Collection(rc) => create_session_from_sources(
+            state,
+            vec![SessionSourceSpec {
+                collection: rc,
+                decks: selected_decks,
+            }],
+            limit,
+        )?,
+        DrillTarget::Deck(deck) => {
+            let sources = deck_sources(state, &deck, owner);
+            if sources.is_empty() {
+                return fail(format!(
+                    "The deck '{}' has no members in collections you own. Edit it from the \
+                     Decks page.",
+                    deck.name
+                ));
+            }
+            create_session_from_sources(state, sources, limit)?
+        }
+    };
     if let Some(s) = session {
         state
             .sessions
@@ -368,53 +446,111 @@ fn collection_start_inner(
     Ok(())
 }
 
-fn create_session(
+/// One collection contributing to a drill session, and which of its decks
+/// are wanted. An empty `decks` means every deck in the collection.
+pub(super) struct SessionSourceSpec {
+    pub collection: ResolvedCollection,
+    pub decks: Vec<String>,
+}
+
+/// Build a drill session over one or more collections.
+///
+/// Each source keeps its own database and its own open session row, and every
+/// card is routed back to the collection it came from, so a card drilled
+/// inside a cross-collection deck is scheduled exactly once — in its home
+/// collection — rather than acquiring a second, drifting schedule.
+pub(super) fn create_session_from_sources(
     state: &AppState,
-    slug: &str,
-    selected_decks: &[String],
+    sources: Vec<SessionSourceSpec>,
     limit: Option<usize>,
-    owner: Option<&str>,
 ) -> Fallible<Option<DrillSession>> {
-    let rc = find_collection(state, slug, owner)
-        .ok_or_else(|| crate::error::ErrorReport::new(format!("Unknown collection: {slug}")))?;
-
-    let collection = Collection::with_db_path(rc.coll_dir.clone(), rc.db_path.clone())?;
-
+    if sources.is_empty() {
+        return Ok(None);
+    }
+    let multi_source = sources.len() > 1;
     let session_started_at = Timestamp::now();
     let today: Date = session_started_at.date();
 
-    // Sync new cards to DB
-    let db_hashes: HashSet<CardHash> = collection.db.card_hashes()?;
-    for card in collection.cards.iter() {
-        if !db_hashes.contains(&card.hash()) {
-            collection.db.insert_card(card.hash(), session_started_at)?;
+    let mut session_dbs: Vec<SessionDb> = Vec::new();
+    let mut routes: HashMap<CardHash, usize> = HashMap::new();
+    let mut due_cards: Vec<Card> = Vec::new();
+    let mut cache = Cache::new();
+    let mut first_directory: Option<PathBuf> = None;
+    let mut macros: Vec<(String, String)> = Vec::new();
+
+    for (index, spec) in sources.into_iter().enumerate() {
+        let rc = spec.collection;
+        let collection = Collection::with_db_path(rc.coll_dir.clone(), rc.db_path.clone())?;
+
+        // Sync new cards to DB
+        let db_hashes: HashSet<CardHash> = collection.db.card_hashes()?;
+        for card in collection.cards.iter() {
+            if !db_hashes.contains(&card.hash()) {
+                collection.db.insert_card(card.hash(), session_started_at)?;
+            }
+        }
+
+        // Filter by selected decks.
+        let deck_filter: HashSet<&str> = spec.decks.iter().map(|s| s.as_str()).collect();
+        let cards: Vec<Card> = if deck_filter.is_empty() {
+            collection.cards
+        } else {
+            collection
+                .cards
+                .into_iter()
+                .filter(|card| deck_filter.contains(card.deck_name().as_str()))
+                .collect()
+        };
+
+        // Find cards due today
+        let due_today: HashSet<CardHash> = collection.db.due_today(today)?;
+        for card in cards.into_iter().filter(|c| due_today.contains(&c.hash())) {
+            // Cards are content addressed, so the same fact written into two
+            // collections has one hash. Drill it once, routed to the first
+            // collection that offered it; the other collection's own copy
+            // stays due there and is reviewed when that collection is
+            // drilled. Without this the session cache would reject the
+            // second copy outright and the whole deck would fail to start.
+            if routes.contains_key(&card.hash()) {
+                continue;
+            }
+            let performance = collection.db.get_card_performance(card.hash())?;
+            cache.insert(card.hash(), performance)?;
+            routes.insert(card.hash(), index);
+            due_cards.push(card);
+        }
+
+        // Open this collection's session row immediately, so reviews can be
+        // written as they happen.
+        let session_id = collection.db.create_session(session_started_at)?;
+        session_dbs.push(SessionDb {
+            db: collection.db,
+            session_id,
+            // A single-collection session renders media against the
+            // session's own directory, exactly as before.
+            source: multi_source.then(|| SessionSource {
+                coll_dir: rc.coll_dir.clone(),
+                file_url_prefix: format!("/collection/{}/file", rc.slug),
+            }),
+        });
+        if first_directory.is_none() {
+            first_directory = Some(collection.directory);
+            macros = collection.macros;
         }
     }
-
-    // Filter by selected decks.
-    let deck_filter: HashSet<&str> = selected_decks.iter().map(|s| s.as_str()).collect();
-    let cards: Vec<Card> = if deck_filter.is_empty() {
-        collection.cards
-    } else {
-        collection
-            .cards
-            .into_iter()
-            .filter(|card| deck_filter.contains(card.deck_name().as_str()))
-            .collect()
-    };
-
-    // Find cards due today
-    let due_today: HashSet<CardHash> = collection.db.due_today(today)?;
-    let mut due_cards: Vec<Card> = cards
-        .into_iter()
-        .filter(|card| due_today.contains(&card.hash()))
-        .collect();
 
     if state.config.defaults.bury_siblings {
         due_cards = bury_siblings(due_cards);
     }
 
     if due_cards.is_empty() {
+        // The session rows opened above would otherwise linger as dangling
+        // "interrupted" sessions with no reviews.
+        for entry in &session_dbs {
+            entry
+                .db
+                .close_session(entry.session_id, session_started_at)?;
+        }
         return Ok(None);
     }
 
@@ -435,32 +571,110 @@ fn create_session(
         due_cards.truncate(n);
     }
 
-    // Build cache
-    let mut cache = Cache::new();
-    for card in due_cards.iter() {
-        let performance = collection.db.get_card_performance(card.hash())?;
-        cache.insert(card.hash(), performance)?;
-    }
-
-    // Create the session row immediately so reviews can be written as they happen.
-    let session_id = collection.db.create_session(session_started_at)?;
-
     let answer_controls = state.config.defaults.answer_controls.into();
+    let directory = first_directory
+        .ok_or_else(|| ErrorReport::new("a drill session needs at least one collection"))?;
+    let dbs = if multi_source {
+        SessionDbs::routed(session_dbs, routes)
+    } else {
+        // One collection: every card belongs to it, so no routing table.
+        SessionDbs::routed(session_dbs, HashMap::new())
+    };
 
     Ok(Some(DrillSession::new(
-        collection.directory,
-        collection.macros,
+        directory,
+        macros,
         session_started_at,
         answer_controls,
         MutableState::new(
-            collection.db,
-            session_id,
+            dbs,
             cache,
             due_cards,
             Jitter::new(state.config.defaults.jitter)?,
             rng,
         ),
     )))
+}
+
+/// How many of a custom deck's cards are due today, across every collection
+/// it draws on.
+fn due_card_count(sources: &[SessionSourceSpec]) -> Fallible<usize> {
+    let today = Timestamp::now().date();
+    let mut total = 0;
+    for spec in sources {
+        let collection = Collection::with_db_path(
+            spec.collection.coll_dir.clone(),
+            spec.collection.db_path.clone(),
+        )?;
+        let due: HashSet<CardHash> = collection.db.due_today(today)?;
+        let wanted: HashSet<&str> = spec.decks.iter().map(|d| d.as_str()).collect();
+        total += collection
+            .cards
+            .iter()
+            .filter(|c| wanted.contains(c.deck_name().as_str()) && due.contains(&c.hash()))
+            .count();
+    }
+    Ok(total)
+}
+
+/// The start page for a custom deck: what it contains, how much is due, and
+/// a button to drill it.
+fn render_custom_deck_page(
+    deck: &ResolvedCustomDeck,
+    sources: &[SessionSourceSpec],
+    due_today: usize,
+    flash: Option<Flash>,
+) -> maud::Markup {
+    // Saturating: a member can only ever resolve to at most one entry, but
+    // the page must not panic if that ever stops holding.
+    let missing = deck
+        .members
+        .len()
+        .saturating_sub(sources.iter().map(|s| s.decks.len()).sum::<usize>());
+    page_template(html! {
+        @if let Some(f) = &flash { (f.render()) }
+        div.landing {
+            h1 { (deck.name) }
+            p { a href="/" { "\u{2190} Back to collections" } }
+            p.empty {
+                (format!("{due_today} card(s) due today across {} collection(s).", sources.len()))
+            }
+            @if missing > 0 {
+                div.notice {
+                    p {
+                        (format!(
+                            "{missing} member(s) of this deck point at a collection that is no \
+                             longer available, and are skipped."
+                        ))
+                    }
+                }
+            }
+            @if sources.is_empty() {
+                p.empty { "This deck has no members in collections you own." }
+            } @else {
+                table.collection-table {
+                    thead { tr { th { "Collection" } th { "Decks" } } }
+                    tbody {
+                        @for source in sources {
+                            tr {
+                                td { (source.collection.name) }
+                                td { (source.decks.join(", ")) }
+                            }
+                        }
+                    }
+                }
+                @if due_today > 0 {
+                    form action=(format!("/collection/{}/start", deck.slug)) method="post" {
+                        label for="limit" { "Card limit (optional): " }
+                        input id="limit" type="number" name="limit" min="1" placeholder="all";
+                        input .btn.btn-primary type="submit" value="Drill";
+                    }
+                } @else {
+                    p.empty { "Nothing due in this deck today." }
+                }
+            }
+        }
+    })
 }
 
 fn bury_siblings(deck: Vec<Card>) -> Vec<Card> {
@@ -506,7 +720,7 @@ fn collection_post_inner(
     // A grading/Home action on a slug that isn't the caller's own must not
     // touch that slug's session, even if one happens to be active (sessions
     // are keyed by slug alone, not by owner).
-    if find_collection(state, slug, owner).is_none() {
+    if find_drill_target(state, slug, owner).is_none() {
         return fail(format!("Unknown collection: {slug}"));
     }
     let action = form.action;
@@ -532,15 +746,8 @@ fn collection_post_inner(
             let mut s = s.lock();
             s.detach();
             if s.mutable.finished_at.is_none() {
-                if let Err(e) = s
-                    .mutable
-                    .db
-                    .close_session(s.mutable.session_id, Timestamp::now())
-                {
-                    log::error!(
-                        "failed to close session {} for collection {slug}: {e}",
-                        s.mutable.session_id
-                    );
+                if let Err(e) = s.mutable.dbs.close_all(Timestamp::now()) {
+                    log::error!("failed to close the session for collection {slug}: {e}");
                 }
             }
         }
@@ -709,7 +916,7 @@ pub async fn collection_script_handler(
     current_user: Option<CurrentUser>,
 ) -> (StatusCode, [(HeaderName, &'static str); 1], String) {
     let owner = current_user.map(|u| u.email);
-    if find_collection(&state, &slug, owner.as_deref()).is_none() {
+    if find_drill_target(&state, &slug, owner.as_deref()).is_none() {
         let content = format!(
             "let MACROS = {{}};\n\n{}",
             include_str!("../drill/script.js")
@@ -1085,10 +1292,15 @@ mod tests {
 
     use std::collections::HashMap;
 
+    use super::SessionSourceSpec;
     use super::collection_get_inner;
+    use super::create_session_from_sources;
+    use super::deck_sources;
     use super::run_blocking;
     use crate::cmd::drill::server::AnswerControls;
     use crate::cmd::drill::state::MutableState;
+    use crate::cmd::drill::state::SessionDbs;
+    use crate::cmd::serve::config::ResolvedCollection;
     use crate::cmd::serve::config::ResolvedServeConfig;
     use crate::cmd::serve::state::AppState;
     use crate::cmd::serve::state::DrillSession;
@@ -1135,6 +1347,7 @@ mod tests {
             data_dir: None,
             config_path: None,
             hedgedoc_entries: Vec::new(),
+            custom_decks: Vec::new(),
             session_timeout_minutes: 1440,
             _temp_dir: None,
             oidc: None,
@@ -1145,6 +1358,7 @@ mod tests {
             sessions: std::sync::Arc::new(parking_lot::Mutex::new(HashMap::new())),
             last_synced: std::sync::Arc::new(parking_lot::Mutex::new(None)),
             hedgedoc_sources: std::sync::Arc::new(parking_lot::Mutex::new(Vec::new())),
+            custom_decks: std::sync::Arc::new(parking_lot::Mutex::new(Vec::new())),
             hedgedoc_last_synced: std::sync::Arc::new(parking_lot::Mutex::new(None)),
             config_path: std::sync::Arc::new(parking_lot::Mutex::new(None)),
             counts_refreshed_at: std::sync::Arc::new(parking_lot::Mutex::new(None)),
@@ -1165,12 +1379,17 @@ mod tests {
             "127.0.0.1".to_string(),
             0,
         )?;
+        test_state_with_config(config)
+    }
+
+    fn test_state_with_config(config: ResolvedServeConfig) -> Fallible<AppState> {
         Ok(AppState {
             config: std::sync::Arc::new(config),
             collections: std::sync::Arc::new(tokio::sync::RwLock::new(Vec::new())),
             sessions: std::sync::Arc::new(parking_lot::Mutex::new(HashMap::new())),
             last_synced: std::sync::Arc::new(parking_lot::Mutex::new(None)),
             hedgedoc_sources: std::sync::Arc::new(parking_lot::Mutex::new(Vec::new())),
+            custom_decks: std::sync::Arc::new(parking_lot::Mutex::new(Vec::new())),
             hedgedoc_last_synced: std::sync::Arc::new(parking_lot::Mutex::new(None)),
             config_path: std::sync::Arc::new(parking_lot::Mutex::new(None)),
             counts_refreshed_at: std::sync::Arc::new(parking_lot::Mutex::new(None)),
@@ -1203,8 +1422,7 @@ mod tests {
         let db = Database::new(db_str)?;
         let session_id = db.create_session(started_at)?;
         let mutable = MutableState::new(
-            db,
-            session_id,
+            SessionDbs::single(db, session_id),
             crate::cmd::drill::cache::Cache::new(),
             Vec::new(),
             Jitter::none(),
@@ -1252,5 +1470,176 @@ mod tests {
 
         slow.await
             .map_err(|e| crate::error::ErrorReport::new(format!("join failed: {e}")))?
+    }
+
+    /// A custom deck drills cards from several collections in one session,
+    /// and each review lands in the database of the collection the card
+    /// actually came from. A card scheduled in two places would come due
+    /// twice on schedules that drift apart, which is the whole point of
+    /// routing rather than giving the deck a database of its own.
+    #[test]
+    fn test_custom_deck_routes_reviews_to_each_home_collection() -> Fallible<()> {
+        use crate::cmd::drill::post::Action;
+        use crate::cmd::serve::decks::ResolvedCustomDeck;
+        use crate::cmd::serve::decks::slug_for_deck;
+
+        let alpha_dir = tempfile::tempdir()?;
+        std::fs::write(
+            alpha_dir.path().join("Alpha.md"),
+            "Q: alpha question?\nA: alpha answer\n",
+        )?;
+        let beta_dir = tempfile::tempdir()?;
+        std::fs::write(
+            beta_dir.path().join("Beta.md"),
+            "Q: beta question?\nA: beta answer\n",
+        )?;
+
+        let alpha = ResolvedCollection {
+            name: "Alpha".to_string(),
+            slug: "alpha".to_string(),
+            coll_dir: alpha_dir.path().to_path_buf(),
+            db_path: alpha_dir.path().join("alpha.db"),
+            owner: None,
+        };
+        let beta = ResolvedCollection {
+            name: "Beta".to_string(),
+            slug: "beta".to_string(),
+            coll_dir: beta_dir.path().to_path_buf(),
+            db_path: beta_dir.path().join("beta.db"),
+            owner: None,
+        };
+
+        let mut config =
+            ResolvedServeConfig::from_directories(Vec::new(), "127.0.0.1".to_string(), 0)?;
+        config.collections = vec![alpha.clone(), beta.clone()];
+        let state = test_state_with_config(config)?;
+
+        let deck = ResolvedCustomDeck {
+            name: "Mixed".to_string(),
+            slug: slug_for_deck("Mixed", None),
+            owner: None,
+            members: vec![
+                crate::cmd::serve::config::DeckMember::parse("alpha/Alpha")
+                    .ok_or_else(|| ErrorReport::new("member"))?,
+                crate::cmd::serve::config::DeckMember::parse("beta/Beta")
+                    .ok_or_else(|| ErrorReport::new("member"))?,
+            ],
+        };
+        state.custom_decks.lock().push(deck.clone());
+
+        // The deck resolves to both collections.
+        let sources = deck_sources(&state, &deck, None);
+        assert_eq!(sources.len(), 2, "both collections must contribute");
+
+        let session = create_session_from_sources(&state, sources, None)?
+            .ok_or_else(|| ErrorReport::new("expected due cards from both collections"))?;
+        let mut session = session;
+        assert_eq!(
+            session.mutable.cards.len(),
+            2,
+            "one new card from each collection"
+        );
+
+        // Grade every card in the session.
+        while !session.mutable.cards.is_empty() {
+            let hash = session.mutable.cards[0].hash();
+            session.mutable.reveal = true;
+            crate::cmd::drill::post::handle_action(
+                &mut session.mutable,
+                Action::Good,
+                Some(hash),
+                None,
+            )?;
+        }
+
+        // Each collection's own database recorded exactly its own review.
+        let alpha_db = crate::db::Database::new(
+            alpha
+                .db_path
+                .to_str()
+                .ok_or_else(|| ErrorReport::new("non-utf8 path"))?,
+        )?;
+        let beta_db = crate::db::Database::new(
+            beta.db_path
+                .to_str()
+                .ok_or_else(|| ErrorReport::new("non-utf8 path"))?,
+        )?;
+        let alpha_reviews: usize = alpha_db
+            .get_all_sessions()?
+            .iter()
+            .map(|s| {
+                alpha_db
+                    .get_reviews_for_session(s.session_id)
+                    .map(|r| r.len())
+            })
+            .collect::<Fallible<Vec<usize>>>()?
+            .iter()
+            .sum();
+        let beta_reviews: usize = beta_db
+            .get_all_sessions()?
+            .iter()
+            .map(|s| {
+                beta_db
+                    .get_reviews_for_session(s.session_id)
+                    .map(|r| r.len())
+            })
+            .collect::<Fallible<Vec<usize>>>()?
+            .iter()
+            .sum();
+        assert_eq!(alpha_reviews, 1, "Alpha's card must be scheduled in Alpha");
+        assert_eq!(beta_reviews, 1, "Beta's card must be scheduled in Beta");
+        Ok(())
+    }
+
+    /// Cards are content addressed, so the same fact in two collections has
+    /// one hash. A deck spanning both must still start: the session cache
+    /// rejects a duplicate hash outright, so the second copy is skipped
+    /// rather than failing the whole deck.
+    #[test]
+    fn test_custom_deck_tolerates_the_same_card_in_two_collections() -> Fallible<()> {
+        let one_dir = tempfile::tempdir()?;
+        let two_dir = tempfile::tempdir()?;
+        // Byte-identical card text in both collections.
+        let card = "Q: shared question?\nA: shared answer\n";
+        std::fs::write(one_dir.path().join("Shared.md"), card)?;
+        std::fs::write(two_dir.path().join("Shared.md"), card)?;
+
+        let one = ResolvedCollection {
+            name: "One".to_string(),
+            slug: "one".to_string(),
+            coll_dir: one_dir.path().to_path_buf(),
+            db_path: one_dir.path().join("one.db"),
+            owner: None,
+        };
+        let two = ResolvedCollection {
+            name: "Two".to_string(),
+            slug: "two".to_string(),
+            coll_dir: two_dir.path().to_path_buf(),
+            db_path: two_dir.path().join("two.db"),
+            owner: None,
+        };
+        let mut config =
+            ResolvedServeConfig::from_directories(Vec::new(), "127.0.0.1".to_string(), 0)?;
+        config.collections = vec![one.clone(), two.clone()];
+        let state = test_state_with_config(config)?;
+
+        let sources = vec![
+            SessionSourceSpec {
+                collection: one,
+                decks: vec!["Shared".to_string()],
+            },
+            SessionSourceSpec {
+                collection: two,
+                decks: vec!["Shared".to_string()],
+            },
+        ];
+        let session = create_session_from_sources(&state, sources, None)?
+            .ok_or_else(|| ErrorReport::new("expected the shared card to be due"))?;
+        assert_eq!(
+            session.mutable.cards.len(),
+            1,
+            "the shared card must appear once, not twice"
+        );
+        Ok(())
     }
 }

@@ -28,6 +28,8 @@ pub struct ServeConfig {
     pub collections: Vec<CollectionEntry>,
     #[serde(rename = "hedgedoc", default)]
     pub hedgedoc: Vec<HedgedocEntry>,
+    #[serde(rename = "deck", default)]
+    pub decks: Vec<CustomDeckEntry>,
 }
 
 #[derive(Deserialize, Serialize, Clone)]
@@ -35,6 +37,47 @@ pub struct HedgedocEntry {
     pub url: String,
     #[serde(default)]
     pub owner: Option<String>,
+}
+
+/// A user-assembled deck: a named selection of decks drawn from any of the
+/// owner's collections, drilled as one session.
+///
+/// `members` are `"{collection-slug}/{deck-name}"` pairs. Reviews still go to
+/// each card's own collection database, so a card keeps exactly one schedule
+/// no matter how many custom decks include it.
+#[derive(Deserialize, Serialize, Clone)]
+pub struct CustomDeckEntry {
+    pub name: String,
+    pub members: Vec<String>,
+    #[serde(default)]
+    pub owner: Option<String>,
+}
+
+/// One `members` entry, split into the collection it names and the deck
+/// within it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeckMember {
+    pub collection_slug: String,
+    pub deck_name: String,
+}
+
+impl DeckMember {
+    /// Parse `"{slug}/{deck}"`. Deck names may contain `/` (they mirror the
+    /// file tree), so only the first separator splits.
+    pub fn parse(raw: &str) -> Option<Self> {
+        let (slug, deck) = raw.split_once('/')?;
+        if slug.is_empty() || deck.is_empty() {
+            return None;
+        }
+        Some(Self {
+            collection_slug: slug.to_string(),
+            deck_name: deck.to_string(),
+        })
+    }
+
+    pub fn encode(&self) -> String {
+        format!("{}/{}", self.collection_slug, self.deck_name)
+    }
 }
 
 #[derive(Deserialize)]
@@ -273,6 +316,8 @@ pub struct ResolvedServeConfig {
     pub config_path: Option<PathBuf>,
     /// HedgeDoc source URLs loaded from the config file.
     pub hedgedoc_entries: Vec<HedgedocEntry>,
+    /// User-assembled cross-collection decks loaded from the config file.
+    pub custom_decks: Vec<CustomDeckEntry>,
     /// Idle drill sessions are evicted after this many minutes (0 = never).
     pub session_timeout_minutes: u64,
     /// Kept alive for the process lifetime so the OS temp directory is cleaned up.
@@ -397,6 +442,30 @@ impl ResolvedServeConfig {
             })
             .collect();
 
+        let custom_decks: Vec<CustomDeckEntry> = config
+            .decks
+            .iter()
+            .map(|d| CustomDeckEntry {
+                name: d.name.clone(),
+                members: d.members.clone(),
+                owner: d.owner.as_ref().map(|o| o.to_lowercase()),
+            })
+            .collect();
+        for deck in &custom_decks {
+            if deck.name.trim().is_empty() {
+                return fail("configuration error: a [[deck]] entry has an empty `name`");
+            }
+            for raw in &deck.members {
+                if DeckMember::parse(raw).is_none() {
+                    return fail(format!(
+                        "configuration error: [[deck]] '{}' has the member `{raw}`, which is not \
+                         in `collection-slug/deck-name` form",
+                        deck.name
+                    ));
+                }
+            }
+        }
+
         if oidc.is_some() {
             for c in &collections {
                 if c.owner.is_none() {
@@ -416,6 +485,15 @@ impl ResolvedServeConfig {
                     ));
                 }
             }
+            for d in &custom_decks {
+                if d.owner.is_none() {
+                    return fail(format!(
+                        "configuration error: [oidc] is enabled, so every [[deck]] entry must \
+                         declare an `owner`, but the deck '{}' has none",
+                        d.name
+                    ));
+                }
+            }
         } else {
             // Without `[oidc]` every request is unauthenticated, so `owner`
             // can never match and the entry would simply be unreachable.
@@ -426,6 +504,14 @@ impl ResolvedServeConfig {
                      not configured, so nobody is ever logged in and the collection would be \
                      unreachable. Add an [oidc] section or remove the `owner`",
                     c.name
+                ));
+            }
+            if let Some(d) = custom_decks.iter().find(|d| d.owner.is_some()) {
+                return fail(format!(
+                    "configuration error: the [[deck]] entry '{}' declares an `owner`, but \
+                     [oidc] is not configured, so nobody is ever logged in and the deck would \
+                     be unreachable. Add an [oidc] section or remove the `owner`",
+                    d.name
                 ));
             }
             if let Some(h) = hedgedoc_entries.iter().find(|h| h.owner.is_some()) {
@@ -467,6 +553,7 @@ impl ResolvedServeConfig {
             data_dir: Some(data_dir),
             config_path: None,
             hedgedoc_entries,
+            custom_decks,
             session_timeout_minutes: config.server.session_timeout_minutes,
             _temp_dir: None,
             oidc,
@@ -517,6 +604,7 @@ impl ResolvedServeConfig {
             data_dir: None,
             config_path: None,
             hedgedoc_entries: Vec::new(),
+            custom_decks: Vec::new(),
             session_timeout_minutes: default_session_timeout_minutes(),
             _temp_dir: None,
             oidc: None,
@@ -827,6 +915,99 @@ path = "beta"
         );
         let config: ServeConfig = toml::from_str(&toml_str)?;
         assert_eq!(PathBuf::from(&config.server.data_dir), data_dir);
+        Ok(())
+    }
+
+    /// A `[[deck]]` member must be `collection-slug/deck-name`.
+    #[test]
+    fn test_malformed_deck_member_is_rejected() -> Fallible<()> {
+        let data_dir = current_dir()?.join("var-lib-hashcards-deck-member-test");
+        let toml_str = format!(
+            "[server]\ndata_dir = {:?}\n\n\
+             [[deck]]\n\
+             name = \"Mixed\"\n\
+             members = [\"no-separator\"]\n",
+            data_dir
+        );
+        let config: ServeConfig = toml::from_str(&toml_str)?;
+        match ResolvedServeConfig::from_toml(config) {
+            Ok(_) => panic!("expected an error for a malformed [[deck]] member"),
+            Err(e) => assert!(
+                e.to_string().contains("Mixed") && e.to_string().contains("no-separator"),
+                "error should name the deck and the bad member: {e}"
+            ),
+        }
+        Ok(())
+    }
+
+    /// With `[oidc]` on, every deck needs an owner, exactly like collections
+    /// and HedgeDoc notes.
+    #[test]
+    fn test_oidc_requires_owner_on_every_deck() -> Fallible<()> {
+        let data_dir = current_dir()?.join("var-lib-hashcards-deck-owner-test");
+        let toml_str = format!(
+            "[server]\ndata_dir = {:?}\n\n\
+             [oidc]\n\
+             issuer_url = \"https://idp.example.com\"\n\
+             client_id = \"abc\"\n\
+             client_secret = \"secret\"\n\
+             external_url = \"https://hashcards.example.com\"\n\
+             session_secret = \"a-very-long-random-session-secret-value\"\n\n\
+             [[deck]]\n\
+             name = \"Mixed\"\n\
+             members = [\"japanese/Verbs\"]\n",
+            data_dir
+        );
+        let config: ServeConfig = toml::from_str(&toml_str)?;
+        match ResolvedServeConfig::from_toml(config) {
+            Ok(_) => panic!("expected an error for a deck with no owner while [oidc] is set"),
+            Err(e) => assert!(
+                e.to_string().contains("Mixed") && e.to_string().contains("owner"),
+                "error should name the deck and mention `owner`: {e}"
+            ),
+        }
+        Ok(())
+    }
+
+    /// A deck owner is lowercased for case-insensitive matching, and a deck
+    /// with no `[oidc]` may not declare one at all.
+    #[test]
+    fn test_deck_owner_is_lowercased_and_rejected_without_oidc() -> Fallible<()> {
+        let data_dir = current_dir()?.join("var-lib-hashcards-deck-owner-case-test");
+        let with_oidc = format!(
+            "[server]\ndata_dir = {:?}\n\n\
+             [oidc]\n\
+             issuer_url = \"https://idp.example.com\"\n\
+             client_id = \"abc\"\n\
+             client_secret = \"secret\"\n\
+             external_url = \"https://hashcards.example.com\"\n\
+             session_secret = \"a-very-long-random-session-secret-value\"\n\n\
+             [[deck]]\n\
+             name = \"Mixed\"\n\
+             members = [\"japanese/Verbs\"]\n\
+             owner = \"Me@Example.com\"\n",
+            data_dir
+        );
+        let config: ServeConfig = toml::from_str(&with_oidc)?;
+        let resolved = ResolvedServeConfig::from_toml(config)?;
+        assert_eq!(
+            resolved.custom_decks[0].owner.as_deref(),
+            Some("me@example.com")
+        );
+
+        let without_oidc = format!(
+            "[server]\ndata_dir = {:?}\n\n\
+             [[deck]]\n\
+             name = \"Mixed\"\n\
+             members = [\"japanese/Verbs\"]\n\
+             owner = \"me@example.com\"\n",
+            data_dir
+        );
+        let config: ServeConfig = toml::from_str(&without_oidc)?;
+        assert!(
+            ResolvedServeConfig::from_toml(config).is_err(),
+            "an `owner` without [oidc] must be rejected for decks too"
+        );
         Ok(())
     }
 }

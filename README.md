@@ -555,6 +555,34 @@ Notes:
 - In-browser edits are committed to git as the logged-in user (name and email both set to their OIDC email) instead of the configured git default.
 - This is scoped to `serve` mode only; `hashcards drill` remains a local, unauthenticated, single-collection tool.
 
+### Decks: drilling across collections
+
+A *deck* is a saved selection of decks drawn from any of your collections,
+drilled together in one session. Manage them at `/decks`, or from the
+"Manage Decks" button on the landing page.
+
+```toml
+[[deck]]
+name = "Exam revision"
+members = ["japanese/Verbs", "math/Algebra"]
+# owner = "me@example.com"   # required when [oidc] is configured
+```
+
+`members` are `"{collection-slug}/{deck-name}"` pairs. Decks created through
+the web interface are written back to the config file, exactly as HedgeDoc
+sources are.
+
+A deck owns no cards and no database. Drilling one opens each contributing
+collection's own database and routes every review back to the collection the
+card came from, so **a card keeps exactly one schedule** however many decks
+include it — it never becomes due twice on schedules that drift apart.
+Deleting a deck removes only the selection; the cards and their review
+history are untouched.
+
+Per-collection features (stats, bookmarks, in-browser editing) stay on their
+own collections, since a deck spans several. With `[oidc]` on, a deck is
+visible only to its owner and may only include collections that owner holds.
+
 ### Defaults
 
 The `[defaults]` section configures behaviour for all collections:

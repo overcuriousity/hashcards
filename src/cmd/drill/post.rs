@@ -117,8 +117,7 @@ async fn action_handler(state: ServerState, form: FormData) -> Fallible<Option<F
     };
     let mut mutable = state.mutable.lock();
     // Heartbeat; see the GET path.
-    let session_id = mutable.session_id;
-    if let Err(e) = mutable.db.touch_session(session_id, Timestamp::now()) {
+    if let Err(e) = mutable.dbs.touch_all(Timestamp::now()) {
         log::debug!("could not stamp session heartbeat: {e}");
     }
     let result = handle_action(&mut mutable, form.action, submitted_card, form.undo_review)?;
@@ -189,11 +188,13 @@ pub fn handle_action(
             let hash: CardHash = last_review.card.hash();
             // If the session had finished, its DB row was closed; reopen it
             // in the same transaction as the void (BUG-04).
-            let reopen_session: Option<i64> = mutable.finished_at.map(|_| mutable.session_id);
+            let finished = mutable.finished_at;
+            let entry = mutable.dbs.for_card_mut(hash);
+            let reopen_session: Option<i64> = finished.map(|_| entry.session_id);
             // Void the review and restore prior performance atomically, and
             // commit BEFORE mutating any in-memory state. If this fails, the
             // queue, cache, and undo stack are untouched.
-            mutable.db.void_review_and_restore_performance(
+            entry.db.void_review_and_restore_performance(
                 last_review.review_id,
                 hash,
                 last_review.prev_performance,
@@ -231,15 +232,16 @@ pub fn handle_action(
             if !mutable.cards.is_empty() {
                 let hash = mutable.cards[0].hash();
                 let now = Timestamp::now();
-                mutable.db.insert_card_if_new(hash, now)?;
-                mutable.db.insert_bookmark(hash, None, now)?;
+                let entry = mutable.dbs.for_card(hash);
+                entry.db.insert_card_if_new(hash, now)?;
+                entry.db.insert_bookmark(hash, None, now)?;
             }
             Ok(ActionResult::Continue)
         }
         Action::Unbookmark => {
             if !mutable.cards.is_empty() {
                 let hash = mutable.cards[0].hash();
-                mutable.db.delete_bookmark(hash)?;
+                mutable.dbs.for_card(hash).db.delete_bookmark(hash)?;
             }
             Ok(ActionResult::Continue)
         }
@@ -308,8 +310,9 @@ pub fn handle_action(
             // BEFORE mutating any in-memory state. If this fails, the
             // queue, cache, undo stack, and reveal state are untouched
             // and the grade can simply be retried.
-            let review_id = mutable.db.insert_review_and_update_performance(
-                mutable.session_id,
+            let entry = mutable.dbs.for_card_mut(hash);
+            let review_id = entry.db.insert_review_and_update_performance(
+                entry.session_id,
                 &record,
                 new_performance,
             )?;
@@ -342,9 +345,7 @@ pub fn handle_action(
 fn finish_session(mutable: &mut MutableState) -> Fallible<()> {
     log::debug!("Session completed");
     let session_ended_at = Timestamp::now();
-    mutable
-        .db
-        .close_session(mutable.session_id, session_ended_at)?;
+    mutable.dbs.close_all(session_ended_at)?;
     mutable.finished_at = Some(session_ended_at);
     Ok(())
 }
@@ -354,6 +355,7 @@ mod tests {
     use super::*;
     use crate::cmd::drill::cache::Cache;
     use crate::cmd::drill::state::MutableState;
+    use crate::cmd::drill::state::SessionDbs;
     use crate::db::Database;
     use crate::flash::FlashKind;
     use crate::rng::TinyRng;
@@ -369,8 +371,7 @@ mod tests {
         let session_id = db.create_session(Timestamp::now()).unwrap();
         MutableState {
             reveal: false,
-            session_id,
-            db,
+            dbs: SessionDbs::single(db, session_id),
             cache: Cache::new(),
             cards: Vec::new(),
             reviews: Vec::new(),
@@ -402,8 +403,7 @@ mod tests {
         let session_id = db.create_session(now).unwrap();
         MutableState {
             reveal: false,
-            db,
-            session_id,
+            dbs: SessionDbs::single(db, session_id),
             cache,
             cards,
             reviews: Vec::new(),
@@ -507,8 +507,7 @@ mod tests {
         cache.insert(card.hash(), Performance::New).unwrap();
         let mut mutable = MutableState {
             reveal: true,
-            db,
-            session_id,
+            dbs: SessionDbs::single(db, session_id),
             cache,
             cards: vec![card.clone()],
             reviews: Vec::new(),
@@ -543,11 +542,7 @@ mod tests {
             Performance::New
         ));
         assert!(
-            mutable
-                .db
-                .get_reviews_for_session(mutable.session_id)
-                .unwrap()
-                .is_empty(),
+            mutable.dbs.all_reviews().unwrap().is_empty(),
             "no review row must exist"
         );
     }
@@ -590,13 +585,7 @@ mod tests {
         );
         assert_eq!(mutable.cards.len(), 1);
         assert_eq!(mutable.cards[0].hash(), card.hash());
-        assert!(
-            mutable
-                .db
-                .get_reviews_for_session(mutable.session_id)
-                .unwrap()
-                .is_empty()
-        );
+        assert!(mutable.dbs.all_reviews().unwrap().is_empty());
     }
 
     #[test]
@@ -621,11 +610,7 @@ mod tests {
         assert_eq!(mutable.cards.len(), 1, "card B must not have been graded");
         assert_eq!(mutable.cards[0].hash(), card_b.hash());
         assert_eq!(
-            mutable
-                .db
-                .get_reviews_for_session(mutable.session_id)
-                .unwrap()
-                .len(),
+            mutable.dbs.all_reviews().unwrap().len(),
             1,
             "exactly one review row must exist"
         );
@@ -681,8 +666,7 @@ mod tests {
         cache.insert(card.hash(), Performance::New).unwrap();
         let mut mutable = MutableState {
             reveal: false,
-            db,
-            session_id,
+            dbs: SessionDbs::single(db, session_id),
             cache,
             cards: vec![card],
             reviews: Vec::new(),
@@ -699,7 +683,7 @@ mod tests {
         // Undo must reopen the DB session row, not just the in-memory flag.
         handle_action(&mut mutable, Action::Undo, None, None).unwrap();
         assert!(mutable.finished_at.is_none());
-        let sessions = mutable.db.get_all_sessions().unwrap();
+        let sessions = mutable.dbs.primary().db.get_all_sessions().unwrap();
         assert_eq!(sessions.len(), 1);
         assert_eq!(
             sessions[0].ended_at, sessions[0].started_at,

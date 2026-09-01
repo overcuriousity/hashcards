@@ -38,6 +38,11 @@ use crate::cmd::serve::config::ResolvedCollection;
 use crate::cmd::serve::config::ResolvedGit;
 use crate::cmd::serve::config::ResolvedOidc;
 use crate::cmd::serve::config::ResolvedServeConfig;
+use crate::cmd::serve::decks::check_deck_slug_collisions;
+use crate::cmd::serve::decks::deck_add_handler;
+use crate::cmd::serve::decks::deck_delete_handler;
+use crate::cmd::serve::decks::decks_manage_handler;
+use crate::cmd::serve::decks::resolve_custom_decks;
 use crate::cmd::serve::edit::edit_get_handler;
 use crate::cmd::serve::edit::edit_post_handler;
 use crate::cmd::serve::git::clone_or_pull;
@@ -280,12 +285,26 @@ pub async fn start_serve(config: ResolvedServeConfig) -> Fallible<()> {
         None => None,
     };
 
+    // User-assembled decks are resolved once here; adds and deletes refresh
+    // the list in place.
+    let custom_decks = resolve_custom_decks(&config.custom_decks);
+    // Decks must not collide with a HedgeDoc note's slug either, since both
+    // are addressed through `/collection/{slug}`.
+    let all_slugged: Vec<ResolvedCollection> = config
+        .collections
+        .iter()
+        .cloned()
+        .chain(hedgedoc_sources.lock().iter().map(|s| s.collection.clone()))
+        .collect();
+    check_deck_slug_collisions(&custom_decks, &all_slugged)?;
+
     let state = AppState {
         config: config.clone(),
         collections: Arc::new(RwLock::new(collection_infos)),
         sessions: Arc::new(Mutex::new(HashMap::new())),
         last_synced: Arc::new(Mutex::new(last_synced)),
         hedgedoc_sources: hedgedoc_sources.clone(),
+        custom_decks: Arc::new(Mutex::new(custom_decks)),
         hedgedoc_last_synced: hedgedoc_last_synced.clone(),
         config_path,
         // Counts were just computed above, so the stamp starts fresh.
@@ -326,6 +345,9 @@ pub async fn start_serve(config: ResolvedServeConfig) -> Fallible<()> {
         .route("/hedgedoc/add", post(hedgedoc_add_handler))
         .route("/hedgedoc/delete", post(hedgedoc_delete_handler))
         .route("/hedgedoc/sync", post(hedgedoc_sync_now_handler))
+        .route("/decks", get(decks_manage_handler))
+        .route("/decks/add", post(deck_add_handler))
+        .route("/decks/delete", post(deck_delete_handler))
         .route("/collection/{slug}", get(collection_get_handler))
         .route("/collection/{slug}", post(collection_post_handler))
         .route("/collection/{slug}/start", post(collection_start_handler))

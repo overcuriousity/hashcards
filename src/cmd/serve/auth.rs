@@ -753,6 +753,7 @@ mod tests {
             data_dir: None,
             config_path: None,
             hedgedoc_entries: Vec::new(),
+            custom_decks: Vec::new(),
             session_timeout_minutes: 1440,
             oidc: Some(ResolvedOidc {
                 issuer_url: format!("http://127.0.0.1:{idp_port}"),
@@ -830,6 +831,7 @@ mod tests {
             data_dir: None,
             config_path: None,
             hedgedoc_entries: Vec::new(),
+            custom_decks: Vec::new(),
             session_timeout_minutes: 1440,
             oidc: Some(ResolvedOidc {
                 issuer_url: format!("http://127.0.0.1:{idp_port}"),
@@ -900,6 +902,7 @@ mod tests {
             data_dir: None,
             config_path: None,
             hedgedoc_entries: Vec::new(),
+            custom_decks: Vec::new(),
             session_timeout_minutes: 1440,
             oidc: Some(ResolvedOidc {
                 issuer_url: format!("http://127.0.0.1:{idp_port}"),
@@ -1086,6 +1089,7 @@ mod tests {
             data_dir: None,
             config_path: None,
             hedgedoc_entries: Vec::new(),
+            custom_decks: Vec::new(),
             session_timeout_minutes: 1440,
             oidc: Some(ResolvedOidc {
                 issuer_url: format!("http://127.0.0.1:{idp_port}"),

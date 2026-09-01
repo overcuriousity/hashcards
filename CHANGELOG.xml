@@ -4,6 +4,9 @@
             <change author="claude">
                 Optional OIDC authentication for `serve` mode: an `[oidc]` config section gates every route except `/auth/*` behind login (validated against Nextcloud), and each `[[collection]]`/`[[hedgedoc]]` entry declares an `owner` (matched against the OIDC `email` claim) so each user sees only their own collections. Sessions are stateless signed cookies; no server-side session store. Absent `[oidc]`, `serve` behaves exactly as before. `drill` mode is unaffected. In-browser edit commits are attributed to the logged-in user when OIDC is on.
             </change>
+            <change author="claude">
+                Decks can now be assembled across collections: a `[[deck]]` entry (or the new `/decks` page) names a selection of decks drawn from any of your collections and drills them as one session. A deck owns no cards and no database — each review is routed back to the database of the collection its card came from, so a card included in several decks keeps exactly one schedule instead of becoming due twice on schedules that drift apart. Deleting a deck removes only the selection; cards and review history are untouched. With `[oidc]` configured, a deck is visible only to its owner and may only include collections that owner holds.
+            </change>
         </added>
         <fixed>
             <change author="claude">

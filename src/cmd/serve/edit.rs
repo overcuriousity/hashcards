@@ -575,6 +575,7 @@ mod tests {
             sessions: Arc::new(Mutex::new(HashMap::new())),
             last_synced: Arc::new(Mutex::new(None)),
             hedgedoc_sources: Arc::new(Mutex::new(Vec::new())),
+            custom_decks: std::sync::Arc::new(parking_lot::Mutex::new(Vec::new())),
             hedgedoc_last_synced: Arc::new(Mutex::new(None)),
             config_path: Arc::new(Mutex::new(None)),
             counts_refreshed_at: Arc::new(Mutex::new(None)),

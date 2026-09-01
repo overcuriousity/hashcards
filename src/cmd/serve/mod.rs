@@ -2,6 +2,7 @@ mod auth;
 mod bookmarks;
 mod browse;
 pub mod config;
+mod decks;
 mod edit;
 mod git;
 mod handlers;
@@ -53,6 +54,7 @@ mod tests {
             data_dir: None,
             config_path: None,
             hedgedoc_entries: Vec::new(),
+            custom_decks: Vec::new(),
             session_timeout_minutes: 1440,
             _temp_dir: None,
             oidc: None,
@@ -130,6 +132,7 @@ mod tests {
             data_dir: None,
             config_path: None,
             hedgedoc_entries: Vec::new(),
+            custom_decks: Vec::new(),
             session_timeout_minutes: 1440,
             _temp_dir: None,
             oidc: None,
@@ -253,6 +256,7 @@ mod tests {
             data_dir: Some(data_dir.clone()),
             config_path: Some(config_path.clone()),
             hedgedoc_entries: Vec::new(),
+            custom_decks: Vec::new(),
             session_timeout_minutes: 1440,
             _temp_dir: None,
             oidc: None,
@@ -308,6 +312,7 @@ mod tests {
             data_dir: None,
             config_path: None,
             hedgedoc_entries: Vec::new(),
+            custom_decks: Vec::new(),
             session_timeout_minutes: 1440,
             _temp_dir: None,
             oidc: None,
@@ -387,6 +392,7 @@ mod tests {
             data_dir: None,
             config_path: None,
             hedgedoc_entries: Vec::new(),
+            custom_decks: Vec::new(),
             session_timeout_minutes: 1440,
             _temp_dir: None,
             oidc: None,
@@ -463,6 +469,7 @@ mod tests {
             data_dir: None,
             config_path: None,
             hedgedoc_entries: Vec::new(),
+            custom_decks: Vec::new(),
             session_timeout_minutes: 1440,
             _temp_dir: None,
             oidc: None,
@@ -521,6 +528,7 @@ mod tests {
             data_dir: None,
             config_path: None,
             hedgedoc_entries: Vec::new(),
+            custom_decks: Vec::new(),
             session_timeout_minutes: 1440,
             _temp_dir: None,
             oidc: None,

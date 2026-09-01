@@ -13,6 +13,7 @@ use crate::cmd::drill::state::MutableState;
 use crate::cmd::serve::auth::OidcRuntime;
 use crate::cmd::serve::config::ResolvedCollection;
 use crate::cmd::serve::config::ResolvedServeConfig;
+use crate::cmd::serve::decks::ResolvedCustomDeck;
 use crate::types::timestamp::Timestamp;
 
 /// A drill session shared behind a per-slug lock. Handlers clone the `Arc`
@@ -28,6 +29,11 @@ pub struct AppState {
     pub sessions: Arc<Mutex<HashMap<String, SharedSession>>>,
     pub last_synced: Arc<Mutex<Option<Timestamp>>>,
     pub hedgedoc_sources: Arc<Mutex<Vec<HedgedocSource>>>,
+    /// User-assembled cross-collection decks, resolved at startup and
+    /// refreshed whenever one is added or deleted. A `parking_lot` mutex
+    /// like `hedgedoc_sources`: these are read from the blocking drill
+    /// paths, not only from async handlers.
+    pub custom_decks: Arc<Mutex<Vec<ResolvedCustomDeck>>>,
     pub hedgedoc_last_synced: Arc<Mutex<Option<Timestamp>>>,
     pub config_path: Arc<Mutex<Option<PathBuf>>>,
     /// When the collection counts were last recomputed (BUG-45).
@@ -174,15 +180,8 @@ pub fn evict_idle_sessions(
     for (slug, session) in expired {
         let session = session.lock();
         if session.mutable.finished_at.is_none() {
-            if let Err(e) = session
-                .mutable
-                .db
-                .close_session(session.mutable.session_id, now)
-            {
-                log::error!(
-                    "Failed to close evicted session {} for collection '{slug}': {e}",
-                    session.mutable.session_id
-                );
+            if let Err(e) = session.mutable.dbs.close_all(now) {
+                log::error!("Failed to close evicted session for collection '{slug}': {e}");
             }
         }
         evicted.push(slug);
@@ -198,6 +197,7 @@ mod tests {
 
     use super::*;
     use crate::cmd::drill::cache::Cache;
+    use crate::cmd::drill::state::SessionDbs;
     use crate::error::ErrorReport;
     use crate::error::Fallible;
     use crate::rng::TinyRng;
@@ -212,8 +212,7 @@ mod tests {
         let started_at = Timestamp::try_from(at.to_string())?;
         let session_id = db.create_session(started_at)?;
         let mutable = MutableState::new(
-            db,
-            session_id,
+            SessionDbs::single(db, session_id),
             Cache::new(),
             Vec::new(),
             Jitter::none(),

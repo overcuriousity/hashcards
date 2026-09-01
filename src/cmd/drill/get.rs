@@ -89,8 +89,7 @@ async fn inner(state: ServerState, flash: Option<Flash>) -> Fallible<Markup> {
     // Heartbeat: tells another process's startup sweep that this session is
     // alive, so it is not closed out from under us. A failure here must not
     // fail the request; the sweep's cutoff is generous.
-    let session_id = mutable.session_id;
-    if let Err(e) = mutable.db.touch_session(session_id, Timestamp::now()) {
+    if let Err(e) = mutable.dbs.touch_all(Timestamp::now()) {
         log::debug!("could not stamp session heartbeat: {e}");
     }
     let file_url_prefix = format!("http://localhost:{}/file", state.port);
@@ -143,15 +142,25 @@ pub fn render_session_page(ctx: &RenderContext, mutable: &MutableState) -> Falli
             return fail("No cards are left in the queue. The session may already be finished.");
         }
     };
-    let is_bookmarked = mutable.db.bookmark_exists(card.hash())?;
-    let coll_path = ctx.directory.to_path_buf();
+    let is_bookmarked = mutable
+        .dbs
+        .for_card(card.hash())
+        .db
+        .bookmark_exists(card.hash())?;
+    // A card drilled inside a cross-collection deck resolves its media
+    // against its own collection, not the session's nominal one.
+    let source = mutable.dbs.for_card(card.hash()).source.clone();
+    let (coll_path, file_url_prefix) = match source {
+        Some(source) => (source.coll_dir, source.file_url_prefix),
+        None => (ctx.directory.to_path_buf(), ctx.file_url_prefix.to_string()),
+    };
     let deck_path = card.relative_file_path(&coll_path)?;
     let config = MarkdownRenderConfig {
         resolver: MediaResolverBuilder::new()
             .with_collection_path(coll_path)?
             .with_deck_path(deck_path)?
             .build()?,
-        file_url_prefix: ctx.file_url_prefix.to_string(),
+        file_url_prefix,
     };
     let card_content = render_card(&card, mutable.reveal, &config)?;
     let form_action = ctx.form_action;
@@ -320,7 +329,7 @@ pub fn render_completion_page(ctx: &RenderContext, mutable: &MutableState) -> Fa
     // BUG-13: all stats come from the session's persisted, non-voided reviews
     // so the numbers agree with the database. Repeats count toward total
     // reviews but not toward distinct cards.
-    let rows: Vec<ReviewRow> = mutable.db.get_reviews_for_session(mutable.session_id)?;
+    let rows: Vec<ReviewRow> = mutable.dbs.all_reviews()?;
     let total_reviews = rows.len();
     let distinct_cards = rows
         .iter()
@@ -539,6 +548,7 @@ mod tests {
     use super::*;
     use crate::cmd::drill::cache::Cache;
     use crate::cmd::drill::state::Review;
+    use crate::cmd::drill::state::SessionDbs;
     use crate::db::Database;
     use crate::db::ReviewRecord;
     use crate::error::ErrorReport;
@@ -554,8 +564,7 @@ mod tests {
         let session_id = db.create_session(Timestamp::now()).unwrap();
         let mutable = MutableState {
             reveal: false,
-            session_id,
-            db,
+            dbs: SessionDbs::single(db, session_id),
             cache: Cache::new(),
             cards: Vec::new(),
             reviews: Vec::new(),
@@ -593,8 +602,7 @@ mod tests {
         let db = Database::new(":memory:").unwrap();
         let session_id = db.create_session(Timestamp::now()).unwrap();
         MutableState::new(
-            db,
-            session_id,
+            SessionDbs::single(db, session_id),
             Cache::new(),
             Vec::new(),
             Jitter::none(),
@@ -750,8 +758,7 @@ mod tests {
             },
         ];
         let mut mutable = MutableState::new(
-            db,
-            session_id,
+            SessionDbs::single(db, session_id),
             Cache::new(),
             Vec::new(),
             Jitter::none(),

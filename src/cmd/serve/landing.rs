@@ -77,6 +77,13 @@ pub async fn landing_handler(
         .filter(|s| s.collection.owner.as_deref() == owner.as_deref())
         .count();
     let config_available = state.config.data_dir.is_some();
+    let custom_decks: Vec<(String, String)> = state
+        .custom_decks
+        .lock()
+        .iter()
+        .filter(|d| d.owner.as_deref() == owner.as_deref())
+        .map(|d| (d.name.clone(), d.slug.clone()))
+        .collect();
     // FEAT-03: surface running sessions so they can be resumed rather than
     // silently restarted.
     let resume: HashMap<String, usize> = {
@@ -101,7 +108,7 @@ pub async fn landing_handler(
         config_available,
         signed_in_as: owner.clone(),
     };
-    let html = render_landing_page(&collections, &resume, &status, flash);
+    let html = render_landing_page(&collections, &custom_decks, &resume, &status, flash);
     (StatusCode::OK, Html(html.into_string()))
 }
 
@@ -120,6 +127,7 @@ struct LandingStatus {
 
 fn render_landing_page(
     collections: &[&CollectionInfo],
+    custom_decks: &[(String, String)],
     resume: &HashMap<String, usize>,
     status: &LandingStatus,
     flash: Option<Flash>,
@@ -157,6 +165,37 @@ fn render_landing_page(
                     }
                     form action="/sync" method="post" style="display:inline" {
                         input .sync-button.btn.btn-secondary type="submit" value="Sync Now";
+                    }
+                }
+            }
+            @if config_available {
+                div.sync-bar {
+                    span.sync-status {
+                        @if custom_decks.is_empty() {
+                            "No decks"
+                        } @else {
+                            (format!("{} deck(s)", custom_decks.len()))
+                        }
+                    }
+                    form action="/decks" method="get" style="display:inline" {
+                        input .sync-button.btn.btn-secondary type="submit" value="Manage Decks";
+                    }
+                }
+            }
+            @if !custom_decks.is_empty() {
+                h2 { "Decks" }
+                table.collection-table {
+                    tbody {
+                        @for (name, slug) in custom_decks {
+                            tr {
+                                td { (name) }
+                                td {
+                                    a.drill-link.btn.btn-primary href=(format!("/collection/{slug}")) {
+                                        "Open"
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }

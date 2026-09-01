@@ -19,11 +19,13 @@ use parking_lot::Mutex;
 
 use tokio::sync::oneshot::Sender;
 
+use std::collections::HashMap;
 use std::collections::HashSet;
 
 use crate::cmd::drill::cache::Cache;
 use crate::cmd::drill::server::AnswerControls;
 use crate::db::Database;
+use crate::error::Fallible;
 use crate::fsrs::Grade;
 use crate::rng::TinyRng;
 use crate::types::card::Card;
@@ -44,10 +46,113 @@ pub struct ServerState {
     pub answer_controls: AnswerControls,
 }
 
-pub struct MutableState {
-    pub reveal: bool,
+/// One collection's database, with the session row opened in it.
+pub struct SessionDb {
     pub db: Database,
     pub session_id: i64,
+    /// Set only for a session drawing on more than one collection, where a
+    /// card's media must resolve against the collection it actually came
+    /// from. `None` means "use the session's own collection", which is the
+    /// CLI drill and the ordinary single-collection serve.
+    pub source: Option<SessionSource>,
+}
+
+/// Where a routed card's files live, and how to address them over HTTP.
+#[derive(Clone)]
+pub struct SessionSource {
+    pub coll_dir: PathBuf,
+    pub file_url_prefix: String,
+}
+
+/// The databases a drill session writes to.
+///
+/// Drilling one collection uses exactly one. A custom deck draws its cards
+/// from several collections, and each review must land in the database its
+/// card actually belongs to — a card scheduled in two places would come due
+/// twice, on schedules that drift apart. Routing is by card hash, which is
+/// the card's identity everywhere else too.
+pub struct SessionDbs {
+    dbs: Vec<SessionDb>,
+    /// Card hash to index into `dbs`. Empty for a single-collection session,
+    /// where every card belongs to `dbs[0]`.
+    routes: HashMap<CardHash, usize>,
+}
+
+impl SessionDbs {
+    /// A session over a single collection: every card routes to this database.
+    pub fn single(db: Database, session_id: i64) -> Self {
+        Self {
+            dbs: vec![SessionDb {
+                db,
+                session_id,
+                source: None,
+            }],
+            routes: HashMap::new(),
+        }
+    }
+
+    /// A session drawing on several collections. `routes` maps each card to
+    /// its collection's index in `dbs`.
+    pub fn routed(dbs: Vec<SessionDb>, routes: HashMap<CardHash, usize>) -> Self {
+        Self { dbs, routes }
+    }
+
+    /// The database owning `hash`.
+    ///
+    /// A card with no route falls back to the first database: that is the
+    /// single-collection case, where the map is empty by construction.
+    pub fn for_card(&self, hash: CardHash) -> &SessionDb {
+        let idx = self.routes.get(&hash).copied().unwrap_or(0);
+        // `dbs` is never empty, and every index in `routes` came from it.
+        &self.dbs[idx.min(self.dbs.len().saturating_sub(1))]
+    }
+
+    /// The database owning `hash`, for the writes that need `&mut Database`.
+    pub fn for_card_mut(&mut self, hash: CardHash) -> &mut SessionDb {
+        let idx = self.routes.get(&hash).copied().unwrap_or(0);
+        let idx = idx.min(self.dbs.len().saturating_sub(1));
+        &mut self.dbs[idx]
+    }
+
+    /// The first database. Used for session-wide bookkeeping that is not
+    /// tied to a particular card.
+    pub fn primary(&self) -> &SessionDb {
+        &self.dbs[0]
+    }
+
+    pub fn all(&self) -> &[SessionDb] {
+        &self.dbs
+    }
+
+    /// Mark every open session row as still alive.
+    pub fn touch_all(&self, now: Timestamp) -> Fallible<()> {
+        for entry in &self.dbs {
+            entry.db.touch_session(entry.session_id, now)?;
+        }
+        Ok(())
+    }
+
+    /// Close every open session row.
+    pub fn close_all(&self, ended_at: Timestamp) -> Fallible<()> {
+        for entry in &self.dbs {
+            entry.db.close_session(entry.session_id, ended_at)?;
+        }
+        Ok(())
+    }
+
+    /// Every review recorded in this session, across all its databases.
+    pub fn all_reviews(&self) -> Fallible<Vec<crate::db::ReviewRow>> {
+        let mut rows = Vec::new();
+        for entry in &self.dbs {
+            rows.extend(entry.db.get_reviews_for_session(entry.session_id)?);
+        }
+        Ok(rows)
+    }
+}
+
+pub struct MutableState {
+    pub reveal: bool,
+    pub dbs: SessionDbs,
     pub cache: Cache,
     pub cards: Vec<Card>,
     pub reviews: Vec<Review>,
@@ -63,8 +168,7 @@ pub struct MutableState {
 impl MutableState {
     /// State for a freshly started session: nothing revealed, nothing graded.
     pub fn new(
-        db: Database,
-        session_id: i64,
+        dbs: SessionDbs,
         cache: Cache,
         cards: Vec<Card>,
         jitter: Jitter,
@@ -72,8 +176,7 @@ impl MutableState {
     ) -> Self {
         Self {
             reveal: false,
-            db,
-            session_id,
+            dbs,
             cache,
             cards,
             reviews: Vec::new(),
@@ -168,8 +271,7 @@ mod tests {
         let a = make_card("question a");
         let b = make_card("question b");
         let mut mutable = MutableState::new(
-            db,
-            session_id,
+            SessionDbs::single(db, session_id),
             Cache::new(),
             vec![a.clone(), b.clone()],
             Jitter::none(),
