@@ -1,48 +1,50 @@
 <changelog>
     <unreleased>
-        <added>
-            <change author="claude">
+        </unreleased>
+    <releases>
+        <release version="0.4.2" date="2026-09-01">
+            <added>
+                <change author="claude">
                 Optional OIDC authentication for `serve` mode: an `[oidc]` config section gates every route except `/auth/*` behind login (validated against Nextcloud), and each `[[collection]]`/`[[hedgedoc]]` entry declares an `owner` (matched against the OIDC `email` claim) so each user sees only their own collections. Sessions are stateless signed cookies; no server-side session store. Absent `[oidc]`, `serve` behaves exactly as before. `drill` mode is unaffected. In-browser edit commits are attributed to the logged-in user when OIDC is on.
             </change>
-            <change author="claude">
+                <change author="claude">
                 Decks can now be assembled across collections: a `[[deck]]` entry (or the new `/decks` page) names a selection of decks drawn from any of your collections and drills them as one session. A deck owns no cards and no database — each review is routed back to the database of the collection its card came from, so a card included in several decks keeps exactly one schedule instead of becoming due twice on schedules that drift apart. Deleting a deck removes only the selection; cards and review history are untouched. With `[oidc]` configured, a deck is visible only to its owner and may only include collections that owner holds.
             </change>
-        </added>
-        <fixed>
-            <change author="claude">
+            </added>
+            <fixed>
+                <change author="claude">
                 An `[oidc].session_secret` shorter than 32 bytes is now rejected at config load with a clear message instead of panicking at startup, and a collection or HedgeDoc entry that declares an `owner` without an `[oidc]` section is rejected too — previously it loaded cleanly and then 404'd for everyone, since nobody is ever logged in to match the owner.
             </change>
-        </fixed>
-        <changed>
-            <change author="claude">
+            </fixed>
+            <changed>
+                <change author="claude">
                 Each `[[hedgedoc]]` note is now a collection of its own rather than being grouped with every other note on the same HedgeDoc host. Slugs, note directories and review databases are keyed by (note URL, owner), so several users can take notes from one shared HedgeDoc instance — including the same note — without sharing a collection. Deleting a note removes only that note's own directory; its review database is kept as before. The HedgeDoc manage page lists one row per note and the landing page shows each note under its own title.
             </change>
-        </changed>
-        <security>
-            <change author="claude">
+            </changed>
+            <security>
+                <change author="claude">
                 Fixed cross-user data exposure in HedgeDoc sources: `[[hedgedoc]]` entries were grouped by HedgeDoc host and took the owner of whichever entry was configured first, so on a shared HedgeDoc instance one user's note was served inside another user's collection — and the next add or delete rewrote the config file with the wrong owner recorded. Notes are no longer grouped, so an entry can never inherit another entry's owner.
             </change>
-            <change author="claude">
+                <change author="claude">
                 Fixed an open redirect in the OIDC login flow: `return_to` is taken from the query string and is now required to be a path on this server, so a crafted login link can no longer bounce a user to an attacker's page immediately after a genuine login.
             </change>
-            <change author="claude">
+                <change author="claude">
                 The OIDC session and login-flow cookies are now marked `Secure` when `external_url` is HTTPS, so a session credential can never ride a plaintext request. The session cookie also carries an explicit 30-day lifetime; without one it was a browser-session cookie that logged users out on every browser restart, contradicting the documented sliding session.
             </change>
-            <change author="claude">
+                <change author="claude">
                 `/auth/logout` is now a POST (with a Log out button on the landing page) rather than a GET, so a third-party page can no longer log a user out by embedding the URL. A manual HedgeDoc sync now re-fetches only the caller's own notes instead of every user's, and its error messages no longer name other users' note URLs.
             </change>
-            <change author="claude">
+                <change author="claude">
                 `[[hedgedoc]]` owners are now lowercased like collection owners, so a config written with mixed case matches the OIDC email claim as documented instead of making the owner's own notes unreachable.
             </change>
-            <change author="claude">
+                <change author="claude">
                 A `[[hedgedoc]]` entry's `owner` now survives the config rewrite that follows adding or deleting a note. It was being dropped, which left a config that `[oidc]` validation rejects on the next startup, and would have re-keyed every note onto a fresh, empty review database.
             </change>
-            <change author="claude">
+                <change author="claude">
                 An unauthenticated non-GET request now returns 401 with a "session expired" page instead of a redirect. A redirect is a 303, which replays the request as a GET of a POST-only path — a 405 with the submitted form data silently discarded. An expired or malformed login-flow cookie is also cleared from the browser now rather than left until its own expiry.
             </change>
-        </security>
-    </unreleased>
-    <releases>
+            </security>
+        </release>
         <release version="0.4.1" date="2026-09-01">
             <fixed>
                 <change author="claude">
