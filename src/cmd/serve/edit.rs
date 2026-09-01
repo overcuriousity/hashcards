@@ -260,16 +260,13 @@ fn edit_post_inner(
     // One transaction, so a failure part-way through cannot leave the
     // database half-migrated behind an already-rewritten file. If it fails
     // anyway, put the file back the way it was.
-    let migrated = match db.apply_edit_migration(&plan.renames, &plan.fresh, now) {
-        Ok(migrated) => migrated,
+    let counts = match db.apply_edit_migration(&plan.renames, &plan.fresh, now) {
+        Ok(counts) => counts,
         Err(e) => {
             revert_file(&file_path, &file_content)?;
             return fail(format!("Edit reverted: the review history could not be updated: {e}"));
         }
     };
-    // A rename the database declined (its target hash already has history)
-    // leaves the old row unmatched, which the user should hear about.
-    let collided = plan.renames.len() - migrated;
 
     // FEAT-04: every successful web edit becomes a git commit, so git sync
     // keeps working and the collection gets versioned card history for free.
@@ -287,8 +284,12 @@ fn edit_post_inner(
     })?;
 
     Ok(EditOutcome {
-        migrated,
-        skipped: plan.skipped + collided,
+        migrated: counts.renamed,
+        // A rename the database declined as a true collision (its target
+        // hash already has history) leaves the old row unmatched, which the
+        // user should hear about. A rename whose old hash had no history of
+        // its own is not: there was nothing to lose.
+        skipped: plan.skipped + counts.collided,
         committed,
     })
 }

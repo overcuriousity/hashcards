@@ -183,6 +183,18 @@
             <change author="claude">
                 Review lookups by card, by session, and by day are now backed by database indexes (including a generated per-day date column), so daily review counts and session stats no longer scan the whole reviews table. (BUG-33)
             </change>
+            <change author="claude">
+                Loading a collection page no longer renders a session a concurrent request just ended (via Home, or idle eviction) as if it were still live. The GET path lacked the same "was this session removed from under me" check the drill actions already had, so it could go on stamping heartbeats and per-card timers on a session whose database row was already closed.
+            </change>
+            <change author="claude">
+                Saving a card edit no longer reports "could not be matched to their previous review history" for a card that simply had no prior review history to begin with (for example, a newly added card). That message is now reserved for true collisions, where the edited card became byte-identical to another card that already has its own history.
+            </change>
+            <change author="claude">
+                Loading a collection page now stamps the session heartbeat once per request instead of twice.
+            </change>
+            <change author="claude">
+                The startup sweep that closes dangling sessions now checks every collection's database concurrently instead of one after another, so server startup no longer slows down in proportion to how many collections are configured.
+            </change>
         </fixed>
         <security>
             <change author="claude">

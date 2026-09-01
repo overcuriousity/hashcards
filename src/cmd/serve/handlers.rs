@@ -110,6 +110,13 @@ fn collection_get_inner(state: &AppState, slug: &str, flash: Option<Flash>) -> F
     // rendering; the session itself stays in the map even if rendering fails.
     let session: Option<SharedSession> = state.sessions.lock().get(slug).cloned();
 
+    // A concurrent Home action (or eviction) may have removed this session
+    // from the map, and closed its DB row, between the clone above and the
+    // lock below; `is_detached` is how removers report that (see the
+    // `detached` field's doc comment). Treat it exactly like "no session in
+    // the map" rather than rendering a stale session or touching its row.
+    let session = session.filter(|s| !s.lock().is_detached());
+
     let Some(session) = session else {
         // No active session: show the deck browser.
         let rc = find_collection(state, slug)
@@ -168,11 +175,6 @@ fn collection_get_inner(state: &AppState, slug: &str, flash: Option<Flash>) -> F
     let mut session = session.lock();
     // BUG-08: stamp activity so the eviction task only reaps idle sessions.
     session.last_activity_at = Timestamp::now();
-    // Heartbeat; see the GET path.
-    let session_id = session.mutable.session_id;
-    if let Err(e) = session.mutable.db.touch_session(session_id, Timestamp::now()) {
-        log::debug!("could not stamp session heartbeat: {e}");
-    }
     // BUG-14: start the per-card timer when the card is served.
     session.mutable.mark_card_shown();
     // Heartbeat, so another process's startup sweep can tell this session
@@ -1019,8 +1021,88 @@ mod tests {
     use std::time::Duration;
     use std::time::Instant;
 
+    use std::collections::HashMap;
+
+    use super::collection_get_inner;
     use super::run_blocking;
+    use crate::cmd::drill::server::AnswerControls;
+    use crate::cmd::drill::state::MutableState;
+    use crate::cmd::serve::config::ResolvedServeConfig;
+    use crate::cmd::serve::state::AppState;
+    use crate::cmd::serve::state::DrillSession;
+    use crate::db::Database;
+    use crate::error::ErrorReport;
     use crate::error::Fallible;
+    use crate::rng::TinyRng;
+    use crate::types::performance::Jitter;
+    use crate::types::timestamp::Timestamp;
+
+    fn test_state(coll_dir: &std::path::Path) -> Fallible<AppState> {
+        let config = ResolvedServeConfig::from_directories(
+            vec![coll_dir.display().to_string()],
+            "127.0.0.1".to_string(),
+            0,
+        )?;
+        Ok(AppState {
+            config: std::sync::Arc::new(config),
+            collections: std::sync::Arc::new(tokio::sync::RwLock::new(Vec::new())),
+            sessions: std::sync::Arc::new(parking_lot::Mutex::new(HashMap::new())),
+            last_synced: std::sync::Arc::new(parking_lot::Mutex::new(None)),
+            hedgedoc_sources: std::sync::Arc::new(parking_lot::Mutex::new(Vec::new())),
+            hedgedoc_last_synced: std::sync::Arc::new(parking_lot::Mutex::new(None)),
+            config_path: std::sync::Arc::new(parking_lot::Mutex::new(None)),
+            counts_refreshed_at: std::sync::Arc::new(parking_lot::Mutex::new(None)),
+            interrupted_closed: std::sync::Arc::new(parking_lot::Mutex::new(HashMap::new())),
+        })
+    }
+
+    /// Regression: a session removed from the map between the GET handler's
+    /// clone and its lock (a concurrent Home action, or eviction) must not be
+    /// rendered as if it were still live. `collection_post_inner` already
+    /// guarded this with an `is_detached` check; `collection_get_inner` did
+    /// not, so it would render the stale session and re-stamp its (already
+    /// closed) DB row's heartbeat.
+    #[test]
+    fn test_detached_session_renders_browse_page_not_stale_session() -> Fallible<()> {
+        let dir = tempfile::tempdir()?;
+        let coll_dir = dir.path().canonicalize()?;
+        std::fs::write(coll_dir.join("Deck.md"), "Q: One\nA: 1\n")?;
+
+        let state = test_state(&coll_dir)?;
+        let slug = state.config.collections[0].slug.clone();
+        let db_path = state.config.collections[0].db_path.clone();
+        let db_str = db_path
+            .to_str()
+            .ok_or_else(|| ErrorReport::new("non-utf8 db path"))?;
+
+        let started_at = Timestamp::now();
+        let db = Database::new(db_str)?;
+        let session_id = db.create_session(started_at)?;
+        let mutable = MutableState::new(
+            db,
+            session_id,
+            crate::cmd::drill::cache::Cache::new(),
+            Vec::new(),
+            Jitter::none(),
+            TinyRng::from_seed(1),
+        );
+        let session = std::sync::Arc::new(parking_lot::Mutex::new(DrillSession::new(
+            coll_dir.clone(),
+            Vec::new(),
+            started_at,
+            AnswerControls::Full,
+            mutable,
+        )));
+        session.lock().detach();
+        state.sessions.lock().insert(slug.clone(), session);
+
+        let html = collection_get_inner(&state, &slug, None)?;
+        assert!(
+            html.contains(r#"class="browse""#),
+            "detached session must fall back to the deck browser page, got: {html}"
+        );
+        Ok(())
+    }
 
     /// Regression test (BUG-44): serve handlers used to run collection
     /// parsing and SQLite work inline on the async executor, so one slow

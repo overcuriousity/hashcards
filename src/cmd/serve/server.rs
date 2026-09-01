@@ -59,13 +59,17 @@ use crate::cmd::serve::state::SharedSession;
 use crate::cmd::serve::state::evict_idle_sessions;
 use crate::cmd::serve::stats::collection_stats_handler;
 use crate::cmd::signals::terminate_signal;
+use crate::error::ErrorReport;
 use crate::error::Fallible;
 use crate::types::timestamp::Timestamp;
 
 /// How long a session's heartbeat must have been silent before the startup
 /// sweep treats it as abandoned. Generous on purpose: closing a session that
 /// is merely idle in another process is worse than leaving a crashed one open
-/// until the next restart.
+/// until the next restart. This does not eliminate the race, only shrinks its
+/// window: a CLI `drill` session idle longer than this, in a database this
+/// server also serves, is closed if `serve` happens to restart during that
+/// window. Accepted tradeoff — any fixed cutoff has some such window.
 const SESSION_STALE_MINUTES: i64 = 60;
 
 /// Close session rows left dangling by a crash or restart, across every
@@ -75,36 +79,60 @@ const SESSION_STALE_MINUTES: i64 = 60;
 /// A collection whose database cannot be opened is skipped with a log line
 /// rather than failing startup: an unreadable database is the deck browser's
 /// problem to report, not a reason to refuse to serve everything else.
+///
+/// Each collection's database is independent, so the sweeps run on their own
+/// threads rather than one after another: a server with many collections
+/// would otherwise have its startup delayed in proportion to how many it
+/// serves.
 fn sweep_dangling_sessions(
     config: &ResolvedServeConfig,
     hedgedoc_sources: &[HedgedocSource],
 ) -> HashMap<String, usize> {
-    let mut counts = HashMap::new();
     // Only sessions whose heartbeat has been silent this long are presumed
     // dead. A CLI `drill` sharing the database stamps its heartbeat as the
     // user works, so a live session is never swept out from under it.
     let stale_before = Timestamp::now().minus_minutes(SESSION_STALE_MINUTES);
-    let collections = config
+    let collections: Vec<&ResolvedCollection> = config
         .collections
         .iter()
-        .chain(hedgedoc_sources.iter().map(|s| &s.collection));
-    for rc in collections {
-        let Some(db_path) = rc.db_path.to_str() else {
-            log::error!("Database path is not valid UTF-8: {}", rc.db_path.display());
-            continue;
-        };
-        let closed =
-            Database::new(db_path).and_then(|db| db.close_dangling_sessions(stale_before));
+        .chain(hedgedoc_sources.iter().map(|s| &s.collection))
+        .collect();
+
+    let results: Vec<(String, Fallible<usize>)> = std::thread::scope(|scope| {
+        let handles: Vec<_> = collections
+            .into_iter()
+            .map(|rc| {
+                scope.spawn(move || {
+                    let closed = (|| {
+                        let db_path = rc.db_path.to_str().ok_or_else(|| {
+                            ErrorReport::new(format!(
+                                "Database path is not valid UTF-8: {}",
+                                rc.db_path.display()
+                            ))
+                        })?;
+                        Database::new(db_path).and_then(|db| db.close_dangling_sessions(stale_before))
+                    })();
+                    (rc.slug.clone(), closed)
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().expect("sweep thread panicked"))
+            .collect()
+    });
+
+    let mut counts = HashMap::new();
+    for (slug, closed) in results {
         match closed {
             Ok(0) => {}
             Ok(n) => {
-                log::info!("Closed {n} interrupted session(s) for collection '{}'", rc.slug);
-                counts.insert(rc.slug.clone(), n);
+                log::info!("Closed {n} interrupted session(s) for collection '{slug}'");
+                counts.insert(slug, n);
             }
-            Err(e) => log::error!(
-                "Could not close interrupted sessions for collection '{}': {e}",
-                rc.slug
-            ),
+            Err(e) => {
+                log::error!("Could not close interrupted sessions for collection '{slug}': {e}")
+            }
         }
     }
     counts

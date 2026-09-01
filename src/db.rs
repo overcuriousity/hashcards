@@ -49,6 +49,14 @@ pub struct ReviewRecord {
     pub duration_ms: Option<i64>,
 }
 
+/// Outcome of [`Database::apply_edit_migration`]. See that method's doc
+/// comment for what does and doesn't count toward each field.
+#[derive(Debug, PartialEq, Eq)]
+pub struct EditMigrationCounts {
+    pub renamed: usize,
+    pub collided: usize,
+}
+
 pub struct SessionRow {
     pub session_id: i64,
     pub started_at: Timestamp,
@@ -82,6 +90,22 @@ const SCHEMA_VERSION: i64 = 7;
 /// How long a connection waits for a lock held by another connection before
 /// giving up with SQLITE_BUSY.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Shared by `Database::card_exists` and `apply_edit_migration`, which needs
+/// it inside a `Transaction` rather than on `&self`.
+fn card_exists_in(conn: &Connection, card_hash: CardHash) -> Fallible<bool> {
+    let sql = "select count(*) from cards where card_hash = ?;";
+    let count: i64 = conn.query_row(sql, [card_hash], |row| row.get(0))?;
+    Ok(count > 0)
+}
+
+/// Shared by `Database::insert_card_if_new` and `apply_edit_migration`, which
+/// needs it inside a `Transaction` rather than on `&self`.
+fn insert_card_if_new_in(conn: &Connection, card_hash: CardHash, added_at: Timestamp) -> Fallible<()> {
+    let sql = "insert into cards (card_hash, added_at, review_count) values (?, ?, 0) on conflict (card_hash) do nothing;";
+    conn.execute(sql, params![card_hash, added_at])?;
+    Ok(())
+}
 
 impl Database {
     pub fn new(database_path: &str) -> Fallible<Self> {
@@ -528,32 +552,29 @@ impl Database {
     /// Doing this one statement at a time left the database half-migrated
     /// when a later rename failed, with the source file already rewritten.
     ///
-    /// Returns the number of rows actually renamed.
+    /// Returns the counts of renames actually applied and of renames skipped
+    /// as true collisions (target hash already had history). A rename whose
+    /// old hash had no history of its own is neither: there was nothing to
+    /// carry over, so it is just recorded as a fresh card and not counted in
+    /// either number.
     pub fn apply_edit_migration(
         &mut self,
         renames: &[(CardHash, CardHash)],
         fresh: &[CardHash],
         now: Timestamp,
-    ) -> Fallible<usize> {
+    ) -> Fallible<EditMigrationCounts> {
         let tx = self.conn.transaction()?;
-        let exists = |tx: &Transaction, hash: &CardHash| -> Fallible<bool> {
-            let count: i64 = tx.query_row(
-                "select count(*) from cards where card_hash = ?;",
-                params![hash],
-                |row| row.get(0),
-            )?;
-            Ok(count > 0)
-        };
-        let insert = "insert into cards (card_hash, added_at, review_count) values (?, ?, 0) on conflict (card_hash) do nothing;";
         let mut renamed: usize = 0;
+        let mut collided: usize = 0;
         for (old, new) in renames {
-            if exists(&tx, new)? {
+            if card_exists_in(&tx, *new)? {
                 // The new content already has history of its own.
+                collided += 1;
                 continue;
             }
-            if !exists(&tx, old)? {
+            if !card_exists_in(&tx, *old)? {
                 // Nothing to carry over; just record the new card.
-                tx.execute(insert, params![new, now])?;
+                insert_card_if_new_in(&tx, *new, now)?;
                 continue;
             }
             tx.execute(
@@ -563,10 +584,10 @@ impl Database {
             renamed += 1;
         }
         for new in fresh {
-            tx.execute(insert, params![new, now])?;
+            insert_card_if_new_in(&tx, *new, now)?;
         }
         tx.commit()?;
-        Ok(renamed)
+        Ok(EditMigrationCounts { renamed, collided })
     }
 
     /// Delete a card. The foreign-key cascade removes its reviews and
@@ -587,17 +608,12 @@ impl Database {
 
     /// Does a card with the given hash exist?
     pub fn card_exists(&self, card_hash: CardHash) -> Fallible<bool> {
-        let sql = "select count(*) from cards where card_hash = ?;";
-        let count: i64 = self.conn.query_row(sql, [card_hash], |row| row.get(0))?;
-        Ok(count > 0)
+        card_exists_in(&self.conn, card_hash)
     }
 
     /// Insert a card only if it doesn't already exist.
     pub fn insert_card_if_new(&self, card_hash: CardHash, added_at: Timestamp) -> Fallible<()> {
-        if !self.card_exists(card_hash)? {
-            self.insert_card(card_hash, added_at)?;
-        }
-        Ok(())
+        insert_card_if_new_in(&self.conn, card_hash, added_at)
     }
 
 
@@ -1660,7 +1676,8 @@ mod tests {
         let now = Timestamp::now();
         db.insert_card(old_hash, now)?;
         db.insert_bookmark(old_hash, Some("note".to_string()), now)?;
-        assert_eq!(db.apply_edit_migration(&[(old_hash, new_hash)], &[], now)?, 1);
+        let counts = db.apply_edit_migration(&[(old_hash, new_hash)], &[], now)?;
+        assert_eq!(counts, EditMigrationCounts { renamed: 1, collided: 0 });
         assert!(!db.bookmark_exists(old_hash)?);
         assert!(db.bookmark_exists(new_hash)?);
         let bm = db.get_bookmark(new_hash)?.unwrap();
@@ -1670,7 +1687,8 @@ mod tests {
 
     /// A rename whose target already has history is skipped, not an error:
     /// destroying either row would lose review data. Both rows survive and
-    /// the caller sees that the rename did not happen.
+    /// the caller sees that the rename did not happen, counted as a
+    /// collision.
     #[test]
     fn test_edit_migration_skips_existing_target() -> Fallible<()> {
         let mut db = Database::new(":memory:")?;
@@ -1679,9 +1697,28 @@ mod tests {
         let now = Timestamp::now();
         db.insert_card(hash_a, now)?;
         db.insert_card(hash_b, now)?;
-        assert_eq!(db.apply_edit_migration(&[(hash_a, hash_b)], &[], now)?, 0);
+        let counts = db.apply_edit_migration(&[(hash_a, hash_b)], &[], now)?;
+        assert_eq!(counts, EditMigrationCounts { renamed: 0, collided: 1 });
         assert!(db.card_exists(hash_a)?);
         assert!(db.card_exists(hash_b)?);
+        Ok(())
+    }
+
+    /// Regression: a rename whose *old* hash never had a card row (e.g. a
+    /// newly added card, or history already gone) is not a collision — there
+    /// is nothing to lose. It must not be counted as one, or the edit UI
+    /// wrongly warns the user that review history could not be matched.
+    #[test]
+    fn test_edit_migration_rename_with_no_prior_row_is_not_a_collision() -> Fallible<()> {
+        let mut db = Database::new(":memory:")?;
+        let old_hash = CardHash::hash_bytes(b"old");
+        let new_hash = CardHash::hash_bytes(b"new");
+        let now = Timestamp::now();
+        // Neither hash has a card row yet.
+        let counts = db.apply_edit_migration(&[(old_hash, new_hash)], &[], now)?;
+        assert_eq!(counts, EditMigrationCounts { renamed: 0, collided: 0 });
+        assert!(!db.card_exists(old_hash)?);
+        assert!(db.card_exists(new_hash)?);
         Ok(())
     }
 
@@ -1696,7 +1733,8 @@ mod tests {
         let c = CardHash::hash_bytes(b"c");
         let now = Timestamp::now();
         db.insert_card(a, now)?;
-        assert_eq!(db.apply_edit_migration(&[(a, b)], &[b, c], now)?, 1);
+        let counts = db.apply_edit_migration(&[(a, b)], &[b, c], now)?;
+        assert_eq!(counts, EditMigrationCounts { renamed: 1, collided: 0 });
         assert!(!db.card_exists(a)?);
         assert!(db.card_exists(b)?);
         assert!(db.card_exists(c)?);
