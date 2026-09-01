@@ -855,6 +855,71 @@ mod tests {
         Ok(())
     }
 
+    /// When `[oidc]` is on, an in-browser edit's git commit is attributed to
+    /// the logged-in user, not the configured default — a better audit
+    /// trail than a single shared "hashcards web edit" author.
+    #[test]
+    fn test_edit_commit_uses_current_user_as_author_when_oidc_is_on() -> Fallible<()> {
+        let dir = tempfile::tempdir()?;
+        let work = dir.path().join("work");
+        std::fs::create_dir_all(&work)?;
+
+        git(&work, &["init", "-b", "main"]);
+        std::fs::write(work.join(".gitignore"), "hashcards.db\n")?;
+        let file = work.join("Deck.md");
+        std::fs::write(&file, "Q: capital of France?\nA: Paris\n")?;
+        git(&work, &["add", "."]);
+        git(
+            &work,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-m",
+                "init",
+            ],
+        );
+
+        // Alice must own the collection for `find_collection` to resolve it
+        // under her session — an unowned collection would 404 for anyone
+        // authenticated, by design (see Task 8).
+        let mut state = test_state(&work)?;
+        {
+            let config = std::sync::Arc::get_mut(&mut state.config)
+                .ok_or_else(|| ErrorReport::new("config Arc unexpectedly shared"))?;
+            config.collections[0].owner = Some("alice@example.com".to_string());
+        }
+        let slug = state.config.collections[0].slug.clone();
+        let cards = parse_deck(&work)?.cards;
+        let hash_hex = cards[0].hash().to_hex();
+        let mtime = file_mtime_ms(&file)?;
+
+        let current_user = Some(CurrentUser {
+            email: "alice@example.com".to_string(),
+        });
+        let outcome = edit_post_inner(
+            &state,
+            &slug,
+            &hash_hex,
+            EditForm {
+                new_text: "Q: capital of France?\nA: **Paris**".to_string(),
+                mtime_ms: mtime.to_string(),
+            },
+            current_user,
+        )?;
+        assert!(outcome.committed, "edit was not committed");
+
+        let log = SyncCommand::new("git")
+            .args(["log", "-1", "--pretty=format:%an <%ae>"])
+            .current_dir(&work)
+            .output()?;
+        let author = String::from_utf8_lossy(&log.stdout);
+        assert_eq!(author, "alice@example.com <alice@example.com>");
+        Ok(())
+    }
+
     fn cloze(text: &str, start: usize, end: usize) -> Card {
         Card::new(
             "Deck".to_string(),
