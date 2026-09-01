@@ -48,6 +48,14 @@ pub struct AppState {
     pub oidc: Option<Arc<OidcRuntime>>,
 }
 
+/// Lets `axum_extra`'s `SignedCookieJar` extractor pull the signing key
+/// straight out of `AppState`.
+impl axum::extract::FromRef<AppState> for Key {
+    fn from_ref(state: &AppState) -> Key {
+        state.session_key.clone()
+    }
+}
+
 pub struct CollectionInfo {
     pub name: String,
     pub slug: String,

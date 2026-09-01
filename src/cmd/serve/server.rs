@@ -26,6 +26,10 @@ use crate::cmd::drill::template::icon_192_handler;
 use crate::cmd::drill::template::icon_512_handler;
 use crate::cmd::drill::template::manifest_handler;
 use crate::cmd::serve::auth::build_oidc_runtime;
+use crate::cmd::serve::auth::callback_handler;
+use crate::cmd::serve::auth::login_handler;
+use crate::cmd::serve::auth::logout_handler;
+use crate::cmd::serve::auth::require_auth;
 use crate::cmd::serve::bookmarks::bookmark_delete_handler;
 use crate::cmd::serve::bookmarks::bookmark_list_handler;
 use crate::cmd::serve::bookmarks::bookmark_note_handler;
@@ -353,8 +357,24 @@ pub async fn start_serve(config: ResolvedServeConfig) -> Fallible<()> {
         .route(KATEX_MHCHEM_JS_URL, get(katex_mhchem_js_handler))
         .route("/katex/fonts/{*path}", get(katex_font_handler))
         .route(HLJS_CSS_URL, get(hljs_css_handler))
-        .route(HLJS_JS_URL, get(hljs_js_handler))
-        .with_state(state);
+        .route(HLJS_JS_URL, get(hljs_js_handler));
+
+    // `/auth/*` must NOT go through `require_auth` — gating the login route
+    // itself behind login is the classic OIDC redirect loop.
+    let app = if state.oidc.is_some() {
+        let auth_routes = Router::new()
+            .route("/auth/login", get(login_handler))
+            .route("/auth/callback", get(callback_handler))
+            .route("/auth/logout", get(logout_handler));
+        app.layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            require_auth,
+        ))
+        .merge(auth_routes)
+    } else {
+        app
+    };
+    let app = app.with_state(state);
 
     log::debug!("Starting server on {bind}");
     let listener = TcpListener::bind(&bind).await?;

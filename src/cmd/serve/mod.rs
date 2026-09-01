@@ -80,6 +80,28 @@ mod tests {
         Ok(())
     }
 
+    /// Regression: with no [oidc] configured, /auth/login must not exist —
+    /// proves the auth routes and middleware are opt-in, not always-on.
+    #[tokio::test]
+    async fn test_auth_routes_absent_without_oidc_config() -> Fallible<()> {
+        let dir = tempdir()?;
+        let coll_dir = dir.path().to_path_buf();
+        write(coll_dir.join("Alpha.md"), "Q: What is 1+1?\nA: 2\n")?;
+        let slug = "test-collection";
+        let port = spawn_test_server(coll_dir, slug).await?;
+
+        let response = reqwest::Client::new()
+            .get(format!("http://{TEST_HOST}:{port}/auth/login"))
+            .send()
+            .await?;
+        assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND);
+
+        // And the collection page itself is still reachable with no login.
+        let response = reqwest::get(format!("http://{TEST_HOST}:{port}/collection/{slug}")).await?;
+        assert!(response.status().is_success());
+        Ok(())
+    }
+
     /// Regression test: POSTing multiple `decks` values to /collection/{slug}/start
     /// must not fail with "duplicate field `decks`".
     #[tokio::test]

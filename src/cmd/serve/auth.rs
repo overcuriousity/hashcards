@@ -139,7 +139,7 @@ type DiscoveredCoreClient = openidconnect::core::CoreClient<
     openidconnect::EndpointMaybeSet,
 >;
 
-pub(crate) struct OidcRuntime {
+pub struct OidcRuntime {
     client: DiscoveredCoreClient,
     scopes: Vec<openidconnect::Scope>,
 }
@@ -336,6 +336,38 @@ pub(super) async fn logout_handler(
     // log the user out of hashcards itself.
     let target = "/".to_string();
     (jar, axum::response::Redirect::to(&target))
+}
+
+/// Characters that must be percent-encoded when embedding an arbitrary path
+/// in a `return_to` query parameter, matching the encode set `flash.rs`
+/// already uses for the same purpose.
+const RETURN_TO_ENCODE_SET: &percent_encoding::AsciiSet = percent_encoding::NON_ALPHANUMERIC;
+
+pub(super) async fn require_auth(
+    jar: SignedCookieJar,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    match read_session(&jar) {
+        Some(_) => {
+            let jar = if session_needs_renewal(&jar) {
+                match read_session(&jar) {
+                    Some(user) => set_session_cookie(jar, &user.email),
+                    None => jar,
+                }
+            } else {
+                jar
+            };
+            let response = next.run(request).await;
+            (jar, response).into_response()
+        }
+        None => {
+            let return_to = request.uri().to_string();
+            let encoded = percent_encoding::utf8_percent_encode(&return_to, RETURN_TO_ENCODE_SET);
+            axum::response::Redirect::to(&format!("/auth/login?return_to={encoded}"))
+                .into_response()
+        }
+    }
 }
 
 pub(super) struct MissingSession;
