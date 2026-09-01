@@ -614,6 +614,7 @@ pub fn collection_info_for_source(source: &HedgedocSource) -> CollectionInfo {
         slug: source.collection.slug.clone(),
         total_cards,
         due_today,
+        owner: source.collection.owner.clone(),
     }
 }
 

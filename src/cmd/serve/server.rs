@@ -7,6 +7,7 @@ use parking_lot::Mutex;
 use axum::Router;
 use axum::routing::get;
 use axum::routing::post;
+use axum_extra::extract::cookie::Key;
 use tokio::net::TcpListener;
 use tokio::sync::RwLock;
 
@@ -222,7 +223,7 @@ pub async fn start_serve(config: ResolvedServeConfig) -> Fallible<()> {
             slug: c.slug.clone(),
             coll_dir: c.coll_dir.clone(),
             db_path: c.db_path.clone(),
-            owner: None,
+            owner: c.owner.clone(),
         })
         .collect();
 
@@ -273,6 +274,10 @@ pub async fn start_serve(config: ResolvedServeConfig) -> Fallible<()> {
         // Counts were just computed above, so the stamp starts fresh.
         counts_refreshed_at: Arc::new(Mutex::new(Some(Timestamp::now()))),
         interrupted_closed: Arc::new(Mutex::new(interrupted_closed)),
+        session_key: match &config.oidc {
+            Some(o) => Key::derive_from(o.session_secret.as_bytes()),
+            None => Key::generate(),
+        },
     };
 
     spawn_session_eviction_task(state.sessions.clone(), config.session_timeout_minutes);

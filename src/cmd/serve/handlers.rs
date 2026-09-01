@@ -1057,6 +1057,7 @@ mod tests {
             config_path: std::sync::Arc::new(parking_lot::Mutex::new(None)),
             counts_refreshed_at: std::sync::Arc::new(parking_lot::Mutex::new(None)),
             interrupted_closed: std::sync::Arc::new(parking_lot::Mutex::new(HashMap::new())),
+            session_key: axum_extra::extract::cookie::Key::generate(),
         })
     }
 

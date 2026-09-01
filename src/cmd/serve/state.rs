@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use axum_extra::extract::cookie::Key;
 use chrono::Duration;
 use parking_lot::Mutex;
 
@@ -35,6 +36,12 @@ pub struct AppState {
     /// time it renders, so the notice is shown once rather than on every
     /// visit (see `close_dangling_sessions`).
     pub interrupted_closed: Arc<Mutex<HashMap<String, usize>>>,
+    /// Signs the OIDC session and login-flow cookies. When `[oidc]` is not
+    /// configured this key is generated randomly at startup and never used
+    /// — keeping it non-optional avoids threading `Option` through every
+    /// cookie read/write, since the auth routes and middleware that use it
+    /// are only ever registered when `[oidc]` is configured.
+    pub session_key: Key,
 }
 
 pub struct CollectionInfo {
@@ -42,6 +49,7 @@ pub struct CollectionInfo {
     pub slug: String,
     pub total_cards: usize,
     pub due_today: usize,
+    pub owner: Option<String>,
 }
 
 /// A HedgeDoc markdown endpoint used as a collection source.

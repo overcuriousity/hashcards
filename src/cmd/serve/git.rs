@@ -73,6 +73,7 @@ pub fn refresh_collection_info(collections: &[ResolvedCollection]) -> Vec<Collec
             slug: rc.slug.clone(),
             total_cards,
             due_today,
+            owner: rc.owner.clone(),
         });
     }
     infos
@@ -149,7 +150,13 @@ pub fn spawn_sync_task(
             };
             // Snapshot only the paths needed, then release the lock before
             // doing filesystem/DB work to avoid blocking other handlers.
-            let source_paths: Vec<(String, String, std::path::PathBuf, std::path::PathBuf)> = {
+            let source_paths: Vec<(
+                String,
+                String,
+                std::path::PathBuf,
+                std::path::PathBuf,
+                Option<String>,
+            )> = {
                 let sources = hedgedoc_sources.lock();
                 sources
                     .iter()
@@ -159,6 +166,7 @@ pub fn spawn_sync_task(
                             s.collection.slug.clone(),
                             s.collection.coll_dir.clone(),
                             s.collection.db_path.clone(),
+                            s.collection.owner.clone(),
                         )
                     })
                     .collect()
@@ -166,7 +174,7 @@ pub fn spawn_sync_task(
             let hedgedoc_infos: Vec<CollectionInfo> = match tokio::task::spawn_blocking(move || {
                 source_paths
                     .into_iter()
-                    .map(|(name, slug, coll_dir, db_path)| {
+                    .map(|(name, slug, coll_dir, db_path, owner)| {
                         let (total_cards, due_today) = match compute_collection_counts(&coll_dir, &db_path) {
                             Ok(counts) => counts,
                             Err(e) => {
@@ -180,7 +188,7 @@ pub fn spawn_sync_task(
                                 (0, 0)
                             }
                         };
-                        CollectionInfo { name, slug, total_cards, due_today }
+                        CollectionInfo { name, slug, total_cards, due_today, owner }
                     })
                     .collect::<Vec<CollectionInfo>>()
             })
@@ -289,7 +297,27 @@ mod tests {
     use std::path::Path;
     use std::process::Command as SyncCommand;
 
+    use tempfile::tempdir;
+
     use super::commit_edit;
+    use super::refresh_collection_info;
+    use crate::cmd::serve::config::ResolvedCollection;
+    use crate::error::Fallible;
+
+    #[test]
+    fn test_refresh_collection_info_carries_owner() -> Fallible<()> {
+        let dir = tempdir()?;
+        let rc = ResolvedCollection {
+            name: "Japanese".to_string(),
+            slug: "japanese".to_string(),
+            coll_dir: dir.path().to_path_buf(),
+            db_path: dir.path().join("hashcards.db"),
+            owner: Some("me@example.com".to_string()),
+        };
+        let infos = refresh_collection_info(&[rc]);
+        assert_eq!(infos[0].owner.as_deref(), Some("me@example.com"));
+        Ok(())
+    }
 
     fn git(dir: &Path, args: &[&str]) {
         let out = SyncCommand::new("git")

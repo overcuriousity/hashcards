@@ -562,6 +562,7 @@ mod tests {
             config_path: Arc::new(Mutex::new(None)),
             counts_refreshed_at: Arc::new(Mutex::new(None)),
             interrupted_closed: Arc::new(Mutex::new(HashMap::new())),
+            session_key: axum_extra::extract::cookie::Key::generate(),
         })
     }
 
