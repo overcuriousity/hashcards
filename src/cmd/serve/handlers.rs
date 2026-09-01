@@ -168,8 +168,19 @@ fn collection_get_inner(state: &AppState, slug: &str, flash: Option<Flash>) -> F
     let mut session = session.lock();
     // BUG-08: stamp activity so the eviction task only reaps idle sessions.
     session.last_activity_at = Timestamp::now();
+    // Heartbeat; see the GET path.
+    let session_id = session.mutable.session_id;
+    if let Err(e) = session.mutable.db.touch_session(session_id, Timestamp::now()) {
+        log::debug!("could not stamp session heartbeat: {e}");
+    }
     // BUG-14: start the per-card timer when the card is served.
     session.mutable.mark_card_shown();
+    // Heartbeat, so another process's startup sweep can tell this session
+    // apart from one abandoned by a crash.
+    let session_id = session.mutable.session_id;
+    if let Err(e) = session.mutable.db.touch_session(session_id, Timestamp::now()) {
+        log::debug!("could not stamp session heartbeat: {e}");
+    }
     let form_action = format!("/collection/{slug}");
     let file_url_prefix = format!("/collection/{slug}/file");
     let ctx = RenderContext {

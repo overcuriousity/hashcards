@@ -15,7 +15,15 @@ create table cards (
 create table sessions (
     session_id integer primary key,
     started_at text not null,
-    ended_at text not null
+    ended_at text not null,
+    -- Heartbeat: stamped whenever the owning process serves a page or
+    -- handles an action. Lets the startup sweep tell a session abandoned by
+    -- a crash from one still live in another process.
+    last_seen_at text,
+    -- Explicit "this row has been closed" marker. `ended_at = started_at`
+    -- cannot serve as one: a session whose reviews were all undone is
+    -- rewritten back to that value and would be re-detected forever.
+    closed integer not null default 0
 ) strict;
 
 create table reviews (

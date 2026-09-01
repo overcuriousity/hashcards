@@ -62,6 +62,12 @@ use crate::cmd::signals::terminate_signal;
 use crate::error::Fallible;
 use crate::types::timestamp::Timestamp;
 
+/// How long a session's heartbeat must have been silent before the startup
+/// sweep treats it as abandoned. Generous on purpose: closing a session that
+/// is merely idle in another process is worse than leaving a crashed one open
+/// until the next restart.
+const SESSION_STALE_MINUTES: i64 = 60;
+
 /// Close session rows left dangling by a crash or restart, across every
 /// collection this server serves, and return the per-slug counts so the deck
 /// browser can report them once.
@@ -74,6 +80,10 @@ fn sweep_dangling_sessions(
     hedgedoc_sources: &[HedgedocSource],
 ) -> HashMap<String, usize> {
     let mut counts = HashMap::new();
+    // Only sessions whose heartbeat has been silent this long are presumed
+    // dead. A CLI `drill` sharing the database stamps its heartbeat as the
+    // user works, so a live session is never swept out from under it.
+    let stale_before = Timestamp::now().minus_minutes(SESSION_STALE_MINUTES);
     let collections = config
         .collections
         .iter()
@@ -83,7 +93,8 @@ fn sweep_dangling_sessions(
             log::error!("Database path is not valid UTF-8: {}", rc.db_path.display());
             continue;
         };
-        let closed = Database::new(db_path).and_then(|db| db.close_dangling_sessions());
+        let closed =
+            Database::new(db_path).and_then(|db| db.close_dangling_sessions(stale_before));
         match closed {
             Ok(0) => {}
             Ok(n) => {

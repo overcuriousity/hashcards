@@ -86,6 +86,13 @@ async fn inner(state: ServerState, flash: Option<Flash>) -> Fallible<Markup> {
     let mut mutable = state.mutable.lock();
     // BUG-14: start the per-card timer when the card is served.
     mutable.mark_card_shown();
+    // Heartbeat: tells another process's startup sweep that this session is
+    // alive, so it is not closed out from under us. A failure here must not
+    // fail the request; the sweep's cutoff is generous.
+    let session_id = mutable.session_id;
+    if let Err(e) = mutable.db.touch_session(session_id, Timestamp::now()) {
+        log::debug!("could not stamp session heartbeat: {e}");
+    }
     let file_url_prefix = format!("http://localhost:{}/file", state.port);
     let ctx = RenderContext {
         directory: &state.directory,

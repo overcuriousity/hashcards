@@ -31,7 +31,7 @@
                 Two Undo requests arriving together (a double click, or key auto-repeat) now void one review instead of two. Undo carries the review it means to void, the same guard grades already had.
             </change>
             <change author="claude">
-                Sessions left open by a crash or restart are now closed once, when the server starts, instead of on every visit to a collection. Closing them per request stamped an end time on sessions that were still live in a concurrent `drill`, and re-reported the same sessions forever.
+                Sessions left open by a crash or restart are now closed once, when the server starts, instead of on every visit to a collection, and only when they have been silent for over an hour. Sessions carry a heartbeat that the owning process stamps as it works, so a session still running in a concurrent `drill` — which shares the same database file — is no longer stamped as ended and left appending reviews to a row claiming to have finished. A session is also marked closed explicitly rather than inferred from its end time matching its start time, so one whose reviews were all undone is no longer re-reported on every sweep, forever. This adds schema version 7; existing databases are migrated in place on first open.
             </change>
             <change author="claude">
                 Database connections now wait for a lock held by another connection rather than failing immediately, and the drill stats page is rendered off the async runtime. Opening `/stats` while a grade was being written could return a server error.

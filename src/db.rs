@@ -77,7 +77,7 @@ pub struct Bookmark {
 
 /// The schema version a freshly created database gets, and the highest
 /// migration number `migrate` knows how to apply.
-const SCHEMA_VERSION: i64 = 6;
+const SCHEMA_VERSION: i64 = 7;
 
 /// How long a connection waits for a lock held by another connection before
 /// giving up with SQLITE_BUSY.
@@ -269,10 +269,12 @@ impl Database {
     /// ended_at is initially set to started_at as a placeholder; call
     /// close_session when the session finishes.
     pub fn create_session(&self, started_at: Timestamp) -> Fallible<i64> {
-        let sql = "insert into sessions (started_at, ended_at) values (?, ?) returning session_id;";
+        let sql = "insert into sessions (started_at, ended_at, last_seen_at) values (?, ?, ?) returning session_id;";
         let session_id: i64 = self
             .conn
-            .query_row(sql, params![started_at, started_at], |row| row.get(0))?;
+            .query_row(sql, params![started_at, started_at, started_at], |row| {
+                row.get(0)
+            })?;
         Ok(session_id)
     }
 
@@ -339,7 +341,7 @@ impl Database {
         update_card_performance_tx(&tx, card_hash, prev_performance)?;
         if let Some(session_id) = reopen_session {
             let rows = tx.execute(
-                "update sessions set ended_at = started_at where session_id = ?;",
+                "update sessions set ended_at = started_at, closed = 0 where session_id = ?;",
                 params![session_id],
             )?;
             if rows != 1 {
@@ -383,7 +385,7 @@ impl Database {
 
     /// Update ended_at to mark a session as complete.
     pub fn close_session(&self, session_id: i64, ended_at: Timestamp) -> Fallible<()> {
-        let sql = "update sessions set ended_at = ? where session_id = ?;";
+        let sql = "update sessions set ended_at = ?, closed = 1 where session_id = ?;";
         let rows = self.conn.execute(sql, params![ended_at, session_id])?;
         if rows != 1 {
             return fail(format!("No session with ID {session_id} to close"));
@@ -476,21 +478,40 @@ impl Database {
         }
     }
 
+    /// Stamp a session's heartbeat.
+    ///
+    /// Called whenever the owning process serves a page or handles an action,
+    /// so the startup sweep can tell a session abandoned by a crash from one
+    /// still running in another process. A session that no longer exists is
+    /// not an error: the caller is on a request path, not doing bookkeeping.
+    pub fn touch_session(&self, session_id: i64, now: Timestamp) -> Fallible<()> {
+        let sql = "update sessions set last_seen_at = ? where session_id = ?;";
+        self.conn.execute(sql, params![now, session_id])?;
+        Ok(())
+    }
+
     /// Close sessions left dangling by a crash or restart.
     ///
-    /// `create_session` writes `ended_at = started_at` as a placeholder, so
-    /// a row where the two are still equal was never closed. Each such row
-    /// is closed at the time of its last surviving (non-voided) review, or
-    /// left at `started_at` if no review was recorded. Returns the number
-    /// of rows touched.
+    /// A row is dangling when it has not been closed and its heartbeat has
+    /// been silent since before `stale_before`. Each such row is closed at
+    /// the time of its last surviving (non-voided) review, or left at
+    /// `started_at` if no review was recorded, and marked `closed`. Returns
+    /// the number of rows closed.
     ///
-    /// A genuinely instantaneous session matches the predicate too; it is
-    /// rewritten to the same value, which is harmless. Likewise, a row
-    /// belonging to a session mid-creation may be touched; `close_session`
-    /// simply overwrites `ended_at` later.
-    pub fn close_dangling_sessions(&self) -> Fallible<usize> {
-        let sql = "update sessions set ended_at = coalesce((select max(reviewed_at) from reviews where reviews.session_id = sessions.session_id and reviews.voided = 0), started_at) where ended_at = started_at;";
-        let rows = self.conn.execute(sql, [])?;
+    /// The heartbeat is what makes this safe to run while other processes are
+    /// working: `serve` and a CLI `drill` share one database file, and
+    /// nothing in the row itself distinguishes a session abandoned by a crash
+    /// from one that is simply mid-drill elsewhere. Stamping `ended_at` on a
+    /// live session left it appending reviews to a row claiming to have
+    /// ended. Callers should pass a generous cutoff.
+    ///
+    /// `closed` is the marker rather than `ended_at <> started_at`, because a
+    /// session whose reviews were all undone is rewritten back to
+    /// `started_at` and would otherwise be re-detected on every sweep,
+    /// forever.
+    pub fn close_dangling_sessions(&self, stale_before: Timestamp) -> Fallible<usize> {
+        let sql = "update sessions set ended_at = coalesce((select max(reviewed_at) from reviews where reviews.session_id = sessions.session_id and reviews.voided = 0), started_at), closed = 1 where closed = 0 and coalesce(last_seen_at, started_at) < ?;";
+        let rows = self.conn.execute(sql, params![stale_before])?;
         Ok(rows)
     }
 
@@ -793,6 +814,38 @@ fn migrate_add_voided(tx: &Transaction) -> Fallible<()> {
     Ok(())
 }
 
+/// Migration 7: session liveness. `last_seen_at` is a heartbeat the owning
+/// process stamps as it works, so the startup sweep can distinguish a session
+/// abandoned by a crash from one still running in another process. `closed`
+/// replaces the `ended_at = started_at` predicate, which re-detected a
+/// session whose reviews had all been undone on every single sweep.
+fn migrate_add_session_liveness(tx: &Transaction) -> Fallible<()> {
+    let has = |name: &str| -> Fallible<bool> {
+        let sql = "select count(*) from pragma_table_info('sessions') where name = ?;";
+        let count: i64 = tx.query_row(sql, params![name], |row| row.get(0))?;
+        Ok(count > 0)
+    };
+    if !has("last_seen_at")? {
+        tx.execute_batch("alter table sessions add column last_seen_at text;")?;
+        // The last review is the best evidence of when the session was alive.
+        tx.execute_batch(
+            "update sessions set last_seen_at = coalesce(
+                 (select max(reviewed_at) from reviews
+                  where reviews.session_id = sessions.session_id),
+                 started_at
+             );",
+        )?;
+    }
+    if !has("closed")? {
+        tx.execute_batch(
+            "alter table sessions add column closed integer not null default 0;",
+        )?;
+        // A row whose end time was moved off its start time was closed.
+        tx.execute_batch("update sessions set closed = 1 where ended_at <> started_at;")?;
+    }
+    Ok(())
+}
+
 /// Bring an existing database up to SCHEMA_VERSION by applying numbered
 /// migrations in order. Databases from before the version table existed
 /// start at version 0; migrations 1-3 probe before altering, so they are
@@ -813,6 +866,7 @@ fn migrate(tx: &Transaction) -> Fallible<()> {
             4 => migrate_add_review_indexes(tx)?,
             5 => migrate_add_reviewed_date(tx)?,
             6 => migrate_add_meta(tx)?,
+            7 => migrate_add_session_liveness(tx)?,
             other => {
                 return fail(format!(
                     "Internal error: no migration defined for schema version {other}."
@@ -1684,7 +1738,9 @@ mod tests {
         // A dangling session with no reviews at all.
         let empty_dangling = db.create_session(t1)?;
 
-        assert_eq!(db.close_dangling_sessions()?, 2);
+        // A cutoff after every heartbeat above, so all stale rows qualify.
+        let cutoff = Timestamp::try_from("2026-01-01T11:00:00.000".to_string())?;
+        assert_eq!(db.close_dangling_sessions(cutoff)?, 2);
 
         let sessions = db.get_all_sessions()?;
         let find = |id: i64| {
@@ -1705,12 +1761,52 @@ mod tests {
         );
         assert_eq!(find(closed)?.ended_at, t1, "already-closed row untouched");
 
-        // Running it again: `dangling` no longer matches (t1 != t0), but
-        // `empty_dangling` was closed at its own start time, so it is
-        // indistinguishable from the placeholder and gets re-closed to the
-        // same value — the harmless instantaneous-session edge case.
-        assert_eq!(db.close_dangling_sessions()?, 1);
+        // Running it again closes nothing: the sweep marks rows `closed`
+        // rather than inferring it from `ended_at <> started_at`. A session
+        // closed at its own start time — one with no reviews, or one whose
+        // reviews were all undone — used to be indistinguishable from the
+        // placeholder and was re-detected on every single sweep, forever.
+        assert_eq!(db.close_dangling_sessions(cutoff)?, 0);
         assert_eq!(find(empty_dangling)?.ended_at, t1);
+        Ok(())
+    }
+
+    /// A session whose heartbeat is recent is still running somewhere —
+    /// `serve` and a CLI `drill` share one database file — and must not be
+    /// closed. Stamping `ended_at` on it left the live session appending
+    /// reviews to a row claiming to have ended.
+    #[test]
+    fn test_live_session_is_not_swept() -> Fallible<()> {
+        let db = Database::new(":memory:")?;
+        let t0 = Timestamp::try_from("2026-01-01T10:00:00.000".to_string())?;
+        let crashed = db.create_session(t0)?;
+        let live = db.create_session(t0)?;
+
+        // The live session has just checked in; the crashed one never did.
+        let now = Timestamp::try_from("2026-01-01T12:00:00.000".to_string())?;
+        db.touch_session(live, now)?;
+
+        // Anything silent for over an hour is presumed dead.
+        let cutoff = now.minus_minutes(60);
+        assert_eq!(db.close_dangling_sessions(cutoff)?, 1);
+
+        let sessions = db.get_all_sessions()?;
+        let find = |id: i64| {
+            sessions
+                .iter()
+                .find(|s| s.session_id == id)
+                .ok_or_else(|| crate::error::ErrorReport::new("session row missing"))
+        };
+        assert_eq!(find(crashed)?.ended_at, t0, "the crashed session is closed");
+        assert_eq!(
+            find(live)?.ended_at,
+            t0,
+            "the live session's row is left open"
+        );
+        // It is not protected forever: once its heartbeat falls behind a
+        // later cutoff, it is swept like any other abandoned session.
+        let much_later = Timestamp::try_from("2026-01-01T14:00:00.000".to_string())?;
+        assert_eq!(db.close_dangling_sessions(much_later.minus_minutes(60))?, 1);
         Ok(())
     }
 

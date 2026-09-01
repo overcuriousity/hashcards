@@ -81,29 +81,40 @@ pub async fn landing_handler(
             })
             .collect()
     };
-    let html = render_landing_page(
-        &collections,
-        &resume,
+    let status = LandingStatus {
         last_synced,
         git_enabled,
         hedgedoc_count,
         hedgedoc_last_synced,
         config_available,
-        flash,
-    );
+    };
+    let html = render_landing_page(&collections, &resume, &status, flash);
     (StatusCode::OK, Html(html.into_string()))
 }
 
-fn render_landing_page(
-    collections: &[CollectionInfo],
-    resume: &HashMap<String, usize>,
+/// The server-status details shown under the collection list: whether git
+/// and the config file are in play, and when each source last synced.
+struct LandingStatus {
     last_synced: Option<Timestamp>,
     git_enabled: bool,
     hedgedoc_count: usize,
     hedgedoc_last_synced: Option<Timestamp>,
     config_available: bool,
+}
+
+fn render_landing_page(
+    collections: &[CollectionInfo],
+    resume: &HashMap<String, usize>,
+    status: &LandingStatus,
     flash: Option<Flash>,
 ) -> Markup {
+    let LandingStatus {
+        last_synced,
+        git_enabled,
+        hedgedoc_count,
+        hedgedoc_last_synced,
+        config_available,
+    } = *status;
     page_template(html! {
         @if let Some(f) = &flash { (f.render()) }
         div.landing {

@@ -116,6 +116,11 @@ async fn action_handler(state: ServerState, form: FormData) -> Fallible<Option<F
         None => None,
     };
     let mut mutable = state.mutable.lock();
+    // Heartbeat; see the GET path.
+    let session_id = mutable.session_id;
+    if let Err(e) = mutable.db.touch_session(session_id, Timestamp::now()) {
+        log::debug!("could not stamp session heartbeat: {e}");
+    }
     let result = handle_action(&mut mutable, form.action, submitted_card, form.undo_review)?;
     match result {
         ActionResult::Shutdown => {
