@@ -33,9 +33,9 @@ use crate::cmd::drill::server::escape_js_string_literal;
 use crate::cmd::drill::state::MutableState;
 use crate::cmd::drill::template::page_template;
 use crate::cmd::drill::template::page_template_with_script;
+use crate::cmd::run_blocking;
 use crate::cmd::serve::browse::build_deck_tree;
 use crate::cmd::serve::browse::render_browse_page;
-use crate::cmd::run_blocking;
 use crate::cmd::serve::config::ResolvedCollection;
 use crate::cmd::serve::git::clone_or_pull;
 use crate::cmd::serve::hedgedoc::build_combined_infos;
@@ -180,7 +180,11 @@ fn collection_get_inner(state: &AppState, slug: &str, flash: Option<Flash>) -> F
     // Heartbeat, so another process's startup sweep can tell this session
     // apart from one abandoned by a crash.
     let session_id = session.mutable.session_id;
-    if let Err(e) = session.mutable.db.touch_session(session_id, Timestamp::now()) {
+    if let Err(e) = session
+        .mutable
+        .db
+        .touch_session(session_id, Timestamp::now())
+    {
         log::debug!("could not stamp session heartbeat: {e}");
     }
     let form_action = format!("/collection/{slug}");

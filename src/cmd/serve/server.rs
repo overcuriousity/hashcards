@@ -28,8 +28,6 @@ use crate::cmd::serve::bookmarks::bookmark_delete_handler;
 use crate::cmd::serve::bookmarks::bookmark_list_handler;
 use crate::cmd::serve::bookmarks::bookmark_note_handler;
 use crate::cmd::serve::config::ResolvedCollection;
-use crate::cmd::serve::hedgedoc::check_startup_slug_collisions;
-use crate::db::Database;
 use crate::cmd::serve::config::ResolvedGit;
 use crate::cmd::serve::config::ResolvedServeConfig;
 use crate::cmd::serve::edit::edit_get_handler;
@@ -49,6 +47,7 @@ use crate::cmd::serve::handlers::sync_handler;
 use crate::cmd::serve::hedgedoc::build_combined_infos;
 use crate::cmd::serve::hedgedoc::build_note;
 use crate::cmd::serve::hedgedoc::build_source_lossless;
+use crate::cmd::serve::hedgedoc::check_startup_slug_collisions;
 use crate::cmd::serve::hedgedoc::error_note;
 use crate::cmd::serve::hedgedoc::source_uri_from_url;
 use crate::cmd::serve::hedgedoc::spawn_hedgedoc_sync_task;
@@ -59,6 +58,7 @@ use crate::cmd::serve::state::SharedSession;
 use crate::cmd::serve::state::evict_idle_sessions;
 use crate::cmd::serve::stats::collection_stats_handler;
 use crate::cmd::signals::terminate_signal;
+use crate::db::Database;
 use crate::error::ErrorReport;
 use crate::error::Fallible;
 use crate::types::timestamp::Timestamp;
@@ -110,7 +110,8 @@ fn sweep_dangling_sessions(
                                 rc.db_path.display()
                             ))
                         })?;
-                        Database::new(db_path).and_then(|db| db.close_dangling_sessions(stale_before))
+                        Database::new(db_path)
+                            .and_then(|db| db.close_dangling_sessions(stale_before))
                     })();
                     (rc.slug.clone(), closed)
                 })

@@ -15,9 +15,9 @@ use maud::html;
 use serde::Deserialize;
 
 use crate::cmd::drill::template::page_template;
+use crate::cmd::run_blocking;
 use crate::cmd::serve::git::commit_edit;
 use crate::cmd::serve::handlers::find_collection;
-use crate::cmd::run_blocking;
 use crate::cmd::serve::state::AppState;
 use crate::db::Database;
 use crate::error::ErrorReport;
@@ -264,7 +264,9 @@ fn edit_post_inner(
         Ok(counts) => counts,
         Err(e) => {
             revert_file(&file_path, &file_content)?;
-            return fail(format!("Edit reverted: the review history could not be updated: {e}"));
+            return fail(format!(
+                "Edit reverted: the review history could not be updated: {e}"
+            ));
         }
     };
 

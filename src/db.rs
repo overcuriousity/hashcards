@@ -101,7 +101,11 @@ fn card_exists_in(conn: &Connection, card_hash: CardHash) -> Fallible<bool> {
 
 /// Shared by `Database::insert_card_if_new` and `apply_edit_migration`, which
 /// needs it inside a `Transaction` rather than on `&self`.
-fn insert_card_if_new_in(conn: &Connection, card_hash: CardHash, added_at: Timestamp) -> Fallible<()> {
+fn insert_card_if_new_in(
+    conn: &Connection,
+    card_hash: CardHash,
+    added_at: Timestamp,
+) -> Fallible<()> {
     let sql = "insert into cards (card_hash, added_at, review_count) values (?, ?, 0) on conflict (card_hash) do nothing;";
     conn.execute(sql, params![card_hash, added_at])?;
     Ok(())
@@ -294,11 +298,11 @@ impl Database {
     /// close_session when the session finishes.
     pub fn create_session(&self, started_at: Timestamp) -> Fallible<i64> {
         let sql = "insert into sessions (started_at, ended_at, last_seen_at) values (?, ?, ?) returning session_id;";
-        let session_id: i64 = self
-            .conn
-            .query_row(sql, params![started_at, started_at, started_at], |row| {
-                row.get(0)
-            })?;
+        let session_id: i64 =
+            self.conn
+                .query_row(sql, params![started_at, started_at, started_at], |row| {
+                    row.get(0)
+                })?;
         Ok(session_id)
     }
 
@@ -441,7 +445,6 @@ impl Database {
         }
         Ok(result)
     }
-
 
     /// Count non-voided reviews per day from `since` (inclusive) onward,
     /// ascending. Days with no reviews are absent. Range-scans the indexed
@@ -615,7 +618,6 @@ impl Database {
     pub fn insert_card_if_new(&self, card_hash: CardHash, added_at: Timestamp) -> Fallible<()> {
         insert_card_if_new_in(&self.conn, card_hash, added_at)
     }
-
 
     /// Does a bookmark for this card hash exist?
     pub fn bookmark_exists(&self, card_hash: CardHash) -> Fallible<bool> {
@@ -853,9 +855,7 @@ fn migrate_add_session_liveness(tx: &Transaction) -> Fallible<()> {
         )?;
     }
     if !has("closed")? {
-        tx.execute_batch(
-            "alter table sessions add column closed integer not null default 0;",
-        )?;
+        tx.execute_batch("alter table sessions add column closed integer not null default 0;")?;
         // A row whose end time was moved off its start time was closed.
         tx.execute_batch("update sessions set closed = 1 where ended_at <> started_at;")?;
     }
@@ -1677,7 +1677,13 @@ mod tests {
         db.insert_card(old_hash, now)?;
         db.insert_bookmark(old_hash, Some("note".to_string()), now)?;
         let counts = db.apply_edit_migration(&[(old_hash, new_hash)], &[], now)?;
-        assert_eq!(counts, EditMigrationCounts { renamed: 1, collided: 0 });
+        assert_eq!(
+            counts,
+            EditMigrationCounts {
+                renamed: 1,
+                collided: 0
+            }
+        );
         assert!(!db.bookmark_exists(old_hash)?);
         assert!(db.bookmark_exists(new_hash)?);
         let bm = db.get_bookmark(new_hash)?.unwrap();
@@ -1698,7 +1704,13 @@ mod tests {
         db.insert_card(hash_a, now)?;
         db.insert_card(hash_b, now)?;
         let counts = db.apply_edit_migration(&[(hash_a, hash_b)], &[], now)?;
-        assert_eq!(counts, EditMigrationCounts { renamed: 0, collided: 1 });
+        assert_eq!(
+            counts,
+            EditMigrationCounts {
+                renamed: 0,
+                collided: 1
+            }
+        );
         assert!(db.card_exists(hash_a)?);
         assert!(db.card_exists(hash_b)?);
         Ok(())
@@ -1716,7 +1728,13 @@ mod tests {
         let now = Timestamp::now();
         // Neither hash has a card row yet.
         let counts = db.apply_edit_migration(&[(old_hash, new_hash)], &[], now)?;
-        assert_eq!(counts, EditMigrationCounts { renamed: 0, collided: 0 });
+        assert_eq!(
+            counts,
+            EditMigrationCounts {
+                renamed: 0,
+                collided: 0
+            }
+        );
         assert!(!db.card_exists(old_hash)?);
         assert!(db.card_exists(new_hash)?);
         Ok(())
@@ -1734,7 +1752,13 @@ mod tests {
         let now = Timestamp::now();
         db.insert_card(a, now)?;
         let counts = db.apply_edit_migration(&[(a, b)], &[b, c], now)?;
-        assert_eq!(counts, EditMigrationCounts { renamed: 1, collided: 0 });
+        assert_eq!(
+            counts,
+            EditMigrationCounts {
+                renamed: 1,
+                collided: 0
+            }
+        );
         assert!(!db.card_exists(a)?);
         assert!(db.card_exists(b)?);
         assert!(db.card_exists(c)?);
@@ -1963,6 +1987,4 @@ mod tests {
         assert_eq!(db.retention_since(since)?, None);
         Ok(())
     }
-
-
 }

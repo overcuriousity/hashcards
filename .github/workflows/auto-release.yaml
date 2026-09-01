@@ -1,0 +1,72 @@
+name: Auto Release
+
+# Every merge to master that adds anything to CHANGELOG.xml's <unreleased>
+# section is released automatically: the unreleased content is promoted to
+# a new dated <release>, Cargo.toml/Cargo.lock are bumped to match, the
+# commit is tagged, and the existing (manual-dispatch) Release workflow is
+# invoked to build and publish the binaries.
+on:
+  push:
+    branches: [master]
+
+concurrency:
+  group: auto-release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  bump:
+    # A push made by this job's own commit is excluded as a backstop, though
+    # GITHUB_TOKEN pushes don't retrigger workflows on their own.
+    if: "!contains(github.event.head_commit.message, 'chore(release):')"
+    runs-on: ubuntu-latest
+    outputs:
+      should_release: ${{ steps.check.outputs.should_release }}
+      version: ${{ steps.bump.outputs.version }}
+    steps:
+      - name: checkout
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          fetch-depth: 0
+
+      - name: check for unreleased changes
+        id: check
+        run: |
+          echo "should_release=$(python3 release.py has-unreleased)" >> "$GITHUB_OUTPUT"
+
+      - name: promote unreleased changes and bump version
+        id: bump
+        if: steps.check.outputs.should_release == 'true'
+        run: |
+          NEW_VERSION=$(python3 release.py bump)
+          sed -i "s/^version = \".*\"/version = \"${NEW_VERSION}\"/" Cargo.toml
+          sed -i "/^name = \"hashcards\"\$/,/^version = /{s/^version = \".*\"/version = \"${NEW_VERSION}\"/}" Cargo.lock
+          echo "version=${NEW_VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: validate CHANGELOG.xml against schema
+        if: steps.check.outputs.should_release == 'true'
+        uses: ChristophWurst/xmllint-action@7c54ff113fc0f6d4588a15cb4dfe31b6ecca5212
+        with:
+          xml-file: CHANGELOG.xml
+          xml-schema-file: CHANGELOG.xsd
+
+      - name: commit, tag, and push
+        if: steps.check.outputs.should_release == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add CHANGELOG.xml Cargo.toml Cargo.lock
+          git commit -m "chore(release): v${{ steps.bump.outputs.version }}"
+          git tag "v${{ steps.bump.outputs.version }}"
+          git push origin HEAD:master
+          git push origin "v${{ steps.bump.outputs.version }}"
+
+      - name: trigger the release build
+        if: steps.check.outputs.should_release == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh workflow run release.yaml --ref master

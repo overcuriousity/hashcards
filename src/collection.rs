@@ -132,7 +132,6 @@ fn parse_macros(content: &str) -> (Vec<(String, String)>, Vec<usize>) {
 mod tests {
     use std::fs::write;
 
-
     use super::*;
     use crate::error::Fallible;
     use crate::helper::create_tmp_directory;
@@ -186,7 +185,6 @@ mod tests {
         assert!(collection.duplicates.is_empty());
         Ok(())
     }
-
 
     /// Reloading a collection is stable: card hashes are content-derived, so
     /// a second load sees exactly the rows the first one wrote.

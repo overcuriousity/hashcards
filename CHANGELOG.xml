@@ -286,6 +286,9 @@
             <change author="claude">
                 Review intervals now get a small random jitter (default plus or minus 5%) to diffuse review peaks over time. Configurable via `--jitter` on `hashcards drill` and the `[defaults] jitter` key in the serve config; set to 0.0 to disable. (FEAT-05)
             </change>
+            <change author="claude">
+                Added a one-line installer (`install.sh`) that downloads, checksums, and installs the latest release binary. Release archives are now published with a `.sha256` checksum file alongside them. Every merge to master that has unreleased changelog entries now cuts a release automatically.
+            </change>
         </added>
         <changed>
             <change author="claude">

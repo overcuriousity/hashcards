@@ -6,8 +6,8 @@ use axum::response::Html;
 use maud::html;
 
 use crate::cmd::drill::state::ServerState;
-use crate::cmd::run_blocking;
 use crate::cmd::drill::template::page_template;
+use crate::cmd::run_blocking;
 use crate::cmd::stats_page::gather_stats;
 use crate::cmd::stats_page::render_stats_page;
 use crate::collection::Collection;

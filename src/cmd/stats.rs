@@ -78,7 +78,9 @@ fn write_stats_html(html: &str) -> Fallible<PathBuf> {
         .rand_bytes(12)
         .tempfile()?;
     let (mut file, path) = file.keep().map_err(|e| {
-        ErrorReport::new(format!("Could not write the stats page to a temporary file: {e}"))
+        ErrorReport::new(format!(
+            "Could not write the stats page to a temporary file: {e}"
+        ))
     })?;
     file.write_all(html.as_bytes())?;
     file.flush()?;

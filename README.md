@@ -44,7 +44,17 @@ For a larger example, see [my personal flashcards repo][fc].
 
 ## Installation
 
-You can download a binary from the the [releases](https://github.com/eudoxia0/hashcards/releases) page.
+Install the latest release with:
+
+```
+$ curl -fsSL https://raw.githubusercontent.com/overcuriousity/hashcards-web/master/install.sh | sh
+```
+
+This downloads the right binary for your OS/architecture (Linux x86_64 or
+macOS arm64) from the [releases](https://github.com/overcuriousity/hashcards-web/releases)
+page, verifies its checksum, and installs it to `~/.local/bin` (override
+with `HASHCARDS_INSTALL_DIR`). On Windows, or another architecture, download
+a binary from the releases page directly.
 
 If you have [cargo] installed, you can run:
 

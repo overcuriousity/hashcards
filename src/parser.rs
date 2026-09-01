@@ -2101,7 +2101,11 @@ A: Genetic material."#,
         let parser = make_test_parser();
         let cards = parser.parse(input)?;
         assert_eq!(cards.len(), 1, "only [answer] is a cloze deletion");
-        assert_cloze(&cards, "See [the [inner] docs](http://x) for answer", &[(37, 42)]);
+        assert_cloze(
+            &cards,
+            "See [the [inner] docs](http://x) for answer",
+            &[(37, 42)],
+        );
         Ok(())
     }
 
