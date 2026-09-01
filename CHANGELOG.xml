@@ -9,9 +9,6 @@
             <change author="claude">
                 An `[oidc].session_secret` shorter than 32 bytes is now rejected at config load with a clear message instead of panicking at startup, and a collection or HedgeDoc entry that declares an `owner` without an `[oidc]` section is rejected too — previously it loaded cleanly and then 404'd for everyone, since nobody is ever logged in to match the owner.
             </change>
-            <change author="claude">
-                Fixed four Windows-only test failures surfaced by the Windows CI job: a collection path with a root but no drive prefix (e.g. `/etc`) is now rejected as absolute on every platform, not just Unix, closing a directory-traversal check that Windows' path-joining rules could otherwise bypass. A git-backed edit test no longer canonicalizes its temp path before handing it to `git clone`, which misread Windows' `\\?\` verbatim-path prefix as a UNC hostname. A double-quote-in-filename attribute-escaping test is now skipped on Windows, where filesystems refuse to create such a file in the first place.
-            </change>
         </fixed>
         <changed>
             <change author="claude">
@@ -34,12 +31,21 @@
             <change author="claude">
                 `[[hedgedoc]]` owners are now lowercased like collection owners, so a config written with mixed case matches the OIDC email claim as documented instead of making the owner's own notes unreachable.
             </change>
-            <change author="claude">
-                Updated the `h2` dependency to 0.4.19, fixing RUSTSEC-2026-0258 (unbounded empty DATA frames).
-            </change>
         </security>
     </unreleased>
     <releases>
+        <release version="0.4.1" date="2026-09-01">
+            <fixed>
+                <change author="claude">
+                Fixed four Windows-only test failures surfaced by the Windows CI job: a collection path with a root but no drive prefix (e.g. `/etc`) is now rejected as absolute on every platform, not just Unix, closing a directory-traversal check that Windows' path-joining rules could otherwise bypass. A git-backed edit test no longer canonicalizes its temp path before handing it to `git clone`, which misread Windows' `\\?\` verbatim-path prefix as a UNC hostname. A double-quote-in-filename attribute-escaping test is now skipped on Windows, where filesystems refuse to create such a file in the first place.
+            </change>
+            </fixed>
+            <security>
+                <change author="claude">
+                Updated the `h2` dependency to 0.4.19, fixing RUSTSEC-2026-0258 (unbounded empty DATA frames).
+            </change>
+            </security>
+        </release>
         <release version="0.4.0" date="2026-09-01">
             <breaking>
                 <change author="mstoeck3">
