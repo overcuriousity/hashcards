@@ -47,12 +47,14 @@ mod tests {
                 slug: slug.to_string(),
                 coll_dir: coll_dir.clone(),
                 db_path: coll_dir.join("hashcards.db"),
+                owner: None,
             }],
             data_dir: None,
             config_path: None,
             hedgedoc_entries: Vec::new(),
             session_timeout_minutes: 1440,
             _temp_dir: None,
+            oidc: None,
         };
         spawn(async move { start_serve(config).await });
         wait_for_server(TEST_HOST, port).await?;
@@ -100,12 +102,14 @@ mod tests {
                 slug: slug.clone(),
                 coll_dir: coll_dir.clone(),
                 db_path: coll_dir.join("hashcards.db"),
+                owner: None,
             }],
             data_dir: None,
             config_path: None,
             hedgedoc_entries: Vec::new(),
             session_timeout_minutes: 1440,
             _temp_dir: None,
+            oidc: None,
         };
 
         spawn(async move { start_serve(config).await });
@@ -228,6 +232,7 @@ mod tests {
             hedgedoc_entries: Vec::new(),
             session_timeout_minutes: 1440,
             _temp_dir: None,
+            oidc: None,
         };
         spawn(async move { start_serve(config).await });
         wait_for_server(TEST_HOST, port).await?;
@@ -275,12 +280,14 @@ mod tests {
                 slug: slug.clone(),
                 coll_dir: coll_dir.clone(),
                 db_path: coll_dir.join("hashcards.db"),
+                owner: None,
             }],
             data_dir: None,
             config_path: None,
             hedgedoc_entries: Vec::new(),
             session_timeout_minutes: 1440,
             _temp_dir: None,
+            oidc: None,
         };
         spawn(async move { start_serve(config).await });
         wait_for_server(TEST_HOST, port).await?;
@@ -352,12 +359,14 @@ mod tests {
                 slug: slug.clone(),
                 coll_dir: coll_dir.clone(),
                 db_path: db_path.clone(),
+                owner: None,
             }],
             data_dir: None,
             config_path: None,
             hedgedoc_entries: Vec::new(),
             session_timeout_minutes: 1440,
             _temp_dir: None,
+            oidc: None,
         };
         spawn(async move { start_serve(config).await });
         wait_for_server(TEST_HOST, port).await?;
@@ -426,12 +435,14 @@ mod tests {
                 slug: slug.clone(),
                 coll_dir: coll_dir.clone(),
                 db_path: db_path.clone(),
+                owner: None,
             }],
             data_dir: None,
             config_path: None,
             hedgedoc_entries: Vec::new(),
             session_timeout_minutes: 1440,
             _temp_dir: None,
+            oidc: None,
         };
         spawn(async move { start_serve(config).await });
         wait_for_server(TEST_HOST, port).await?;
@@ -482,12 +493,14 @@ mod tests {
                 slug: slug.clone(),
                 coll_dir: coll_dir.clone(),
                 db_path: coll_dir.join("hashcards.db"),
+                owner: None,
             }],
             data_dir: None,
             config_path: None,
             hedgedoc_entries: Vec::new(),
             session_timeout_minutes: 1440,
             _temp_dir: None,
+            oidc: None,
         };
 
         spawn(async move { start_serve(config).await });

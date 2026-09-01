@@ -222,6 +222,7 @@ pub async fn start_serve(config: ResolvedServeConfig) -> Fallible<()> {
             slug: c.slug.clone(),
             coll_dir: c.coll_dir.clone(),
             db_path: c.db_path.clone(),
+            owner: None,
         })
         .collect();
 

@@ -119,6 +119,7 @@ mod tests {
                 slug: "hedgedoc-notes".to_string(),
                 coll_dir: PathBuf::from("/tmp/notes"),
                 db_path: PathBuf::from("/tmp/notes.db"),
+                owner: None,
             },
             notes: vec![HedgedocNote {
                 url: url.to_string(),

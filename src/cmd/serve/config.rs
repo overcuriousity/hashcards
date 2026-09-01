@@ -22,6 +22,8 @@ pub struct ServeConfig {
     pub git: Option<GitSection>,
     #[serde(default)]
     pub defaults: DefaultsSection,
+    #[serde(default)]
+    pub oidc: Option<OidcSection>,
     #[serde(rename = "collection", default)]
     pub collections: Vec<CollectionEntry>,
     #[serde(rename = "hedgedoc", default)]
@@ -31,6 +33,8 @@ pub struct ServeConfig {
 #[derive(Deserialize, Serialize, Clone)]
 pub struct HedgedocEntry {
     pub url: String,
+    #[serde(default)]
+    pub owner: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -93,6 +97,35 @@ fn default_commit_author_email() -> String {
 }
 
 #[derive(Deserialize)]
+pub struct OidcSection {
+    pub issuer_url: String,
+    pub client_id: String,
+    pub client_secret: String,
+    pub external_url: String,
+    pub session_secret: String,
+    #[serde(default = "default_oidc_scopes")]
+    pub scopes: Vec<String>,
+}
+
+fn default_oidc_scopes() -> Vec<String> {
+    vec![
+        "openid".to_string(),
+        "email".to_string(),
+        "profile".to_string(),
+    ]
+}
+
+#[derive(Clone)]
+pub struct ResolvedOidc {
+    pub issuer_url: String,
+    pub client_id: String,
+    pub client_secret: String,
+    pub external_url: String,
+    pub session_secret: String,
+    pub scopes: Vec<String>,
+}
+
+#[derive(Deserialize)]
 pub struct DefaultsSection {
     #[serde(default = "default_answer_controls")]
     pub answer_controls: AnswerControlsConfig,
@@ -144,6 +177,8 @@ impl From<AnswerControlsConfig> for AnswerControls {
 pub struct CollectionEntry {
     pub name: String,
     pub path: String,
+    #[serde(default)]
+    pub owner: Option<String>,
 }
 
 impl CollectionEntry {
@@ -189,6 +224,8 @@ pub struct ResolvedCollection {
     pub slug: String,
     pub coll_dir: PathBuf,
     pub db_path: PathBuf,
+    /// Owning user's email (lowercased), when `[oidc]` is configured.
+    pub owner: Option<String>,
 }
 
 pub struct TempDirTracker {
@@ -236,6 +273,9 @@ pub struct ResolvedServeConfig {
     pub session_timeout_minutes: u64,
     /// Kept alive for the process lifetime so the OS temp directory is cleaned up.
     pub _temp_dir: Option<std::sync::Arc<TempDirTracker>>,
+    /// Set when `[oidc]` is configured. Gates every route except `/auth/*`
+    /// behind login and scopes collections/notes to their `owner`.
+    pub oidc: Option<ResolvedOidc>,
 }
 
 /// Reject collections whose names map to the same URL slug.
@@ -303,11 +343,54 @@ impl ResolvedServeConfig {
                     coll_dir: repo_dir.join(&entry.path),
                     db_path: db_dir.join(format!("{slug}.db")),
                     slug,
+                    owner: entry.owner.as_ref().map(|o| o.to_lowercase()),
                 })
             })
             .collect::<Fallible<Vec<ResolvedCollection>>>()?;
 
         check_slug_collisions(&collections)?;
+
+        let oidc = match config.oidc {
+            None => None,
+            Some(o) => {
+                if !o.scopes.iter().any(|s| s == "openid") || !o.scopes.iter().any(|s| s == "email")
+                {
+                    return fail(
+                        "configuration error: [oidc].scopes must include `openid` and `email` \
+                         (the email claim is required to match collections to their owner)",
+                    );
+                }
+                Some(ResolvedOidc {
+                    issuer_url: o.issuer_url,
+                    client_id: o.client_id,
+                    client_secret: o.client_secret,
+                    external_url: o.external_url,
+                    session_secret: o.session_secret,
+                    scopes: o.scopes,
+                })
+            }
+        };
+
+        if oidc.is_some() {
+            for c in &collections {
+                if c.owner.is_none() {
+                    return fail(format!(
+                        "configuration error: [oidc] is enabled, so every collection must \
+                         declare an `owner`, but collection '{}' has none",
+                        c.name
+                    ));
+                }
+            }
+            for h in &config.hedgedoc {
+                if h.owner.is_none() {
+                    return fail(format!(
+                        "configuration error: [oidc] is enabled, so every [[hedgedoc]] entry \
+                         must declare an `owner`, but the entry for '{}' has none",
+                        h.url
+                    ));
+                }
+            }
+        }
 
         let git = match config.git {
             None => None,
@@ -340,6 +423,7 @@ impl ResolvedServeConfig {
             hedgedoc_entries: config.hedgedoc,
             session_timeout_minutes: config.server.session_timeout_minutes,
             _temp_dir: None,
+            oidc,
         })
     }
 
@@ -372,6 +456,7 @@ impl ResolvedServeConfig {
                 slug,
                 coll_dir: dir,
                 db_path,
+                owner: None,
             });
         }
 
@@ -388,6 +473,7 @@ impl ResolvedServeConfig {
             hedgedoc_entries: Vec::new(),
             session_timeout_minutes: default_session_timeout_minutes(),
             _temp_dir: None,
+            oidc: None,
         })
     }
 }
@@ -516,6 +602,83 @@ path = "beta"
             toml::from_str(toml_str).map_err(|e| ErrorReport::new(e.to_string()))?;
         let resolved = ResolvedServeConfig::from_toml(config)?;
         assert_eq!(resolved.collections.len(), 2);
+        Ok(())
+    }
+
+    /// When `[oidc]` is present, every collection must declare an `owner`.
+    #[test]
+    fn test_oidc_requires_owner_on_every_collection() -> Fallible<()> {
+        let data_dir = current_dir()?.join("var-lib-hashcards-oidc-owner-test");
+        let toml_str = format!(
+            "[server]\ndata_dir = \"{}\"\n\n\
+             [oidc]\n\
+             issuer_url = \"https://idp.example.com\"\n\
+             client_id = \"abc\"\n\
+             client_secret = \"secret\"\n\
+             external_url = \"https://hashcards.example.com\"\n\
+             session_secret = \"a-very-long-random-session-secret-value\"\n\n\
+             [[collection]]\n\
+             name = \"Japanese\"\n\
+             path = \"japanese\"\n",
+            data_dir.display()
+        );
+        let config: ServeConfig = toml::from_str(&toml_str)?;
+        match ResolvedServeConfig::from_toml(config) {
+            Ok(_) => panic!("expected an error for a collection with no owner while [oidc] is set"),
+            Err(e) => assert!(
+                e.to_string().contains("Japanese") && e.to_string().contains("owner"),
+                "error should name the offending collection and mention `owner`: {e}"
+            ),
+        }
+        Ok(())
+    }
+
+    /// When `[oidc]` is present and every collection has an `owner`, config
+    /// loads cleanly and the owner is lowercased for case-insensitive
+    /// matching later.
+    #[test]
+    fn test_oidc_with_owner_on_every_collection_loads() -> Fallible<()> {
+        let data_dir = current_dir()?.join("var-lib-hashcards-oidc-owner-ok-test");
+        let toml_str = format!(
+            "[server]\ndata_dir = \"{}\"\n\n\
+             [oidc]\n\
+             issuer_url = \"https://idp.example.com\"\n\
+             client_id = \"abc\"\n\
+             client_secret = \"secret\"\n\
+             external_url = \"https://hashcards.example.com\"\n\
+             session_secret = \"a-very-long-random-session-secret-value\"\n\n\
+             [[collection]]\n\
+             name = \"Japanese\"\n\
+             path = \"japanese\"\n\
+             owner = \"Me@Example.com\"\n",
+            data_dir.display()
+        );
+        let config: ServeConfig = toml::from_str(&toml_str)?;
+        let resolved = ResolvedServeConfig::from_toml(config)?;
+        assert_eq!(
+            resolved.collections[0].owner.as_deref(),
+            Some("me@example.com")
+        );
+        assert!(resolved.oidc.is_some());
+        Ok(())
+    }
+
+    /// Without `[oidc]`, an `owner`-less collection loads exactly as before
+    /// — the new field is inert.
+    #[test]
+    fn test_no_oidc_owner_field_is_inert() -> Fallible<()> {
+        let data_dir = current_dir()?.join("var-lib-hashcards-no-oidc-test");
+        let toml_str = format!(
+            "[server]\ndata_dir = \"{}\"\n\n\
+             [[collection]]\n\
+             name = \"Japanese\"\n\
+             path = \"japanese\"\n",
+            data_dir.display()
+        );
+        let config: ServeConfig = toml::from_str(&toml_str)?;
+        let resolved = ResolvedServeConfig::from_toml(config)?;
+        assert!(resolved.oidc.is_none());
+        assert_eq!(resolved.collections[0].owner, None);
         Ok(())
     }
 }

@@ -335,6 +335,9 @@ pub fn resolved_collection(source_uri: &str, data_dir: &Path) -> ResolvedCollect
         slug,
         coll_dir,
         db_path,
+        // Threaded through properly once the caller has the owning
+        // HedgedocEntry available (Task 3).
+        owner: None,
     }
 }
 
@@ -762,7 +765,13 @@ pub fn build_combined_infos(
 pub fn all_hedgedoc_entries(hedgedoc_sources: &[HedgedocSource]) -> Vec<HedgedocEntry> {
     hedgedoc_sources
         .iter()
-        .flat_map(|s| s.notes.iter().map(|n| HedgedocEntry { url: n.url.clone() }))
+        .flat_map(|s| {
+            let owner = s.collection.owner.clone();
+            s.notes.iter().map(move |n| HedgedocEntry {
+                url: n.url.clone(),
+                owner: owner.clone(),
+            })
+        })
         .collect()
 }
 
@@ -926,9 +935,11 @@ mod tests {
         let entries = vec![
             HedgedocEntry {
                 url: "https://notes.example.com/doc1".to_string(),
+                owner: None,
             },
             HedgedocEntry {
                 url: "https://notes.example.com/doc2".to_string(),
+                owner: None,
             },
         ];
         persist_hedgedoc_entries(&config_path, &entries).unwrap();
@@ -962,6 +973,7 @@ mod tests {
 
         let entries = vec![HedgedocEntry {
             url: "https://new.example.com/new".to_string(),
+            owner: None,
         }];
         persist_hedgedoc_entries(&config_path, &entries).unwrap();
 
@@ -1075,6 +1087,7 @@ mod tests {
                 slug: slug_for_source_uri(uri),
                 coll_dir: PathBuf::from("/nonexistent/hedgedoc/test"),
                 db_path: PathBuf::from("/nonexistent/db/test.db"),
+                owner: None,
             },
             notes: vec![test_note_for(url)],
         }
@@ -1243,6 +1256,7 @@ mod tests {
             slug: "hedgedoc-src".to_string(),
             coll_dir: coll_dir.clone(),
             db_path: db_path.clone(),
+            owner: None,
         };
         let outcome = DeleteOutcome {
             snapshot: Vec::new(),
@@ -1278,6 +1292,7 @@ mod tests {
             slug: "hedgedoc-src".to_string(),
             coll_dir: coll_dir.clone(),
             db_path: dir.path().join("db").join("hedgedoc-src.db"),
+            owner: None,
         };
         let outcome = DeleteOutcome {
             snapshot: Vec::new(), // irrelevant for cleanup
@@ -1328,6 +1343,7 @@ mod tests {
             slug: slug.clone(),
             coll_dir: PathBuf::from("/tmp/notes"),
             db_path: PathBuf::from("/tmp/notes.db"),
+            owner: None,
         }];
         let sources = vec![HedgedocSource {
             source_uri: uri.to_string(),
@@ -1336,6 +1352,7 @@ mod tests {
                 slug,
                 coll_dir: PathBuf::from("/tmp/hedge"),
                 db_path: PathBuf::from("/tmp/hedge.db"),
+                owner: None,
             },
             notes: Vec::new(),
         }];
@@ -1354,6 +1371,7 @@ mod tests {
                 slug: slug_for_source_uri(uri),
                 coll_dir: PathBuf::from("/tmp/hedge"),
                 db_path: PathBuf::from("/tmp/hedge.db"),
+                owner: None,
             },
             notes: Vec::new(),
         };
@@ -1377,12 +1395,14 @@ mod tests {
             slug: hedgedoc_slug.clone(),
             coll_dir: PathBuf::from("/tmp/sneaky"),
             db_path: PathBuf::from("/tmp/sneaky.db"),
+            owner: None,
         };
         let harmless = ResolvedCollection {
             name: "Fine".to_string(),
             slug: "fine".to_string(),
             coll_dir: PathBuf::from("/tmp/fine"),
             db_path: PathBuf::from("/tmp/fine.db"),
+            owner: None,
         };
 
         let collections = vec![harmless, colliding];
