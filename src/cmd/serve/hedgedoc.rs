@@ -804,6 +804,13 @@ pub fn persist_hedgedoc_entries(config_path: &Path, entries: &[HedgedocEntry]) -
             .map(|e| {
                 let mut t = toml::map::Map::new();
                 t.insert("url".to_string(), toml::Value::String(e.url.clone()));
+                // `owner` must survive the round-trip: dropping it rewrites
+                // the config into one that `[oidc]` validation rejects at the
+                // next startup, and would re-slug the note to a fresh, empty
+                // database.
+                if let Some(owner) = &e.owner {
+                    t.insert("owner".to_string(), toml::Value::String(owner.clone()));
+                }
                 toml::Value::Table(t)
             })
             .collect();
@@ -1453,5 +1460,78 @@ mod tests {
         let hit = find_slug_collision(&hedgedoc_slug, &collections);
         assert_eq!(hit.map(|c| c.name.as_str()), Some("Sneaky"));
         assert!(find_slug_collision("something-else", &collections).is_none());
+    }
+
+    /// Regression: `owner` must survive a config rewrite. Dropping it left a
+    /// config that `[oidc]` validation rejects at the next startup, and would
+    /// have re-slugged every note onto a fresh, empty review database.
+    #[test]
+    fn persist_keeps_the_owner_of_each_entry() -> Fallible<()> {
+        use crate::cmd::serve::config::ResolvedServeConfig;
+        use crate::cmd::serve::config::ServeConfig;
+
+        let dir = tempfile::tempdir()?;
+        let config_path = dir.path().join("hashcards.toml");
+        let data_dir = dir.path().join("data");
+        write_toml(
+            &config_path,
+            &format!(
+                "[server]\ndata_dir = {:?}\n\n\
+                 [oidc]\n\
+                 issuer_url = \"https://idp.example.com\"\n\
+                 client_id = \"abc\"\n\
+                 client_secret = \"secret\"\n\
+                 external_url = \"https://hashcards.example.com\"\n\
+                 session_secret = \"a-very-long-random-session-secret-value\"\n",
+                data_dir
+            ),
+        );
+
+        let entries = vec![
+            HedgedocEntry {
+                url: "https://pad.example.com/alice".to_string(),
+                owner: Some("alice@example.com".to_string()),
+            },
+            HedgedocEntry {
+                url: "https://pad.example.com/bob".to_string(),
+                owner: Some("bob@example.com".to_string()),
+            },
+        ];
+        persist_hedgedoc_entries(&config_path, &entries)?;
+
+        // The rewritten config must still load: with `[oidc]` set, an entry
+        // without an owner is a hard error.
+        let content = std::fs::read_to_string(&config_path)?;
+        let config: ServeConfig = toml::from_str(&content)?;
+        let resolved = ResolvedServeConfig::from_toml(config)?;
+        assert_eq!(resolved.hedgedoc_entries.len(), 2);
+        assert_eq!(
+            resolved.hedgedoc_entries[0].owner.as_deref(),
+            Some("alice@example.com")
+        );
+        assert_eq!(
+            resolved.hedgedoc_entries[1].owner.as_deref(),
+            Some("bob@example.com")
+        );
+        Ok(())
+    }
+
+    /// An entry with no owner (no `[oidc]`) stays ownerless rather than
+    /// gaining an empty `owner` key.
+    #[test]
+    fn persist_omits_owner_when_there_is_none() -> Fallible<()> {
+        let dir = tempfile::tempdir()?;
+        let config_path = dir.path().join("hashcards.toml");
+        write_toml(&config_path, "[server]\ndata_dir = \"/tmp\"\n");
+        persist_hedgedoc_entries(
+            &config_path,
+            &[HedgedocEntry {
+                url: "https://pad.example.com/abc".to_string(),
+                owner: None,
+            }],
+        )?;
+        let content = std::fs::read_to_string(&config_path)?;
+        assert!(!content.contains("owner"), "config: {content}");
+        Ok(())
     }
 }

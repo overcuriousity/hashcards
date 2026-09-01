@@ -31,6 +31,12 @@
             <change author="claude">
                 `[[hedgedoc]]` owners are now lowercased like collection owners, so a config written with mixed case matches the OIDC email claim as documented instead of making the owner's own notes unreachable.
             </change>
+            <change author="claude">
+                A `[[hedgedoc]]` entry's `owner` now survives the config rewrite that follows adding or deleting a note. It was being dropped, which left a config that `[oidc]` validation rejects on the next startup, and would have re-keyed every note onto a fresh, empty review database.
+            </change>
+            <change author="claude">
+                An unauthenticated non-GET request now returns 401 with a "session expired" page instead of a redirect. A redirect is a 303, which replays the request as a GET of a POST-only path — a 405 with the submitted form data silently discarded. An expired or malformed login-flow cookie is also cleared from the browser now rather than left until its own expiry.
+            </change>
         </security>
     </unreleased>
     <releases>

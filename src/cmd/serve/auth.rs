@@ -138,16 +138,55 @@ pub(super) fn set_flow_cookie(
 }
 
 /// Consumes the flow cookie: returns the jar with it removed, and the state
-/// it held, if present and unexpired.
-pub(super) fn take_flow_cookie(jar: SignedCookieJar) -> Option<(SignedCookieJar, OidcFlowState)> {
-    let cookie = jar.get(FLOW_COOKIE)?;
-    let payload: FlowPayload = serde_json::from_str(cookie.value()).ok()?;
-    let jar = jar.remove(Cookie::from(FLOW_COOKIE));
-    let expires_at = Timestamp::try_from(payload.expires_at).ok()?;
+/// it held, if it was present and unexpired.
+///
+/// The jar is returned on the `Err` side too, so a malformed or expired
+/// cookie is still cleared from the browser rather than left to linger until
+/// its own `Max-Age` lapses.
+pub(super) fn take_flow_cookie(
+    jar: SignedCookieJar,
+) -> Result<(SignedCookieJar, OidcFlowState), SignedCookieJar> {
+    let Some(cookie) = jar.get(FLOW_COOKIE) else {
+        return Err(jar);
+    };
+    let mut removal = Cookie::from(FLOW_COOKIE);
+    removal.set_path("/");
+    let jar = jar.remove(removal);
+
+    let Ok(payload) = serde_json::from_str::<FlowPayload>(cookie.value()) else {
+        return Err(jar);
+    };
+    let Ok(expires_at) = Timestamp::try_from(payload.expires_at) else {
+        return Err(jar);
+    };
     if expires_at.into_inner() < Timestamp::now().into_inner() {
-        return None;
+        return Err(jar);
     }
-    Some((jar, payload.state))
+    Ok((jar, payload.state))
+}
+
+/// Shown when a non-GET request arrives with no valid session. A 303 would
+/// replay it as a GET and lose the request body, so the user is told plainly.
+fn session_expired_page() -> String {
+    maud::html! {
+        (maud::DOCTYPE)
+        html lang="en" {
+            head {
+                meta charset="utf-8";
+                meta name="viewport" content="width=device-width, initial-scale=1";
+                title { "Session expired" }
+                link rel="stylesheet" href="/style.css";
+            }
+            body {
+                div.error {
+                    h1 { "Session expired" }
+                    p { "Your login expired before this action reached the server, so it was not applied." }
+                    p { a href="/" { "\u{2190} Log in and start again" } }
+                }
+            }
+        }
+    }
+    .into_string()
 }
 
 /// Discovery (`CoreClient::from_provider_metadata`) always sets the
@@ -304,12 +343,20 @@ pub(super) async fn callback_handler(
         return (StatusCode::NOT_FOUND, "OIDC is not configured").into_response();
     };
 
-    let Some((jar, flow)) = take_flow_cookie(jar) else {
-        return (
-            StatusCode::BAD_REQUEST,
-            "Login session expired or was not started here. Try logging in again.",
-        )
-            .into_response();
+    let (jar, flow) = match take_flow_cookie(jar) {
+        Ok(pair) => pair,
+        // The jar carries the removal of the stale cookie, so it is cleared
+        // even on this path.
+        Err(jar) => {
+            return (
+                jar,
+                (
+                    StatusCode::BAD_REQUEST,
+                    "Login session expired or was not started here. Try logging in again.",
+                ),
+            )
+                .into_response();
+        }
     };
 
     let Some(code) = query.get("code").cloned() else {
@@ -441,6 +488,15 @@ pub(super) async fn require_auth(
             let response = next.run(request).await;
             (jar, response).into_response()
         }
+        // Only a GET can be replayed after login. `Redirect` is a 303, which
+        // turns any other method into a GET of a POST-only path — a 405, with
+        // the submitted form data silently discarded. Those get an explicit
+        // "session expired" page instead, so the loss is visible.
+        None if request.method() != axum::http::Method::GET => (
+            StatusCode::UNAUTHORIZED,
+            axum::response::Html(session_expired_page()),
+        )
+            .into_response(),
         None => {
             let return_to = request.uri().to_string();
             let encoded = percent_encoding::utf8_percent_encode(&return_to, RETURN_TO_ENCODE_SET);
@@ -958,5 +1014,120 @@ mod tests {
         let jar = set_session_cookie(jar, "me@example.com", false);
         let cookie = jar.get(SESSION_COOKIE).expect("cookie was just set");
         assert_ne!(cookie.secure(), Some(true));
+    }
+
+    /// An expired flow cookie must still be cleared from the browser, not
+    /// left to linger until its own `Max-Age` lapses.
+    #[test]
+    fn test_expired_flow_cookie_is_still_removed() {
+        let key = Key::generate();
+        let jar = SignedCookieJar::new(key);
+        let expired = Timestamp::now().minus_minutes(60);
+        let payload = FlowPayload {
+            state: OidcFlowState {
+                csrf_token: "csrf".to_string(),
+                nonce: "nonce".to_string(),
+                pkce_verifier: "verifier".to_string(),
+                return_to: "/".to_string(),
+            },
+            expires_at: expired.to_string(),
+        };
+        let value = serde_json::to_string(&payload).expect("serializable");
+        let jar = jar.add(Cookie::new(FLOW_COOKIE, value));
+
+        let Err(jar) = take_flow_cookie(jar) else {
+            panic!("an expired flow cookie must not be accepted");
+        };
+        assert!(
+            jar.get(FLOW_COOKIE).is_none(),
+            "the stale cookie must be removed from the jar"
+        );
+    }
+
+    /// A request with no flow cookie at all returns the jar unchanged.
+    #[test]
+    fn test_missing_flow_cookie_returns_the_jar() {
+        let key = Key::generate();
+        let jar = SignedCookieJar::new(key);
+        assert!(matches!(take_flow_cookie(jar), Err(_)));
+    }
+
+    /// A non-GET request with no session must not be redirected: `Redirect`
+    /// is a 303, which replays the request as a GET of a POST-only path (405)
+    /// and silently discards the submitted form data. It gets an explicit 401
+    /// "session expired" page instead.
+    #[tokio::test]
+    async fn test_unauthenticated_post_gets_401_not_a_redirect() -> Fallible<()> {
+        use crate::cmd::serve::config::DefaultsSection;
+        use crate::cmd::serve::config::ResolvedCollection;
+        use crate::cmd::serve::config::ResolvedServeConfig;
+        use crate::cmd::serve::server::start_serve;
+
+        let client_secret = "test-client-secret-value";
+        let idp_port = spawn_mock_oidc_provider("me@example.com", client_secret).await?;
+
+        let dir = tempfile::tempdir()?;
+        std::fs::write(dir.path().join("Alpha.md"), "Q: What is 1+1?\nA: 2\n")?;
+
+        let port = portpicker::pick_unused_port().expect("no free port for serve");
+        let config = ResolvedServeConfig {
+            host: "127.0.0.1".to_string(),
+            port,
+            git: None,
+            defaults: DefaultsSection::default(),
+            collections: vec![ResolvedCollection {
+                name: "Test Collection".to_string(),
+                slug: "test-collection".to_string(),
+                coll_dir: dir.path().to_path_buf(),
+                db_path: dir.path().join("hashcards.db"),
+                owner: Some("me@example.com".to_string()),
+            }],
+            data_dir: None,
+            config_path: None,
+            hedgedoc_entries: Vec::new(),
+            session_timeout_minutes: 1440,
+            oidc: Some(ResolvedOidc {
+                issuer_url: format!("http://127.0.0.1:{idp_port}"),
+                client_id: "test-client".to_string(),
+                client_secret: client_secret.to_string(),
+                external_url: format!("http://127.0.0.1:{port}"),
+                session_secret: "a-very-long-random-session-secret-value".to_string(),
+                scopes: vec!["openid".to_string(), "email".to_string()],
+            }),
+            _temp_dir: None,
+        };
+        tokio::spawn(async move { start_serve(config).await });
+        crate::utils::wait_for_server("127.0.0.1", port).await?;
+
+        // No cookie jar and no redirect following: this is the raw response.
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()?;
+        let response = client
+            .post(format!(
+                "http://127.0.0.1:{port}/collection/test-collection/start"
+            ))
+            .form(&[("decks", "Alpha")])
+            .send()
+            .await?;
+        assert_eq!(
+            response.status(),
+            reqwest::StatusCode::UNAUTHORIZED,
+            "an unauthenticated POST must not be redirected"
+        );
+
+        // A GET is still redirected into the login flow, as before.
+        let response = client
+            .get(format!(
+                "http://127.0.0.1:{port}/collection/test-collection"
+            ))
+            .send()
+            .await?;
+        assert!(
+            response.status().is_redirection(),
+            "an unauthenticated GET must still redirect to login, got {}",
+            response.status()
+        );
+        Ok(())
     }
 }
