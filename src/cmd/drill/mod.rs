@@ -13,6 +13,7 @@
 // limitations under the License.
 
 pub mod cache;
+pub mod fonts;
 pub mod get;
 pub mod hljs;
 pub mod katex;

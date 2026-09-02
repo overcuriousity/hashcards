@@ -1,5 +1,16 @@
 <changelog>
     <unreleased>
+        <changed>
+            <change author="claude">
+            The interface is restyled to the corporate identity shared with Vestigo and engram: one palette of named tokens, a warm paper light theme and a cool ink dark theme that follows the system preference, Inter and JetBrains Mono served from the binary, and one button, field, table and notice shared by every page. The stylesheet was previously a set of per-page rules written against hard-coded greys, so pages built later — Decks, HedgeDoc sources, the stats charts — arrived with browser-default fieldsets and submit buttons, and nothing had a dark theme at all. `vendor/highlightjs` ships the light GitHub theme only, so its code colours are restated for dark here rather than a second theme being vendored.
+            </change>
+            <change author="claude">
+            The stylesheet, its fonts and the vendored KaTeX and highlight.js assets are served outside the OIDC gate. They hold nothing about anyone's cards, and the pages shown to a user who is not logged in — the login page and the "session expired" page — link them, so under `[oidc]` exactly those pages were the ones whose stylesheet redirected to `/auth/login` and arrived unstyled.
+            </change>
+            <change author="claude">
+            On the stats page a day with reviews on it is now drawn at least one percent high, and a day with none is drawn as nothing. Days rounding below one percent of the busiest day vanished, while the stylesheet's one-pixel floor drew a line across every empty day — so a chart of a quiet month read as a dashed rule rather than as zero.
+            </change>
+            </changed>
         </unreleased>
     <releases>
         <release version="0.4.5" date="2026-09-02">

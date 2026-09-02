@@ -11,6 +11,7 @@ use axum_extra::extract::cookie::Key;
 use tokio::net::TcpListener;
 use tokio::sync::RwLock;
 
+use crate::cmd::drill::fonts::font_handler;
 use crate::cmd::drill::hljs::HLJS_CSS_URL;
 use crate::cmd::drill::hljs::HLJS_JS_URL;
 use crate::cmd::drill::hljs::hljs_css_handler;
@@ -389,12 +390,20 @@ pub async fn start_serve(config: ResolvedServeConfig) -> Fallible<()> {
         .route(
             "/collection/{slug}/script.js",
             get(collection_script_handler),
-        )
+        );
+
+    // The stylesheet, its fonts and the vendored libraries hold nothing about
+    // anyone's cards, and every page that is shown to a logged-out user — the
+    // login page, the "session expired" page — links them. Behind the gate
+    // those links redirect to `/auth/login`, so exactly the pages a user meets
+    // before they have a session were the pages that arrived unstyled.
+    let static_routes = Router::new()
         .route("/manifest.json", get(manifest_handler))
         .route("/icons/icon-192.png", get(icon_192_handler))
         .route("/icons/icon-512.png", get(icon_512_handler))
         .route("/script.js", get(script_handler))
         .route("/style.css", get(style_handler))
+        .route("/fonts/{name}", get(font_handler))
         .route(KATEX_CSS_URL, get(katex_css_handler))
         .route(KATEX_JS_URL, get(katex_js_handler))
         .route(KATEX_MHCHEM_JS_URL, get(katex_mhchem_js_handler))
@@ -419,6 +428,7 @@ pub async fn start_serve(config: ResolvedServeConfig) -> Fallible<()> {
     } else {
         app
     };
+    let app = app.merge(static_routes);
     let app = app.with_state(state);
 
     log::debug!("Starting server on {bind}");

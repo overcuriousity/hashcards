@@ -17,7 +17,7 @@ pub fn render_manage_page(
         @if let Some(f) = &flash { (f.render()) }
         div.landing {
             h1 { "HedgeDoc Sources" }
-            p { a href="/" { "← Back to collections" } }
+            p { a.back-link href="/" { "← Back to collections" } }
 
             @if !config_available {
                 div.notice {

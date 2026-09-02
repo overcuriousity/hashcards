@@ -30,8 +30,8 @@ const MANIFEST_JSON: &str = r##"{
   "short_name": "hashcards",
   "display": "standalone",
   "start_url": "/",
-  "theme_color": "#000000",
-  "background_color": "#ffffff",
+  "theme_color": "#f2f0ea",
+  "background_color": "#f8f6f1",
   "icons": [
     { "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
     { "src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
@@ -68,6 +68,11 @@ pub fn page_template_with_script(script_url: &str, body: Markup) -> Markup {
             head {
                 meta charset="utf-8";
                 meta name="viewport" content="width=device-width, initial-scale=1";
+                // The browser paints its chrome from this before the
+                // stylesheet arrives, so the two theme surfaces are named
+                // here as well as in the tokens.
+                meta name="theme-color" media="(prefers-color-scheme: light)" content="#f2f0ea";
+                meta name="theme-color" media="(prefers-color-scheme: dark)" content="#14171d";
                 title { "hashcards-web" }
                 link rel="manifest" href="/manifest.json";
                 link rel="stylesheet" href=(KATEX_CSS_URL);

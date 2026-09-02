@@ -239,7 +239,7 @@ pub(super) fn render_decks_page(
         @if let Some(f) = &flash { (f.render()) }
         div.landing {
             h1 { "Decks" }
-            p { a href="/" { "\u{2190} Back to collections" } }
+            p { a.back-link href="/" { "\u{2190} Back to collections" } }
             p.empty {
                 "A deck is a saved selection of decks from any of your collections, drilled \
                  together. Reviews still count towards each card's own collection, so a card \
@@ -265,7 +265,7 @@ pub(super) fn render_decks_page(
                             fieldset {
                                 legend { (choice.collection_name) }
                                 @for deck_name in &choice.deck_names {
-                                    label style="display:block" {
+                                    label {
                                         input type="checkbox" name="members"
                                             value=(format!("{}/{}", choice.collection_slug, deck_name));
                                         " " (deck_name)

@@ -82,6 +82,56 @@ mod tests {
         Ok(())
     }
 
+    /// The stylesheet names four font files and serves them from the binary.
+    /// A typo in either the route or a filename is invisible in the browser —
+    /// the page simply falls back to a system font — so the names are checked
+    /// here instead.
+    #[tokio::test]
+    async fn test_fonts_are_served() -> Fallible<()> {
+        let dir = tempdir()?;
+        let coll_dir = dir.path().to_path_buf();
+        write(coll_dir.join("Alpha.md"), "Q: What is 1+1?\nA: 2\n")?;
+        let port = spawn_test_server(coll_dir, "test-collection").await?;
+
+        let css = reqwest::get(format!("http://{TEST_HOST}:{port}/style.css"))
+            .await?
+            .text()
+            .await?;
+
+        for name in [
+            "inter-400.woff2",
+            "inter-500.woff2",
+            "inter-600.woff2",
+            "jetbrains-mono-400.woff2",
+        ] {
+            assert!(
+                css.contains(&format!("/fonts/{name}")),
+                "{name} not in style.css"
+            );
+            let response = reqwest::get(format!("http://{TEST_HOST}:{port}/fonts/{name}")).await?;
+            assert!(
+                response.status().is_success(),
+                "{name}: {:?}",
+                response.status()
+            );
+            assert_eq!(
+                response
+                    .headers()
+                    .get("content-type")
+                    .and_then(|v| v.to_str().ok()),
+                Some("font/woff2"),
+                "{name}"
+            );
+            assert!(!response.bytes().await?.is_empty(), "{name} is empty");
+        }
+
+        // A name that is not one of the four is a 404, not a path to read.
+        let response =
+            reqwest::get(format!("http://{TEST_HOST}:{port}/fonts/..%2Fstyle.css")).await?;
+        assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND);
+        Ok(())
+    }
+
     /// Regression: with no [oidc] configured, /auth/login must not exist —
     /// proves the auth routes and middleware are opt-in, not always-on.
     #[tokio::test]
