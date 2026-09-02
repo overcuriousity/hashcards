@@ -1,12 +1,14 @@
 <changelog>
     <unreleased>
-        <added>
-            <change author="claude">
+        </unreleased>
+    <releases>
+        <release version="0.4.7" date="2026-09-02">
+            <added>
+                <change author="claude">
             A theme switch sits in the top-right corner of every page. It follows the system preference until it is pressed and remembers the choice in `localStorage` from then on; the choice is applied by a small inline script before the first paint, so a stored theme does not flash the other one on every load. The button is rendered hidden and revealed by `script.js`, since without script it could neither remember a choice nor label itself — and it names where it goes rather than where it is.
             </change>
             </added>
-        </unreleased>
-    <releases>
+        </release>
         <release version="0.4.6" date="2026-09-02">
             <changed>
                 <change author="claude">
