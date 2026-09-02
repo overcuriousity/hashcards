@@ -1,15 +1,17 @@
 <changelog>
     <unreleased>
-        <fixed>
-            <change author="claude">
+        </unreleased>
+    <releases>
+        <release version="0.4.5" date="2026-09-02">
+            <fixed>
+                <change author="claude">
             The server now creates `data_dir` and its `db/` and `hedgedoc/` subdirectories at startup, and refuses to start with a message naming the directory when it cannot. Only the git-mode directories were created before, and only when `[git]` was configured, so a `data_dir` the server could not write went unnoticed until the first write — adding a HedgeDoc note, possibly many restarts later — which failed with a bare "I/O error: Permission denied (os error 13)" naming no path at all. Every directory the server creates now reports its own path and role on failure. The shipped example points `data_dir` at `/var/lib/hashcards`, which is root-owned unless the systemd unit declares `StateDirectory=hashcards`; the README and the example config now say so and show the unit file.
             </change>
-            <change author="claude">
+                <change author="claude">
             Login no longer fails with "OIDC provider did not return an email claim" against providers that do not put `email` in the ID token. OpenID Connect Core 5.4 returns the `email` scope's claims from the UserInfo endpoint in the authorization code flow, and carrying them in the ID token as well is the provider's option — Nextcloud's OIDC app does not. hashcards now reads the ID token, falls back to UserInfo, and finally to the `sub` claim, which every ID token carries and whose signature is already verified. The UserInfo request is best-effort: a provider without the endpoint, or one that fails the request, no longer turns a valid login into an error. `[oidc].scopes` accordingly need only include `openid`; a deployment whose provider sends no email at all writes the subject in `owner` instead.
             </change>
             </fixed>
-        </unreleased>
-    <releases>
+        </release>
         <release version="0.4.4" date="2026-09-02">
             <fixed>
                 <change author="claude">
