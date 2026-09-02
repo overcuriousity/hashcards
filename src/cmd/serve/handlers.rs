@@ -1032,7 +1032,7 @@ pub async fn hedgedoc_add_handler(
         None => {
             log::error!("Cannot add HedgeDoc source: no data_dir configured");
             return Flash::error(
-                "Cannot add HedgeDoc source: no data directory is configured. Start hashcards with --config.",
+                "Cannot add HedgeDoc source: no data directory is configured. Start hashcards-web with --config.",
             )
             .redirect("/hedgedoc");
         }

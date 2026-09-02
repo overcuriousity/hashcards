@@ -93,9 +93,9 @@ pub struct ServerSection {
     pub session_timeout_minutes: u64,
 }
 
-/// Default bind address. Deliberately localhost-only: hashcards has no
-/// authentication, so binding to all interfaces must be an explicit opt-in
-/// (`host = "0.0.0.0"` in the config file).
+/// Default bind address. Deliberately localhost-only: without an `[oidc]`
+/// section there is no authentication at all, so binding to every interface
+/// must be an explicit opt-in (`host = "0.0.0.0"` in the config file).
 fn default_host() -> String {
     "127.0.0.1".to_string()
 }

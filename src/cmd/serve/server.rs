@@ -406,7 +406,7 @@ pub async fn start_serve(config: ResolvedServeConfig) -> Fallible<()> {
 
     log::debug!("Starting server on {bind}");
     let listener = TcpListener::bind(&bind).await?;
-    println!("hashcards server running on http://{bind}/");
+    println!("hashcards-web running on http://{bind}/");
 
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())

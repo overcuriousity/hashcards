@@ -26,7 +26,7 @@ use crate::cmd::drill::katex::KATEX_JS_URL;
 use crate::cmd::drill::katex::KATEX_MHCHEM_JS_URL;
 
 const MANIFEST_JSON: &str = r##"{
-  "name": "hashcards",
+  "name": "hashcards-web",
   "short_name": "hashcards",
   "display": "standalone",
   "start_url": "/",
@@ -68,7 +68,7 @@ pub fn page_template_with_script(script_url: &str, body: Markup) -> Markup {
             head {
                 meta charset="utf-8";
                 meta name="viewport" content="width=device-width, initial-scale=1";
-                title { "hashcards" }
+                title { "hashcards-web" }
                 link rel="manifest" href="/manifest.json";
                 link rel="stylesheet" href=(KATEX_CSS_URL);
                 link rel="stylesheet" href=(HLJS_CSS_URL);

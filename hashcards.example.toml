@@ -1,7 +1,8 @@
-# hashcards server configuration
+# hashcards-web configuration
 #
-# Copy this file to hashcards.toml and edit to match your setup.
-# See also: hashcards serve --help
+# Copy this file to hashcards.toml and edit to match your setup, then start
+# the server with `hashcards-web --config hashcards.toml` (or just
+# `hashcards-web`, which reads hashcards.toml from the current directory).
 
 [server]
 # host = "127.0.0.1"                  # Bind address (default: 127.0.0.1).

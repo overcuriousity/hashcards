@@ -143,7 +143,7 @@ fn render_landing_page(
     page_template(html! {
         @if let Some(f) = &flash { (f.render()) }
         div.landing {
-            h1 { "hashcards" }
+            h1 { "hashcards-web" }
             @if let Some(email) = signed_in_as {
                 div.sync-bar {
                     span.sync-status { (format!("Signed in as {email}")) }

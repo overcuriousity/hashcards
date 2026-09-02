@@ -1,10 +1,29 @@
 <changelog>
     <unreleased>
-        <fixed>
+        <added>
             <change author="claude">
-            `hashcards.example.toml` now documents the `[oidc]` section, the `owner` key on `[[collection]]`/`[[hedgedoc]]`/`[[deck]]` entries, and the `[[deck]]` table itself — all of which shipped in 0.4.2 but were only described in the README.
+            The collection page now reports byte-identical duplicate cards, naming both file locations. Duplicates are deduplicated at load time, so one copy is dropped and only the other carries review history; this was previously only warned about on the CLI's stderr.
             </change>
-            </fixed>
+                <change author="claude">
+            New route `GET /collection/{slug}/export` returns a collection as JSON — every card, its scheduling state, and the full review history — as a file download, gated to the collection's owner. The markdown lives in git but the review databases do not, and under `[oidc]` a user has no filesystem access, so this is their only route to their own history.
+            </change>
+            </added>
+        <changed>
+            <change author="claude">
+            The project is now `hashcards-web`: a web server rather than the CLI it was forked from. The package, binary, release artifacts and documentation are renamed; the Apache-2.0 licence and all upstream copyright headers are unchanged. On-disk `hashcards.toml` and `hashcards.db` keep their names, so existing deployments are unaffected — but the binary is now `hashcards-web`, so anyone installed under the old name must reinstall.
+            </change>
+                <change author="claude">
+            The `drill`, `check`, `stats`, `orphans` and `export` subcommands are removed, along with the drill web server they drove. The binary now takes a single optional `--config`, defaulting to `hashcards.toml` in the current directory, and fails with a clear message when there is no configuration file.
+            </change>
+                <change author="claude">
+            `hashcards.example.toml` now documents the `[oidc]` section, the `owner` key on `[[collection]]`/`[[hedgedoc]]`/`[[deck]]` entries, and the `[[deck]]` table itself — all of which shipped in 0.4.2 but were only described in the README. The README is rewritten around the server, and the stale `SPEC.md`, `ROADMAP.md`, `PLAN.md` and `docs/superpowers/plans/` ledgers, which describe already-landed work in terms of deleted code, are removed.
+            </change>
+            </changed>
+        <removed>
+            <change author="claude">
+            The two ways to start the server without a configuration file — passing collection directories positionally, and the config-free HedgeDoc-only mode that ran out of a temporary directory — are gone. Both hardcoded `oidc: None`, so each was an unauthenticated bypass of the access control the rest of the server enforces. `create_minimal_config`, which wrote a config file on the first HedgeDoc add, goes with them.
+            </change>
+            </removed>
         </unreleased>
     <releases>
         <release version="0.4.2" date="2026-09-01">

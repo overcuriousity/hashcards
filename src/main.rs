@@ -38,7 +38,7 @@ async fn main() -> ExitCode {
     match entrypoint().await {
         Ok(_) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("hashcards: {e}");
+            eprintln!("hashcards-web: {e}");
             ExitCode::FAILURE
         }
     }
