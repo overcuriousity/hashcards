@@ -82,6 +82,53 @@ mod tests {
         Ok(())
     }
 
+    /// The theme switch is three pieces that have to agree: the stylesheet's
+    /// two override selectors, the inline script that applies a stored choice
+    /// before the first paint, and the button `script.js` looks for. Any one
+    /// of them renamed alone leaves a switch that does nothing.
+    #[tokio::test]
+    async fn test_theme_switch_is_wired_end_to_end() -> Fallible<()> {
+        let dir = tempdir()?;
+        let coll_dir = dir.path().to_path_buf();
+        write(coll_dir.join("Alpha.md"), "Q: What is 1+1?\nA: 2\n")?;
+        let port = spawn_test_server(coll_dir, "test-collection").await?;
+
+        let css = reqwest::get(format!("http://{TEST_HOST}:{port}/style.css"))
+            .await?
+            .text()
+            .await?;
+        assert!(
+            css.contains(r#":root[data-theme="dark"]"#),
+            "no dark override"
+        );
+        assert!(
+            css.contains(r#":root:not([data-theme="light"])"#),
+            "no light opt-out"
+        );
+
+        let page = reqwest::get(format!("http://{TEST_HOST}:{port}/"))
+            .await?
+            .text()
+            .await?;
+        assert!(page.contains("hashcards.theme"), "no pre-paint script");
+        assert!(page.contains("data-theme-toggle"), "no toggle button");
+        assert!(page.contains("data-theme-label"), "no toggle label");
+
+        let js = reqwest::get(format!("http://{TEST_HOST}:{port}/script.js"))
+            .await?
+            .text()
+            .await?;
+        assert!(
+            js.contains("data-theme-toggle"),
+            "script.js does not bind the toggle"
+        );
+        assert!(
+            js.contains("hashcards.theme"),
+            "script.js stores under another key"
+        );
+        Ok(())
+    }
+
     /// The stylesheet names four font files and serves them from the binary.
     /// A typo in either the route or a filename is invisible in the browser —
     /// the page simply falls back to a system font — so the names are checked

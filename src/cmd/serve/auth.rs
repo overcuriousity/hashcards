@@ -173,6 +173,9 @@ fn session_expired_page() -> String {
             head {
                 meta charset="utf-8";
                 meta name="viewport" content="width=device-width, initial-scale=1";
+                // This page is reached without a session, so it shares the
+                // stored theme rather than starting over at the system's.
+                script { (maud::PreEscaped(crate::cmd::drill::template::THEME_BOOT)) }
                 title { "Session expired" }
                 link rel="stylesheet" href="/style.css";
             }

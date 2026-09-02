@@ -57,6 +57,30 @@ pub async fn icon_512_handler() -> (StatusCode, [(HeaderName, &'static str); 1],
     (StatusCode::OK, [(CONTENT_TYPE, "image/png")], ICON_512)
 }
 
+/// Applied to `<html>` before the first paint.
+///
+/// A stylesheet cannot know a stored choice and a deferred script runs after
+/// the first paint, so either way the wrong theme flashes on every load — on
+/// a phone, brightly. Small enough to cost nothing, and wrapped in a `try`
+/// because a browser with storage disabled must still render the page.
+pub const THEME_BOOT: &str = "try{var t=localStorage.getItem('hashcards.theme');\
+if(t)document.documentElement.setAttribute('data-theme',t)}catch(e){}";
+
+/// The one control that is on every page.
+///
+/// Rendered hidden and shown by `script.js`: without script it could not
+/// remember a choice, and a switch that forgets is worse than none. The label
+/// is filled in there too, since it names the destination rather than the
+/// state.
+pub fn theme_toggle() -> Markup {
+    html! {
+        button.theme-toggle type="button" data-theme-toggle="" hidden
+            aria-label="Switch between the light and dark theme" {
+            span data-theme-label="" { "Theme" }
+        }
+    }
+}
+
 pub fn page_template(body: Markup) -> Markup {
     page_template_with_script("/script.js", body)
 }
@@ -68,6 +92,7 @@ pub fn page_template_with_script(script_url: &str, body: Markup) -> Markup {
             head {
                 meta charset="utf-8";
                 meta name="viewport" content="width=device-width, initial-scale=1";
+                script { (maud::PreEscaped(THEME_BOOT)) }
                 // The browser paints its chrome from this before the
                 // stylesheet arrives, so the two theme surfaces are named
                 // here as well as in the tokens.
@@ -85,6 +110,7 @@ pub fn page_template_with_script(script_url: &str, body: Markup) -> Markup {
                 noscript { style { ".card-content { opacity: 1; }" }}
             }
             body {
+                (theme_toggle())
                 (body)
                 script src=(script_url) {};
             }

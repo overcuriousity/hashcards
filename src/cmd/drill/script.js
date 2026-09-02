@@ -84,3 +84,61 @@ document.addEventListener("keydown", function (event) {
     }
   }
 });
+
+// The theme switch.
+//
+// Follows the system until it is touched; a remembered two-state switch from
+// then on. The inline script in the head is what applies a stored choice
+// before anything is drawn — this only keeps the button honest and moves the
+// installed app's status-bar colour with it.
+//
+// The button is rendered hidden and revealed here: without script it could
+// neither remember a choice nor relabel itself.
+document.addEventListener("DOMContentLoaded", function () {
+  const btn = document.querySelector("[data-theme-toggle]");
+  if (!btn) {
+    return;
+  }
+  const label = btn.querySelector("[data-theme-label]");
+
+  function current() {
+    const set = document.documentElement.getAttribute("data-theme");
+    if (set) {
+      return set;
+    }
+    return window.matchMedia("(prefers-color-scheme: dark)").matches
+      ? "dark"
+      : "light";
+  }
+
+  function paint() {
+    const now = current();
+    // Names the destination, not the state: a button reading "Dark" while the
+    // page is dark reads as a label rather than as something to press.
+    label.textContent = now === "dark" ? "Light" : "Dark";
+    // An installed app frames the page in this colour. The two media-scoped
+    // tags in the head answer the system rather than the choice, so the
+    // choice needs one of its own.
+    let meta = document.querySelector('meta[name="theme-color"]:not([media])');
+    if (!meta) {
+      meta = document.createElement("meta");
+      meta.setAttribute("name", "theme-color");
+      document.head.appendChild(meta);
+    }
+    meta.setAttribute("content", now === "dark" ? "#14171d" : "#f2f0ea");
+  }
+
+  btn.addEventListener("click", function () {
+    const next = current() === "dark" ? "light" : "dark";
+    document.documentElement.setAttribute("data-theme", next);
+    try {
+      localStorage.setItem("hashcards.theme", next);
+    } catch (e) {
+      // Storage can be disabled. The choice then lasts this page only.
+    }
+    paint();
+  });
+
+  paint();
+  btn.hidden = false;
+});
