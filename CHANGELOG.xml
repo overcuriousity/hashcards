@@ -1,5 +1,10 @@
 <changelog>
     <unreleased>
+        <fixed>
+            <change author="claude">
+            OIDC discovery now follows redirects that stay on the issuer's own origin, so Nextcloud works again. Nextcloud serves its discovery document at `/index.php/.well-known/openid-configuration` and redirects the standard `/.well-known/openid-configuration` there, while the document declares the bare host as its issuer — so with redirects refused outright there was no `issuer_url` that worked: the bare host failed on the 301, and the `/index.php` form failed the issuer check that OpenID Connect Discovery requires. Redirects that leave the origin are still refused, since following one would hand a third-party host the request and, at the token endpoint, the client credentials. `hashcards.example.toml` documented the wrong `issuer_url` for Nextcloud and now explains how to read the right one out of the discovery document.
+            </change>
+            </fixed>
         </unreleased>
     <releases>
         <release version="0.4.3" date="2026-09-02">
