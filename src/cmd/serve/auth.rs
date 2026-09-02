@@ -763,7 +763,6 @@ mod tests {
                 session_secret: "a-very-long-random-session-secret-value".to_string(),
                 scopes: vec!["openid".to_string(), "email".to_string()],
             }),
-            _temp_dir: None,
         };
         tokio::spawn(async move { start_serve(config).await });
         crate::utils::wait_for_server("127.0.0.1", port).await?;
@@ -841,7 +840,6 @@ mod tests {
                 session_secret: "a-very-long-random-session-secret-value".to_string(),
                 scopes: vec!["openid".to_string(), "email".to_string()],
             }),
-            _temp_dir: None,
         };
         tokio::spawn(async move { start_serve(config).await });
         crate::utils::wait_for_server("127.0.0.1", port).await?;
@@ -912,7 +910,6 @@ mod tests {
                 session_secret: "a-very-long-random-session-secret-value".to_string(),
                 scopes: vec!["openid".to_string(), "email".to_string()],
             }),
-            _temp_dir: None,
         };
         tokio::spawn(async move { start_serve(config).await });
         crate::utils::wait_for_server("127.0.0.1", port).await?;
@@ -1099,7 +1096,6 @@ mod tests {
                 session_secret: "a-very-long-random-session-secret-value".to_string(),
                 scopes: vec!["openid".to_string(), "email".to_string()],
             }),
-            _temp_dir: None,
         };
         tokio::spawn(async move { start_serve(config).await });
         crate::utils::wait_for_server("127.0.0.1", port).await?;

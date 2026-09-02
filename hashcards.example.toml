@@ -6,9 +6,10 @@
 [server]
 # host = "127.0.0.1"                  # Bind address (default: 127.0.0.1).
                                       # Set to "0.0.0.0" to listen on all
-                                      # interfaces. WARNING: hashcards has no
-                                      # authentication; anyone who can reach
-                                      # the port can read and edit your cards.
+                                      # interfaces. WARNING: without an [oidc]
+                                      # section hashcards has no authentication;
+                                      # anyone who can reach the port can read
+                                      # and edit your cards.
 # port = 8000                         # Port number (default: 8000)
 data_dir = "/var/lib/hashcards"       # Directory for repo clone and databases
 
@@ -26,23 +27,67 @@ repo_url = "https://github.com/user/flashcards.git"
 # bury_siblings = true                # Hide sibling cards in same session (default: true)
 # jitter = 0.05                       # Random +/- fraction applied to review intervals (0.0 to 0.5, default: 0.05)
 
+# Optional: OIDC login. Adding this section gates every route except /auth/*
+# behind a login, and then *requires* an `owner` on every [[collection]],
+# [[hedgedoc]] and [[deck]] entry below. Each collection is visible to exactly
+# its one owner; there is no sharing, signup flow or admin UI. Conversely, an
+# `owner` declared without an [oidc] section is a config error, since nobody
+# would ever be logged in to match it.
+
+# [oidc]
+# issuer_url = "https://cloud.example.com/index.php/apps/oidc"
+# client_id = "..."
+# client_secret = "..."
+# external_url = "https://hashcards.example.com"
+#                                     # The public URL a browser actually reaches
+#                                     # the server through. Independent of
+#                                     # host/port (set it to the address in front
+#                                     # of your reverse proxy). The OIDC redirect
+#                                     # URI is {external_url}/auth/callback --
+#                                     # register exactly that with your provider.
+# session_secret = "..."              # Signs the login session cookie. At least
+#                                     # 32 bytes; generate once with
+#                                     # `openssl rand -hex 32` and keep it stable
+#                                     # -- rotating it logs out every user.
+#                                     # Config load fails if it is shorter.
+# scopes = ["openid", "email", "profile"]
+#                                     # Default shown; must include openid and
+#                                     # email. Owners are matched against the
+#                                     # `email` claim, case-insensitively.
+
 # Define one or more collections. Paths are relative to {data_dir}/repo.
 
 [[collection]]
 name = "Japanese"
 path = "japanese"
+# owner = "me@example.com"            # Required when [oidc] is configured
 
 [[collection]]
 name = "Anatomy"
 path = "medicine/anatomy"
+# owner = "someone-else@example.com"
 
 # Optional: HedgeDoc sources. Each entry is a publicly accessible HedgeDoc note
 # URL. hashcards fetches the raw markdown (via {url}/download), derives the
 # collection name from the document title, and syncs it on the same interval as
 # git. Sources can also be added/removed via the web interface.
+#
+# Each note is a collection of its own, owned by that entry's `owner` alone --
+# notes are never grouped by host, so several users can take notes from one
+# shared HedgeDoc instance without sharing a collection or a review database.
 
 # [[hedgedoc]]
 # url = "https://notes.example.com/q1QcHIRvQFiTxzwnF-_L3g"
+# owner = "me@example.com"            # Required when [oidc] is configured
 
 # [[hedgedoc]]
 # url = "https://notes.example.com/anotherNoteId"
+
+# Optional: decks assembled across collections, drilled together in one session.
+# `members` are "{collection-slug}/{deck-name}" pairs. Decks created through the
+# web interface are written back to this file, exactly as HedgeDoc sources are.
+
+# [[deck]]
+# name = "Exam revision"
+# members = ["japanese/Verbs", "medicine-anatomy/Bones"]
+# owner = "me@example.com"            # Required when [oidc] is configured

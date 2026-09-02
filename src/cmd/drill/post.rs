@@ -12,14 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use axum::Form;
-use axum::extract::State;
-use axum::response::Redirect;
 use serde::Deserialize;
 
 use crate::cmd::drill::state::MutableState;
 use crate::cmd::drill::state::Review;
-use crate::cmd::drill::state::ServerState;
 use crate::db::ReviewRecord;
 use crate::error::Fallible;
 use crate::error::fail;
@@ -88,54 +84,6 @@ pub enum ActionResult {
     Ignored(String),
 }
 
-pub async fn post_handler(
-    State(state): State<ServerState>,
-    Form(form): Form<FormData>,
-) -> Redirect {
-    match action_handler(state, form).await {
-        Ok(Some(flash)) => flash.redirect("/"),
-        Ok(None) => Redirect::to("/"),
-        Err(e) => {
-            log::error!("error: {e}");
-            Flash::error(e.to_string()).redirect("/")
-        }
-    }
-}
-
-async fn action_handler(state: ServerState, form: FormData) -> Fallible<Option<Flash>> {
-    let submitted_card: Option<CardHash> = match form.card.as_deref() {
-        Some(hex) => match CardHash::from_hex(hex) {
-            Ok(hash) => Some(hash),
-            Err(_) => {
-                log::debug!("ignoring grade with unparseable card hash");
-                return Ok(Some(Flash::error(
-                    "That grade carried an invalid card reference and was ignored.",
-                )));
-            }
-        },
-        None => None,
-    };
-    let mut mutable = state.mutable.lock();
-    // Heartbeat; see the GET path.
-    if let Err(e) = mutable.dbs.touch_all(Timestamp::now()) {
-        log::debug!("could not stamp session heartbeat: {e}");
-    }
-    let result = handle_action(&mut mutable, form.action, submitted_card, form.undo_review)?;
-    match result {
-        ActionResult::Shutdown => {
-            // Release the lock before sending shutdown signal.
-            drop(mutable);
-            let mut shutdown_tx = state.shutdown_tx.lock();
-            if let Some(tx) = shutdown_tx.take() {
-                let _ = tx.send(());
-            }
-            Ok(None)
-        }
-        ActionResult::ContinueWithFlash(flash) => Ok(Some(flash)),
-        ActionResult::Ignored(reason) => Ok(Some(Flash::error(reason))),
-        ActionResult::Continue | ActionResult::SessionFinished | ActionResult::Home => Ok(None),
-    }
-}
 
 /// Core action handling logic, reusable by both drill and serve modes.
 ///

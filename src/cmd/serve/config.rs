@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use serde::Deserialize;
 use serde::Serialize;
 
-use crate::cmd::drill::server::AnswerControls;
+use crate::cmd::drill::render::AnswerControls;
 use crate::error::Fallible;
 use crate::error::fail;
 use crate::types::performance::Jitter;
@@ -275,42 +275,13 @@ pub struct ResolvedCollection {
     pub owner: Option<String>,
 }
 
-pub struct TempDirTracker {
-    path: PathBuf,
-    dismissed: std::sync::atomic::AtomicBool,
-}
-
-impl TempDirTracker {
-    pub fn new(path: PathBuf) -> Self {
-        Self {
-            path,
-            dismissed: std::sync::atomic::AtomicBool::new(false),
-        }
-    }
-
-    /// Stop the temp directory from being deleted on drop (e.g. once a config
-    /// that references it has been persisted to disk).
-    pub fn dismiss(&self) {
-        self.dismissed
-            .store(true, std::sync::atomic::Ordering::Relaxed);
-    }
-}
-
-impl Drop for TempDirTracker {
-    fn drop(&mut self) {
-        if !self.dismissed.load(std::sync::atomic::Ordering::Relaxed) {
-            let _ = std::fs::remove_dir_all(&self.path);
-        }
-    }
-}
-
 pub struct ResolvedServeConfig {
     pub host: String,
     pub port: u16,
     pub git: Option<ResolvedGit>,
     pub defaults: DefaultsSection,
     pub collections: Vec<ResolvedCollection>,
-    /// Set when loaded from a TOML file; None when using directory arguments.
+    /// The directory holding the repo clone and the review databases.
     pub data_dir: Option<PathBuf>,
     /// Config file path; needed to persist UI changes back to disk.
     pub config_path: Option<PathBuf>,
@@ -320,8 +291,6 @@ pub struct ResolvedServeConfig {
     pub custom_decks: Vec<CustomDeckEntry>,
     /// Idle drill sessions are evicted after this many minutes (0 = never).
     pub session_timeout_minutes: u64,
-    /// Kept alive for the process lifetime so the OS temp directory is cleaned up.
-    pub _temp_dir: Option<std::sync::Arc<TempDirTracker>>,
     /// Set when `[oidc]` is configured. Gates every route except `/auth/*`
     /// behind login and scopes collections/notes to their `owner`.
     pub oidc: Option<ResolvedOidc>,
@@ -555,7 +524,6 @@ impl ResolvedServeConfig {
             hedgedoc_entries,
             custom_decks,
             session_timeout_minutes: config.server.session_timeout_minutes,
-            _temp_dir: None,
             oidc,
         })
     }
@@ -565,6 +533,13 @@ impl ResolvedServeConfig {
         self
     }
 
+    /// Build a config that serves `directories` directly, with no git
+    /// remote, no HedgeDoc sources and no owners.
+    ///
+    /// Test-only: the server requires a config file, so there is no
+    /// production path that reaches this. It survives because most serve
+    /// tests want a state holding one throwaway collection.
+    #[cfg(test)]
     pub fn from_directories(directories: Vec<String>, host: String, port: u16) -> Fallible<Self> {
         let base = current_dir()?;
         let mut collections = Vec::new();
@@ -606,7 +581,6 @@ impl ResolvedServeConfig {
             hedgedoc_entries: Vec::new(),
             custom_decks: Vec::new(),
             session_timeout_minutes: default_session_timeout_minutes(),
-            _temp_dir: None,
             oidc: None,
         })
     }

@@ -1,5 +1,10 @@
 <changelog>
     <unreleased>
+        <fixed>
+            <change author="claude">
+            `hashcards.example.toml` now documents the `[oidc]` section, the `owner` key on `[[collection]]`/`[[hedgedoc]]`/`[[deck]]` entries, and the `[[deck]]` table itself — all of which shipped in 0.4.2 but were only described in the README.
+            </change>
+            </fixed>
         </unreleased>
     <releases>
         <release version="0.4.2" date="2026-09-01">

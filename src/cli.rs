@@ -12,271 +12,124 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fs::canonicalize;
 use std::path::Path;
-use std::process::exit;
+use std::path::PathBuf;
 
 use clap::Parser;
-use clap::Subcommand;
-use tokio::spawn;
 
-use crate::cmd::check::check_collection;
-use crate::cmd::drill::server::AnswerControls;
-use crate::cmd::drill::server::ServerConfig;
-use crate::cmd::drill::server::start_server;
-use crate::cmd::export::export_collection;
-use crate::cmd::orphans::delete_orphans;
-use crate::cmd::orphans::list_orphans;
 use crate::cmd::serve::config::ResolvedServeConfig;
 use crate::cmd::serve::config::load_config;
 use crate::cmd::serve::server::start_serve;
-use crate::cmd::stats::StatsFormat;
-use crate::cmd::stats::print_stats;
 use crate::error::Fallible;
-use crate::types::performance::Jitter;
-use crate::types::timestamp::Timestamp;
-use crate::utils::wait_for_server;
+use crate::error::fail;
+
+/// The configuration file used when `--config` is not given.
+const DEFAULT_CONFIG_FILE: &str = "hashcards.toml";
 
 #[derive(Parser)]
-#[command(version, about, long_about = None)]
-enum Command {
-    /// Drill cards through a web interface.
-    Drill {
-        /// Path to the collection directory. By default, the current working directory is used.
-        directory: Option<String>,
-        /// Maximum number of cards to drill in a session. By default, all cards due today are drilled.
-        #[arg(long)]
-        card_limit: Option<usize>,
-        /// Maximum number of new cards to drill in a session.
-        #[arg(long)]
-        new_card_limit: Option<usize>,
-        /// The host address to bind to. Default is 127.0.0.1.
-        #[arg(long, default_value = "127.0.0.1")]
-        host: String,
-        /// The port to use for the web server. Default is 8000.
-        #[arg(long, default_value_t = 8000)]
-        port: u16,
-        /// Only drill cards from this deck.
-        #[arg(long)]
-        from_deck: Option<String>,
-        /// Whether to open the browser automatically. Default is true.
-        #[arg(long)]
-        open_browser: Option<bool>,
-        /// Which answer controls to show:
-        #[arg(long, default_value_t = AnswerControls::Full)]
-        answer_controls: AnswerControls,
-        /// Whether or not to bury siblings. Default is true.
-        #[arg(long)]
-        bury_siblings: Option<bool>,
-        /// Fractional random jitter applied to review intervals, to diffuse
-        /// review peaks (0.0 to 0.5). Default is 0.05 (plus or minus 5%).
-        #[arg(long, default_value_t = Jitter::DEFAULT_FRACTION)]
-        jitter: f64,
-    },
-    /// Check the integrity of a collection.
-    Check {
-        /// Path to the collection directory. By default, the current working directory is used.
-        directory: Option<String>,
-    },
-    /// Print collection statistics.
-    Stats {
-        /// Path to the collection directory. By default, the current working directory is used.
-        directory: Option<String>,
-        /// Which output format to use. "html" opens the stats page in the browser.
-        #[arg(long, default_value_t = StatsFormat::Html)]
-        format: StatsFormat,
-    },
-    /// Commands relating to orphan cards.
-    Orphans {
-        #[command(subcommand)]
-        command: OrphanCommand,
-    },
-    /// Export a collection.
-    Export {
-        /// Path to the collection directory. By default, the current working directory is used.
-        directory: Option<String>,
-        /// Optional path to the output file. By default, the output is printed to stdout.
-        #[arg(long)]
-        output: Option<String>,
-    },
-    /// Run as a persistent web server with multiple collections.
-    #[command(after_help = "\
-Examples:
-  hashcards serve --config hashcards.toml
-  hashcards serve ./japanese ./math
-  hashcards serve --host 127.0.0.1 --port 9000 ./cards
-
-If neither --config nor directories are given, hashcards.toml in the
-current directory is used if it exists.
-
-When --config is provided, the bind address and port are taken from the
-config file ([server] host/port). Use --host/--port only when serving
-directories directly (without a config file).
-
-Without a config file, git syncing is disabled.
-See hashcards.example.toml for the configuration format.")]
-    Serve {
-        /// Path to the configuration file.
-        #[arg(long)]
-        config: Option<String>,
-        /// Collection directories to serve (used when no config file is provided).
-        directories: Vec<String>,
-        /// Bind address (used when no --config is given; default: 127.0.0.1).
-        /// Set to 0.0.0.0 to listen on all interfaces. WARNING: hashcards has
-        /// no authentication.
-        #[arg(long, default_value = "127.0.0.1")]
-        host: String,
-        /// Port number (used when no --config is given; default: 8000).
-        #[arg(long, default_value_t = 8000)]
-        port: u16,
-    },
-}
-
-#[derive(Subcommand)]
-enum OrphanCommand {
-    /// List the hashes of all orphan cards in the collection.
-    List {
-        /// Path to the collection directory. By default, the current working directory is used.
-        directory: Option<String>,
-    },
-    /// Remove all orphan cards from the database.
-    Delete {
-        /// Path to the collection directory. By default, the current working directory is used.
-        directory: Option<String>,
-    },
+#[command(
+    version,
+    about = "A web server for plain text spaced repetition.",
+    after_help = "\
+The bind address, the collections to serve, and everything else are read
+from the configuration file. See hashcards.example.toml for the format."
+)]
+struct Cli {
+    /// Path to the configuration file. Defaults to hashcards.toml in the
+    /// current directory.
+    #[arg(long)]
+    config: Option<String>,
 }
 
 pub async fn entrypoint() -> Fallible<()> {
-    let cli: Command = Command::parse();
-    match cli {
-        Command::Drill {
-            directory,
-            card_limit,
-            new_card_limit,
-            host,
-            port,
-            from_deck,
-            open_browser,
-            answer_controls,
-            bury_siblings,
-            jitter,
-        } => {
-            if open_browser.unwrap_or(true) {
-                // Start a separate task to open the browser once the server is up.
-                let browser_host = host.clone();
-                spawn(async move {
-                    match wait_for_server(&browser_host, port).await {
-                        Ok(_) => {
-                            let _ = open::that(format!("http://{browser_host}:{port}/"));
-                        }
-                        Err(e) => {
-                            eprintln!("Failed to connect to server: {e}");
-                            exit(-1)
-                        }
-                    }
-                });
-            }
-            let config = ServerConfig {
-                directory,
-                host,
-                port,
-                session_started_at: Timestamp::now(),
-                card_limit,
-                new_card_limit,
-                deck_filter: from_deck,
-                shuffle: true,
-                answer_controls,
-                bury_siblings: bury_siblings.unwrap_or(true),
-                jitter: Jitter::new(jitter)?,
-            };
-            start_server(config).await
-        }
-        Command::Check { directory } => check_collection(directory),
-        Command::Stats { directory, format } => print_stats(directory, format),
-        Command::Orphans { command } => match command {
-            OrphanCommand::List { directory } => list_orphans(directory),
-            OrphanCommand::Delete { directory } => delete_orphans(directory),
-        },
-        Command::Export { directory, output } => export_collection(directory, output),
-        Command::Serve {
-            config,
-            directories,
-            host,
-            port,
-        } => {
-            let resolved = resolve_serve_config(config, directories, host, port)?;
-            start_serve(resolved).await
-        }
-    }
+    let cli = Cli::parse();
+    let resolved = resolve_config(cli.config.as_deref())?;
+    start_serve(resolved).await
 }
 
-fn resolve_serve_config(
-    config_path: Option<String>,
-    directories: Vec<String>,
-    host: String,
-    port: u16,
-) -> Fallible<ResolvedServeConfig> {
-    // Explicit --config: load that file
-    if let Some(path) = config_path {
-        let canonical = std::fs::canonicalize(&path).map_err(|_| {
-            crate::error::ErrorReport::new(format!("Config file not found: {path}"))
-        })?;
-        let config = load_config(Path::new(&path))?;
-        return Ok(ResolvedServeConfig::from_toml(config)?.with_config_path(canonical));
+/// Locate and load the configuration file.
+///
+/// Unlike the pre-fork CLI, there is no way to run without one: the
+/// config file is what declares the collections, their owners, and the
+/// OIDC settings that gate them.
+fn resolve_config(config: Option<&str>) -> Fallible<ResolvedServeConfig> {
+    let path: PathBuf = match config {
+        Some(path) => PathBuf::from(path),
+        None => PathBuf::from(DEFAULT_CONFIG_FILE),
+    };
+
+    if !path.exists() {
+        return match config {
+            Some(path) => fail(format!("Config file not found: {path}")),
+            None => fail(format!(
+                "No configuration file found. Expected {DEFAULT_CONFIG_FILE} in the \
+                 current directory, or a path given with --config. See \
+                 hashcards.example.toml for the format."
+            )),
+        };
     }
 
-    // No --config: if directories were given, serve them directly
-    if !directories.is_empty() {
-        return ResolvedServeConfig::from_directories(directories, host, port);
-    }
-
-    // No --config and no directories: try hashcards.toml in CWD
-    let default_path = Path::new("hashcards.toml");
-    if default_path.exists() {
-        let canonical = std::fs::canonicalize(default_path)
-            .map_err(|_| crate::error::ErrorReport::new("Failed to resolve hashcards.toml path"))?;
-        let config = load_config(default_path)?;
-        return Ok(ResolvedServeConfig::from_toml(config)?.with_config_path(canonical));
-    }
-
-    // No config and no directories: start in HedgeDoc-only mode.
-    // Include both PID and a nanosecond timestamp to avoid stale-data reuse
-    // when PIDs are recycled across runs.
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let data_dir = std::env::temp_dir().join(format!("hashcards-{}-{}", std::process::id(), nanos));
-    std::fs::create_dir_all(&data_dir)?;
-    let temp_tracker = crate::cmd::serve::config::TempDirTracker::new(data_dir.clone());
-
-    Ok(ResolvedServeConfig {
-        host: host.clone(),
-        port,
-        git: None,
-        defaults: crate::cmd::serve::config::DefaultsSection::default(),
-        collections: Vec::new(),
-        data_dir: Some(data_dir),
-        config_path: None,
-        hedgedoc_entries: Vec::new(),
-        custom_decks: Vec::new(),
-        session_timeout_minutes: 1440,
-        _temp_dir: Some(std::sync::Arc::new(temp_tracker)),
-        oidc: None,
-    })
+    let canonical = canonicalize(&path)
+        .map_err(|e| crate::error::ErrorReport::new(format!("Failed to resolve {path:?}: {e}")))?;
+    let config = load_config(Path::new(&path))?;
+    Ok(ResolvedServeConfig::from_toml(config)?.with_config_path(canonical))
 }
 
 #[cfg(test)]
 mod tests {
+    use std::fs::write;
+
+    use tempfile::tempdir;
+
     use super::*;
 
     #[test]
-    fn test_stats_default_format_is_html() {
-        let cmd = Command::try_parse_from(["hashcards", "stats"]).unwrap();
-        match cmd {
-            Command::Stats { format, .. } => {
-                assert!(matches!(format, StatsFormat::Html));
-            }
-            _ => panic!("expected the stats command"),
-        }
+    fn test_missing_explicit_config_is_an_error() {
+        let e = resolve_config(Some("./no-such-config.toml"))
+            .err()
+            .expect("expected an error for a config path that does not exist");
+        assert!(
+            e.to_string().contains("no-such-config.toml"),
+            "the error must name the missing file, got: {e}"
+        );
+    }
+
+    /// Running with no config at all used to start an unauthenticated
+    /// HedgeDoc-only server in a temp directory. It must now fail loudly.
+    #[test]
+    fn test_missing_default_config_is_an_error() -> Fallible<()> {
+        let dir = tempdir()?;
+        let missing = dir.path().join(DEFAULT_CONFIG_FILE);
+        let e = resolve_config(Some(
+            missing.to_str().expect("temp path must be valid UTF-8"),
+        ))
+        .err()
+        .expect("expected an error when the default config is absent");
+        assert!(e.to_string().contains("Config file not found"));
+        Ok(())
+    }
+
+    #[test]
+    fn test_config_is_loaded_and_its_path_recorded() -> Fallible<()> {
+        let dir = tempdir()?;
+        let data_dir = dir.path().join("data");
+        let config_path = dir.path().join(DEFAULT_CONFIG_FILE);
+        write(
+            &config_path,
+            format!(
+                "[server]\ndata_dir = {:?}\n",
+                data_dir.to_str().expect("temp path must be valid UTF-8")
+            ),
+        )?;
+
+        let resolved = resolve_config(Some(
+            config_path.to_str().expect("temp path must be valid UTF-8"),
+        ))?;
+        assert!(
+            resolved.config_path.is_some(),
+            "the resolved config must record where it was loaded from"
+        );
+        Ok(())
     }
 }

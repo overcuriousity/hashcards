@@ -12,13 +12,31 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::fs::write;
+//! JSON export of a collection: every card, its scheduling state, and the
+//! full review history.
+//!
+//! The markdown lives in git, but the review databases live under
+//! `data_dir` and are in nobody's repository. Under `[oidc]` a user has no
+//! filesystem access either, so this route is their only way to get their
+//! own review history out.
 
+use axum::extract::Path;
+use axum::extract::State;
+use axum::http::StatusCode;
+use axum::http::header::CONTENT_DISPOSITION;
+use axum::http::header::CONTENT_TYPE;
+use axum::response::IntoResponse;
+use axum::response::Response;
 use serde::Serialize;
 
+use crate::cmd::run_blocking;
+use crate::cmd::serve::auth::CurrentUser;
+use crate::cmd::serve::handlers::find_collection;
+use crate::cmd::serve::state::AppState;
 use crate::collection::Collection;
 use crate::db::ReviewRow;
 use crate::db::SessionRow;
+use crate::error::ErrorReport;
 use crate::error::Fallible;
 use crate::fsrs::Difficulty;
 use crate::fsrs::Grade;
@@ -32,15 +50,66 @@ use crate::types::performance::Performance;
 use crate::types::performance::ReviewedPerformance;
 use crate::types::timestamp::Timestamp;
 
-pub fn export_collection(directory: Option<String>, output: Option<String>) -> Fallible<()> {
-    let coll: Collection = Collection::new(directory)?;
-    let export: Export = get_export(coll)?;
-    let json = serde_json::to_string_pretty(&export)?;
-    match output {
-        Some(path) => write(path, json)?,
-        None => println!("{}", json),
+/// GET /collection/{slug}/export — the collection as a JSON download.
+///
+/// Owner-gated through `find_collection`, so a collection belonging to
+/// somebody else 404s exactly like one that does not exist.
+pub async fn collection_export_handler(
+    State(state): State<AppState>,
+    Path(slug): Path<String>,
+    current_user: Option<CurrentUser>,
+) -> Response {
+    let owner = current_user.map(|u| u.email);
+    let known = find_collection(&state, &slug, owner.as_deref()).is_some();
+    let state2 = state.clone();
+    let slug2 = slug.clone();
+    let owner2 = owner.clone();
+    // Parsing the collection and reading SQLite is blocking work.
+    match run_blocking(move || export_inner(&state2, &slug2, owner2.as_deref())).await {
+        Ok(json) => (
+            StatusCode::OK,
+            [
+                (CONTENT_TYPE, "application/json".to_string()),
+                (
+                    CONTENT_DISPOSITION,
+                    format!("attachment; filename=\"{}-export.json\"", download_name(&slug)),
+                ),
+            ],
+            json,
+        )
+            .into_response(),
+        Err(e) => {
+            let status = if known {
+                StatusCode::INTERNAL_SERVER_ERROR
+            } else {
+                StatusCode::NOT_FOUND
+            };
+            (status, e.to_string()).into_response()
+        }
     }
-    Ok(())
+}
+
+/// Slugs come from `slugify`, which already restricts them to alphanumerics,
+/// `-`, `_` and `.`. Belt and braces: a quote or newline reaching the
+/// `Content-Disposition` header would let a filename split it.
+fn download_name(slug: &str) -> String {
+    let name: String = slug
+        .chars()
+        .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
+        .collect();
+    if name.is_empty() {
+        "collection".to_string()
+    } else {
+        name
+    }
+}
+
+fn export_inner(state: &AppState, slug: &str, owner: Option<&str>) -> Fallible<String> {
+    let rc = find_collection(state, slug, owner)
+        .ok_or_else(|| ErrorReport::new(format!("Unknown collection: {slug}")))?;
+    let collection = Collection::with_db_path(rc.coll_dir.clone(), rc.db_path.clone())?;
+    let export = get_export(collection)?;
+    Ok(serde_json::to_string_pretty(&export)?)
 }
 
 #[derive(Serialize)]
@@ -232,12 +301,15 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
+    use crate::cmd::serve::config::ResolvedCollection;
+    use crate::cmd::serve::state::test_support::state_with_collections;
     use crate::db::ReviewRecord;
     use crate::helper::create_tmp_copy_of_test_directory;
     use crate::helper::create_tmp_directory;
     use crate::parser::parse_deck;
     use crate::types::card_hash::Hasher;
 
+    /// A collection with review history exports its cards and its sessions.
     #[test]
     fn test_full_export() -> Fallible<()> {
         let dir = create_tmp_copy_of_test_directory()?;
@@ -257,7 +329,7 @@ mod tests {
                 review_count: 1,
             });
             coll.db.update_card_performance(card.hash(), performance)?;
-            let review = ReviewRecord {
+            reviews.push(ReviewRecord {
                 card_hash: card.hash(),
                 reviewed_at: now,
                 grade: Grade::Easy,
@@ -267,19 +339,26 @@ mod tests {
                 interval_days: 1,
                 duration_ms: None,
                 due_date: now.date(),
-            };
-            reviews.push(review);
+            });
         }
         let session_id = coll.db.create_session(now)?;
         for review in &reviews {
             coll.db.insert_review_immediately(session_id, review)?;
         }
         coll.db.close_session(session_id, now)?;
-        // Export.
-        export_collection(Some(dir.clone()), None)?;
-        let tmp = create_tmp_directory()?;
-        let output = tmp.join("export.json").display().to_string();
-        export_collection(Some(dir), Some(output))?;
+
+        let export = get_export(Collection::new(Some(dir))?)?;
+        assert!(!export.cards.is_empty(), "the export must carry the cards");
+        assert_eq!(
+            export.sessions.len(),
+            1,
+            "the export must carry the closed session"
+        );
+        assert_eq!(
+            export.sessions[0].reviews.len(),
+            reviews.len(),
+            "every review must be exported"
+        );
         Ok(())
     }
 
@@ -306,5 +385,45 @@ mod tests {
             "export does not contain the v2 cloze hash"
         );
         Ok(())
+    }
+
+    /// The export route is owner-gated: the owner gets JSON, and another
+    /// logged-in user gets the same "unknown collection" treatment as for a
+    /// slug that does not exist at all.
+    #[test]
+    fn test_export_is_scoped_to_the_owner() -> Fallible<()> {
+        let dir = create_tmp_copy_of_test_directory()?;
+        let coll_dir = PathBuf::from(&dir);
+        let state = state_with_collections(vec![ResolvedCollection {
+            name: "Alice's Deck".to_string(),
+            slug: "alice-deck".to_string(),
+            coll_dir: coll_dir.clone(),
+            db_path: coll_dir.join("hashcards.db"),
+            owner: Some("alice@example.com".to_string()),
+        }]);
+
+        let json = export_inner(&state, "alice-deck", Some("alice@example.com"))?;
+        assert!(
+            json.contains("\"cards\""),
+            "the owner must receive the export, got: {json}"
+        );
+
+        assert!(
+            export_inner(&state, "alice-deck", Some("bob@example.com")).is_err(),
+            "another user must not be able to export Alice's collection"
+        );
+        assert!(
+            export_inner(&state, "alice-deck", None).is_err(),
+            "an anonymous caller must not be able to export an owned collection"
+        );
+        Ok(())
+    }
+
+    /// A slug can never break out of the Content-Disposition header.
+    #[test]
+    fn test_download_name_strips_header_breaking_characters() {
+        assert_eq!(download_name("japanese"), "japanese");
+        assert_eq!(download_name("a\"b\nc"), "abc");
+        assert_eq!(download_name("...."), "collection");
     }
 }

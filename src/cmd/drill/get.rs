@@ -15,38 +15,22 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use axum::extract::Query;
-use axum::extract::State;
-use axum::http::StatusCode;
-use axum::response::Html;
 use std::collections::HashSet;
 
 use maud::Markup;
 use maud::html;
 
-use crate::cmd::drill::server::AnswerControls;
+use crate::cmd::drill::render::AnswerControls;
 use crate::cmd::drill::state::MutableState;
-use crate::cmd::drill::state::ServerState;
-use crate::cmd::drill::template::page_template;
 use crate::db::ReviewRow;
-use crate::error::ErrorReport;
 use crate::error::Fallible;
 use crate::error::fail;
-use crate::flash::Flash;
 use crate::markdown::MarkdownRenderConfig;
 use crate::media::resolve::MediaResolverBuilder;
 use crate::types::card::Card;
 use crate::types::card::CardType;
 use crate::types::card_hash::CardHash;
 use crate::types::timestamp::Timestamp;
-
-/// What to show on the completion page.
-pub enum CompletionAction {
-    /// Show a "Shutdown" button (drill mode).
-    Shutdown,
-    /// Show a "Back to Collections" link (serve mode).
-    BackToCollections,
-}
 
 /// Everything the rendering functions need, decoupled from ServerState.
 pub struct RenderContext<'a> {
@@ -56,63 +40,6 @@ pub struct RenderContext<'a> {
     pub answer_controls: AnswerControls,
     pub form_action: &'a str,
     pub file_url_prefix: &'a str,
-    pub completion_action: CompletionAction,
-}
-
-/// A styled error page with a 500 status and a link back to the session.
-pub(crate) fn error_response(e: &ErrorReport) -> (StatusCode, Html<String>) {
-    let html = page_template(html! {
-        div.error {
-            h1 { "Error" }
-            p { (e) }
-            p { a href="/" { "\u{2190} Back to session" } }
-        }
-    });
-    (StatusCode::INTERNAL_SERVER_ERROR, Html(html.into_string()))
-}
-
-pub async fn get_handler(
-    State(state): State<ServerState>,
-    Query(query): Query<HashMap<String, String>>,
-) -> (StatusCode, Html<String>) {
-    let flash = Flash::from_query(&query);
-    match inner(state, flash).await {
-        Ok(html) => (StatusCode::OK, Html(html.into_string())),
-        Err(e) => error_response(&e),
-    }
-}
-
-async fn inner(state: ServerState, flash: Option<Flash>) -> Fallible<Markup> {
-    let mut mutable = state.mutable.lock();
-    // BUG-14: start the per-card timer when the card is served.
-    mutable.mark_card_shown();
-    // Heartbeat: tells another process's startup sweep that this session is
-    // alive, so it is not closed out from under us. A failure here must not
-    // fail the request; the sweep's cutoff is generous.
-    if let Err(e) = mutable.dbs.touch_all(Timestamp::now()) {
-        log::debug!("could not stamp session heartbeat: {e}");
-    }
-    let file_url_prefix = format!("http://localhost:{}/file", state.port);
-    let ctx = RenderContext {
-        directory: &state.directory,
-        total_cards: state.total_cards,
-        session_started_at: state.session_started_at,
-        answer_controls: state.answer_controls,
-        form_action: "/",
-        file_url_prefix: &file_url_prefix,
-        completion_action: CompletionAction::Shutdown,
-    };
-    let body = if mutable.finished_at.is_some() {
-        render_completion_page(&ctx, &mutable)?
-    } else {
-        render_session_page(&ctx, &mutable)?
-    };
-    let body = html! {
-        @if let Some(f) = &flash { (f.render()) }
-        (body)
-    };
-    let html = page_template(body);
-    Ok(html)
 }
 
 /// Human-readable progress: "N of M", plus "(+k repeats)" when cards
@@ -454,40 +381,28 @@ pub fn render_completion_page(ctx: &RenderContext, mutable: &MutableState) -> Fa
     Ok(html)
 }
 
-/// The action button (Shutdown or Home) and the auto-redirect notice for the
-/// completion page, depending on drill vs. serve mode.
+/// The "Home" button and the auto-redirect notice shown once a session is
+/// finished.
 fn completion_actions(ctx: &RenderContext) -> (Markup, Markup) {
-    match &ctx.completion_action {
-        CompletionAction::Shutdown => (
-            html! {
-                div.shutdown-container {
-                    form action=(ctx.form_action) method="post" {
-                        input #shutdown .shutdown-button.btn.btn-danger type="submit" name="action" value="Shutdown" title="Shut down the server";
-                    }
+    (
+        html! {
+            div.shutdown-container {
+                form #home-form action=(ctx.form_action) method="post" style="display:inline" {
+                    input type="hidden" name="action" value="Home";
+                    button #home .home-button.btn.btn-primary type="submit" { "Home" }
                 }
-            },
-            html! {},
-        ),
-        CompletionAction::BackToCollections => (
-            html! {
-                div.shutdown-container {
-                    form #home-form action=(ctx.form_action) method="post" style="display:inline" {
-                        input type="hidden" name="action" value="Home";
-                        button #home .home-button.btn.btn-primary type="submit" { "Home" }
-                    }
-                }
-            },
-            html! {
-                p.redirect-notice {
-                    "Returning to collections in "
-                    span #countdown { "5" }
-                    "s. "
-                    a #cancel-redirect href="#" { "Cancel" }
-                }
-                script { (maud::PreEscaped(REDIRECT_SCRIPT)) }
-            },
-        ),
-    }
+            }
+        },
+        html! {
+            p.redirect-notice {
+                "Returning to collections in "
+                span #countdown { "5" }
+                "s. "
+                a #cancel-redirect href="#" { "Cancel" }
+            }
+            script { (maud::PreEscaped(REDIRECT_SCRIPT)) }
+        },
+    )
 }
 
 /// Completion page for a session that ended before any card was graded:
@@ -551,7 +466,6 @@ mod tests {
     use crate::cmd::drill::state::SessionDbs;
     use crate::db::Database;
     use crate::db::ReviewRecord;
-    use crate::error::ErrorReport;
     use crate::fsrs::Grade;
     use crate::rng::TinyRng;
     use crate::types::card::CardContent;
@@ -580,22 +494,12 @@ mod tests {
             answer_controls: AnswerControls::Full,
             form_action: "/",
             file_url_prefix: "/file",
-            completion_action: CompletionAction::Shutdown,
         };
         let html = render_completion_page(&ctx, &mutable)?.into_string();
         assert!(html.contains("No cards were reviewed."), "html: {html}");
         assert!(!html.contains("Session Stats"));
         assert!(!html.contains("s/card"));
         Ok(())
-    }
-
-    #[test]
-    fn test_error_response_is_styled_500_with_home_link() {
-        let (status, Html(body)) = error_response(&ErrorReport::new("kaboom"));
-        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-        assert!(body.contains("class=\"error\""));
-        assert!(body.contains("kaboom"));
-        assert!(body.contains("href=\"/\""), "body: {body}");
     }
 
     fn make_empty_mutable() -> MutableState {
@@ -618,7 +522,6 @@ mod tests {
             answer_controls: AnswerControls::Full,
             form_action: "/",
             file_url_prefix: "http://localhost:0/file",
-            completion_action: CompletionAction::Shutdown,
         }
     }
 
@@ -773,7 +676,6 @@ mod tests {
             answer_controls: AnswerControls::Full,
             form_action: "/",
             file_url_prefix: "/file",
-            completion_action: CompletionAction::Shutdown,
         };
         let html = render_completion_page(&ctx, &mutable)?.into_string();
 

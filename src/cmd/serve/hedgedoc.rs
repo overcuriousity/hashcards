@@ -766,25 +766,6 @@ pub fn all_hedgedoc_entries(hedgedoc_sources: &[HedgedocSource]) -> Vec<Hedgedoc
         .collect()
 }
 
-/// Create a minimal hashcards.toml config file in the current working directory
-/// if it doesn't already exist. `data_dir` should be the actual data directory
-/// already in use by the running server so the generated config matches it.
-pub fn create_minimal_config(data_dir: &Path) -> Fallible<PathBuf> {
-    let config_path = std::env::current_dir()?.join("hashcards.toml");
-
-    if config_path.exists() {
-        return Ok(config_path);
-    }
-
-    let minimal_config = format!(
-        "# hashcards server configuration\n# Auto-generated on first HedgeDoc source add\n\n[server]\ndata_dir = {:?}\n",
-        data_dir.to_string_lossy()
-    );
-
-    std::fs::write(&config_path, minimal_config)?;
-    Ok(config_path)
-}
-
 /// Write the current set of HedgeDoc URLs back to the TOML config file.
 /// Other config keys are preserved by value, but comments and key ordering
 /// in the file are not guaranteed to survive the round-trip.

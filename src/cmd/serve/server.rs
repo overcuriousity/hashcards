@@ -66,6 +66,7 @@ use crate::cmd::serve::state::AppState;
 use crate::cmd::serve::state::HedgedocSource;
 use crate::cmd::serve::state::SharedSession;
 use crate::cmd::serve::state::evict_idle_sessions;
+use crate::cmd::serve::export::collection_export_handler;
 use crate::cmd::serve::stats::collection_stats_handler;
 use crate::cmd::signals::terminate_signal;
 use crate::db::Database;
@@ -352,6 +353,7 @@ pub async fn start_serve(config: ResolvedServeConfig) -> Fallible<()> {
         .route("/collection/{slug}", post(collection_post_handler))
         .route("/collection/{slug}/start", post(collection_start_handler))
         .route("/collection/{slug}/stats", get(collection_stats_handler))
+        .route("/collection/{slug}/export", get(collection_export_handler))
         .route("/collection/{slug}/bookmarks", get(bookmark_list_handler))
         .route(
             "/collection/{slug}/bookmarks/{hash}/delete",

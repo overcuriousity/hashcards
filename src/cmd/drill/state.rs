@@ -13,17 +13,13 @@
 // limitations under the License.
 
 use std::path::PathBuf;
-use std::sync::Arc;
 
-use parking_lot::Mutex;
 
-use tokio::sync::oneshot::Sender;
 
 use std::collections::HashMap;
 use std::collections::HashSet;
 
 use crate::cmd::drill::cache::Cache;
-use crate::cmd::drill::server::AnswerControls;
 use crate::db::Database;
 use crate::error::Fallible;
 use crate::fsrs::Grade;
@@ -33,18 +29,6 @@ use crate::types::card_hash::CardHash;
 use crate::types::performance::Jitter;
 use crate::types::performance::Performance;
 use crate::types::timestamp::Timestamp;
-
-#[derive(Clone)]
-pub struct ServerState {
-    pub port: u16,
-    pub directory: PathBuf,
-    pub macros: Vec<(String, String)>,
-    pub total_cards: usize,
-    pub session_started_at: Timestamp,
-    pub mutable: Arc<Mutex<MutableState>>,
-    pub shutdown_tx: Arc<Mutex<Option<Sender<()>>>>,
-    pub answer_controls: AnswerControls,
-}
 
 /// One collection's database, with the session row opened in it.
 pub struct SessionDb {

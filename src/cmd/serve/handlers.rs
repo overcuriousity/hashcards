@@ -21,7 +21,6 @@ use maud::html;
 use crate::flash::Flash;
 
 use crate::cmd::drill::cache::Cache;
-use crate::cmd::drill::get::CompletionAction;
 use crate::cmd::drill::get::RenderContext;
 use crate::cmd::drill::get::render_completion_page;
 use crate::cmd::drill::get::render_session_page;
@@ -29,7 +28,7 @@ use crate::cmd::drill::post::Action;
 use crate::cmd::drill::post::ActionResult;
 use crate::cmd::drill::post::FormData;
 use crate::cmd::drill::post::handle_action;
-use crate::cmd::drill::server::escape_js_string_literal;
+use crate::cmd::drill::render::escape_js_string_literal;
 use crate::cmd::drill::state::MutableState;
 use crate::cmd::drill::state::SessionDb;
 use crate::cmd::drill::state::SessionDbs;
@@ -50,7 +49,6 @@ use crate::cmd::serve::hedgedoc::build_source;
 use crate::cmd::serve::hedgedoc::cleanup_after_delete;
 use crate::cmd::serve::hedgedoc::commit_add;
 use crate::cmd::serve::hedgedoc::commit_delete;
-use crate::cmd::serve::hedgedoc::create_minimal_config;
 use crate::cmd::serve::hedgedoc::find_slug_collision;
 use crate::cmd::serve::hedgedoc::normalize_hedgedoc_url;
 use crate::cmd::serve::hedgedoc::slug_for_note;
@@ -217,7 +215,6 @@ fn collection_get_inner(
         answer_controls: session.answer_controls,
         form_action: &form_action,
         file_url_prefix: &file_url_prefix,
-        completion_action: CompletionAction::BackToCollections,
     };
     let body = if session.mutable.finished_at.is_some() {
         render_completion_page(&ctx, &session.mutable)?
@@ -1078,31 +1075,17 @@ pub async fn hedgedoc_add_handler(
         }
     };
 
-    // Get or create config path outside the lock, using spawn_blocking for the
-    // filesystem work so we don't block the async runtime.
-    let maybe_config_path = state.config_path.lock().clone();
-    let config_path = match maybe_config_path {
+    // A config file is mandatory, so the server cannot reach this point
+    // without one. Adding a note has nowhere to be persisted otherwise.
+    let config_path = match state.config_path.lock().clone() {
         Some(p) => p,
         None => {
-            let data_dir_owned = data_dir.clone();
-            let p =
-                match tokio::task::spawn_blocking(move || create_minimal_config(&data_dir_owned))
-                    .await
-                    .map_err(|e| ErrorReport::new(format!("Config creation task panicked: {e}")))
-                {
-                    Ok(Ok(p)) => p,
-                    Ok(Err(e)) | Err(e) => {
-                        log::error!("Failed to create minimal config file: {e}");
-                        return Flash::error(format!("Failed to create config file: {e}"))
-                            .redirect("/hedgedoc");
-                    }
-                };
-            *state.config_path.lock() = Some(p.clone());
-            // The config now references the temp data dir; stop cleanup on exit.
-            if let Some(tracker) = state.config._temp_dir.as_ref() {
-                tracker.dismiss();
-            }
-            p
+            log::error!("Cannot persist a HedgeDoc source: the server has no config file path");
+            return Flash::error(
+                "Cannot save this HedgeDoc source: the server was started without a \
+                 configuration file to write it back to.",
+            )
+            .redirect("/hedgedoc");
         }
     };
 
@@ -1297,7 +1280,7 @@ mod tests {
     use super::create_session_from_sources;
     use super::deck_sources;
     use super::run_blocking;
-    use crate::cmd::drill::server::AnswerControls;
+    use crate::cmd::drill::render::AnswerControls;
     use crate::cmd::drill::state::MutableState;
     use crate::cmd::drill::state::SessionDbs;
     use crate::cmd::serve::config::ResolvedCollection;
@@ -1349,7 +1332,6 @@ mod tests {
             hedgedoc_entries: Vec::new(),
             custom_decks: Vec::new(),
             session_timeout_minutes: 1440,
-            _temp_dir: None,
             oidc: None,
         };
         let state = AppState {
