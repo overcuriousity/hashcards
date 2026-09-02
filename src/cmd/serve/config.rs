@@ -371,12 +371,15 @@ impl ResolvedServeConfig {
         let oidc = match config.oidc {
             None => None,
             Some(o) => {
-                if !o.scopes.iter().any(|s| s == "openid") || !o.scopes.iter().any(|s| s == "email")
-                {
-                    return fail(
-                        "configuration error: [oidc].scopes must include `openid` and `email` \
-                         (the email claim is required to match collections to their owner)",
-                    );
+                // `openid` is what makes this OpenID Connect rather than plain
+                // OAuth, so it is required. `email` is not: a provider that
+                // sends no email claim is identified by its subject instead,
+                // which every ID token carries (see `callback_handler`). Most
+                // deployments still want `email`, because a subject is an
+                // opaque string that nobody wants to paste into an `owner`
+                // key, so it stays in the default scope list.
+                if !o.scopes.iter().any(|s| s == "openid") {
+                    return fail("configuration error: [oidc].scopes must include `openid`");
                 }
                 // `Key::derive_from` requires at least 32 bytes and panics
                 // below that, so a short secret has to be rejected here with
@@ -710,6 +713,41 @@ path = "beta"
             toml::from_str(toml_str).map_err(|e| ErrorReport::new(e.to_string()))?;
         let resolved = ResolvedServeConfig::from_toml(config)?;
         assert_eq!(resolved.collections.len(), 2);
+        Ok(())
+    }
+
+    /// `email` is no longer a required scope: a provider that sends no email
+    /// claim identifies the user by subject instead. Only `openid` is
+    /// mandatory, since without it this is not OpenID Connect at all.
+    #[test]
+    fn test_oidc_scopes_need_only_openid() -> Fallible<()> {
+        let data_dir = current_dir()?.join("var-lib-hashcards-oidc-scopes-test");
+        let config_toml = |scopes: &str| {
+            format!(
+                "[server]\ndata_dir = {:?}\n\n\
+                 [oidc]\n\
+                 issuer_url = \"https://idp.example.com\"\n\
+                 client_id = \"abc\"\n\
+                 client_secret = \"secret\"\n\
+                 external_url = \"https://hashcards.example.com\"\n\
+                 session_secret = \"a-very-long-random-session-secret-value\"\n\
+                 scopes = {scopes}\n",
+                data_dir
+            )
+        };
+
+        let config: ServeConfig = toml::from_str(&config_toml("[\"openid\"]"))?;
+        ResolvedServeConfig::from_toml(config)
+            .map_err(|e| ErrorReport::new(format!("`openid` alone must be accepted: {e}")))?;
+
+        let config: ServeConfig = toml::from_str(&config_toml("[\"email\", \"profile\"]"))?;
+        match ResolvedServeConfig::from_toml(config) {
+            Ok(_) => panic!("expected an error for scopes without `openid`"),
+            Err(e) => assert!(
+                e.to_string().contains("openid"),
+                "the error must name the missing scope: {e}"
+            ),
+        }
         Ok(())
     }
 
