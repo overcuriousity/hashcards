@@ -1,1362 +1,1024 @@
-* {
-    margin: 0;
-    padding: 0;
-    font-weight: normal;
+/* ══ hashcards-web ═════════════════════════════════════════════════════════
+   One stylesheet, served at /style.css and linked by every page.
+
+   The palette, geometry and component vocabulary are the house identity
+   shared with Vestigo and engram: a warm paper light theme, a cool ink dark
+   theme, one accent, and a small set of named steps that components pick from
+   rather than inventing numbers. Ported here from engram's `assets/css/`,
+   which had already converted them out of Vestigo's Tailwind `@theme`.
+
+   Layers, in the order the cascade needs them:
+     1. tokens      — palette, type scale, geometry, both themes
+     2. base        — the reset, the document, focus, scrollbars
+     3. components  — buttons, inputs, tables, notices: the shared vocabulary
+     4. pages       — drill, finished, landing, browse, bookmarks, edit, stats
+     5. vendor      — the dark half of highlight.js, which ships light only
+     6. responsive  — the phone
+
+   Every colour in here is a token. A literal hex outside layer 1 is a bug:
+   it is the one thing that cannot follow the theme. */
+
+
+/* ══ 1. Tokens ═════════════════════════════════════════════════════════════ */
+
+/* Vendored rather than fetched: the server is expected to work on a machine
+   with no route to the internet, which is already why KaTeX and highlight.js
+   live in `vendor/`. See `src/cmd/drill/fonts.rs` for the route. */
+@font-face { font-family: Inter; font-weight: 400; font-display: swap;
+  src: url("/fonts/inter-400.woff2") format("woff2"); }
+@font-face { font-family: Inter; font-weight: 500; font-display: swap;
+  src: url("/fonts/inter-500.woff2") format("woff2"); }
+@font-face { font-family: Inter; font-weight: 600; font-display: swap;
+  src: url("/fonts/inter-600.woff2") format("woff2"); }
+@font-face { font-family: "JetBrains Mono"; font-weight: 400; font-display: swap;
+  src: url("/fonts/jetbrains-mono-400.woff2") format("woff2"); }
+
+:root {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, Consolas, monospace;
+
+  --text-xs: 0.75rem;
+  --text-sm: 0.8125rem;
+  --text-base: 0.875rem;
+  --text-md: 0.9375rem;
+  --text-lg: 1.125rem;
+  --text-xl: 1.375rem;
+  --text-2xl: 1.75rem;
+
+  --radius-sm: 3px;
+  --radius-md: 6px;
+
+  /* The light half of the palette, on the same bare `:root`: one block,
+     because two `:root` blocks in a row are one block written twice. */
+  --color-bg-base: #f8f6f1;
+  --color-bg-surface: #f2f0ea;
+  --color-bg-elevated: #ffffff;
+  --color-bg-hover: #ece9e2;
+  --color-bg-active: #e2ded3;
+
+  --color-fg-primary: #2d2d2d;
+  --color-fg-secondary: #5a5a5a;
+  --color-fg-muted: #7a7a72;
+
+  --color-border: #ddd8cc;
+  --color-border-strong: #c9c3b4;
+  --color-border-subtle: #eae7de;
+
+  --color-accent: #3b6e91;
+  --color-accent-dim: rgba(59, 110, 145, 0.1);
+  --color-accent-muted: rgba(59, 110, 145, 0.25);
+  --color-accent-fg: #ffffff;
+
+  --color-danger: #b3382c;  --color-danger-dim: rgba(179, 56, 44, 0.1);
+  --color-warning: #9a6a1a; --color-warning-dim: rgba(154, 106, 26, 0.1);
+  --color-due: #b5651d;
+  --color-success: #2f7a4f; --color-success-dim: rgba(47, 122, 79, 0.1);
+
+  /* The one shadow in the app: the flashcard, lifted off the table it sits
+     on. A token because it has to be nearly invisible in the dark theme,
+     where a light-theme shadow reads as grime around the card. */
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.04), 0 12px 32px rgba(0, 0, 0, 0.07);
+
+  color-scheme: light;
 }
 
-*,
-*::before,
-*::after {
-    box-sizing: border-box;
+/* Three states, two selectors.
+
+   The system preference applies unless an explicit light choice says
+   otherwise; an explicit dark choice applies whatever the system says. Light
+   needs no block of its own — it is already on bare `:root` above, and
+   `[data-theme="light"]` wins simply by excluding itself from the media
+   query. The declarations are written twice because CSS has no way to give
+   one block two conditions; the two blocks are adjacent so they are changed
+   together. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --color-bg-base: #0e1015;
+    --color-bg-surface: #14171d;
+    --color-bg-elevated: #1b1e26;
+    --color-bg-hover: #262a34;
+    --color-bg-active: #2d3140;
+
+    --color-fg-primary: #e2e4ec;
+    --color-fg-secondary: #8b8fa8;
+    --color-fg-muted: #7d82a0;
+
+    --color-border: #232636;
+    --color-border-strong: #2e3244;
+    --color-border-subtle: #191c26;
+
+    --color-accent: #5aa8b0;
+    --color-accent-dim: rgba(90, 168, 176, 0.15);
+    --color-accent-muted: rgba(90, 168, 176, 0.35);
+    --color-accent-fg: #0e1015;
+
+    --color-danger: #e05252;  --color-danger-dim: rgba(224, 82, 82, 0.15);
+    --color-warning: #e8a839; --color-warning-dim: rgba(232, 168, 57, 0.15);
+    --color-due: #e0a060;
+    --color-success: #4caf7d; --color-success-dim: rgba(76, 175, 125, 0.15);
+
+    --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.3), 0 12px 32px rgba(0, 0, 0, 0.35);
+
+    color-scheme: dark;
+  }
 }
 
-html,
-body,
-.root {
-    width: 100vw;
-    height: 100vh;
-    height: 100dvh;
+:root[data-theme="dark"] {
+  --color-bg-base: #0e1015;
+  --color-bg-surface: #14171d;
+  --color-bg-elevated: #1b1e26;
+  --color-bg-hover: #262a34;
+  --color-bg-active: #2d3140;
+
+  --color-fg-primary: #e2e4ec;
+  --color-fg-secondary: #8b8fa8;
+  --color-fg-muted: #7d82a0;
+
+  --color-border: #232636;
+  --color-border-strong: #2e3244;
+  --color-border-subtle: #191c26;
+
+  --color-accent: #5aa8b0;
+  --color-accent-dim: rgba(90, 168, 176, 0.15);
+  --color-accent-muted: rgba(90, 168, 176, 0.35);
+  --color-accent-fg: #0e1015;
+
+  --color-danger: #e05252;  --color-danger-dim: rgba(224, 82, 82, 0.15);
+  --color-warning: #e8a839; --color-warning-dim: rgba(232, 168, 57, 0.15);
+  --color-due: #e0a060;
+  --color-success: #4caf7d; --color-success-dim: rgba(76, 175, 125, 0.15);
+
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.3), 0 12px 32px rgba(0, 0, 0, 0.35);
+
+  color-scheme: dark;
+}
+
+
+/* ══ 2. Base ═══════════════════════════════════════════════════════════════ */
+
+*, *::before, *::after { box-sizing: border-box; }
+
+html {
+  font-size: 16px;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
 }
 
 body {
-    font-family:
-        "TeX Gyre Termes", "Nimbus Roman No9 L", "Times New Roman", "Times",
-        serif;
+  margin: 0;
+  min-height: 100dvh;
+  background: var(--color-bg-base);
+  color: var(--color-fg-primary);
+  font-family: var(--font-sans);
+  font-size: var(--text-base);
+  line-height: 1.5;
 }
 
-.root {
-    display: flex;
-    flex-direction: column;
+/* The drill is the one screen that is a fixed frame rather than a document:
+   header, card, controls, with the card scrolling between two pinned bars. It
+   claims the viewport; every other page is prose and scrolls normally.
+   Scoped with `:has` so the claim lives with the layout that makes it, and no
+   page has to remember to opt out. */
+body:has(.root) { height: 100dvh; overflow: hidden; }
 
-    .header,
-    .controls {
-        background: #f8f8f8;
-    }
+h1, h2, h3, h4 { margin: 0; font-weight: 600; }
+h1 { font-size: var(--text-2xl); letter-spacing: -0.02em; }
+h2 { font-size: var(--text-xl); letter-spacing: -0.01em; }
+h3 { font-size: var(--text-lg); }
 
-    .header {
-        padding: 32px;
-        border-bottom: 1px solid black;
-        display: flex;
-        flex-direction: row;
-        justify-content: center;
-        align-items: center;
+p { margin: 0 0 0.75rem; }
+p:last-child { margin-bottom: 0; }
 
-        .progress {
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            gap: 6px;
-        }
+a { color: var(--color-accent); }
 
-        .progress-text {
-            font-size: 14px;
-            color: #555;
-        }
+code, pre, .mono { font-family: var(--font-mono); }
 
-        .progress-bar {
-            width: min(300px, 80vw);
-            height: 24px;
-            border: 1px solid #999;
-            border-radius: 12px;
-            background: white;
-            overflow: hidden;
-
-            .progress-fill {
-                height: 100%;
-                background: palegreen;
-            }
-        }
-    }
-
-    .card-container {
-        flex: 1;
-        display: flex;
-        flex-direction: column;
-        justify-content: center;
-        align-items: center;
-        background: #fcfcfc;
-        overflow: hidden;
-
-        .card {
-            background: white;
-            display: flex;
-            flex-direction: column;
-
-            .card-header {
-                border-bottom: 1px solid black;
-                padding: 24px;
-
-                h1 {
-                    font-size: 36px;
-                }
-            }
-
-            .card-content {
-                flex: 1;
-                display: flex;
-                flex-direction: column;
-                overflow-x: hidden;
-                overflow-y: auto;
-
-                .question,
-                .answer,
-                .prompt {
-                    padding: 24px;
-                }
-
-                .question {
-                    border-bottom: 1px solid black;
-                }
-
-                .answer {
-                    min-height: 30px;
-                }
-
-                .rich-text {
-                    font-size: 30px;
-                    text-align: left;
-                    line-height: 1.4;
-
-                    .cloze {
-                        width: 30px;
-                        background: #a0a0a0;
-                        text-decoration: none;
-                        border-radius: 8px;
-                        color: transparent;
-                    }
-
-                    .cloze-reveal {
-                        color: royalblue;
-                    }
-
-                    img {
-                        display: block;
-                        margin-left: auto;
-                        margin-right: auto;
-                        max-width: 100%;
-                        height: auto;
-                    }
-
-                    ul,
-                    ol {
-                        padding-left: 24px;
-                    }
-
-                    p,
-                    img,
-                    ol,
-                    ul,
-                    blockquote,
-                    table,
-                    pre {
-                        &:not(:last-child) {
-                            margin-bottom: 16px;
-                        }
-                    }
-
-                    blockquote {
-                        background: #f7f7f7;
-                        border-left: 4px solid #ccc;
-                        padding: 8px 12px;
-                    }
-
-                    table {
-                        border-collapse: collapse;
-                        width: 100%;
-                        font-size: 0.65em;
-                        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
-                        line-height: 1.6;
-                        border: 1px solid #999;
-
-                        th,
-                        td {
-                            border: 1px solid #bbb;
-                            padding: 10px 14px;
-                            text-align: left;
-                            vertical-align: top;
-                        }
-
-                        th {
-                            background: #e8e8e8;
-                            font-weight: 600;
-                            border: 1px solid #999;
-                        }
-
-                        tbody tr:nth-child(odd) {
-                            background: #ffffff;
-                        }
-
-                        tbody tr:nth-child(even) {
-                            background: #f5f5f5;
-                        }
-
-                        code {
-                            font-size: 0.85em;
-                            background: #ececec;
-                        }
-                    }
-
-                    code {
-                        background: #f7f7f7;
-                        border: 1px solid #ddd;
-                        padding: 2px 6px;
-                        border-radius: 3px;
-                        font-family: "Menlo", "Monaco", "Courier New", monospace;
-                        font-size: 0.7em;
-                        color: inherit;
-                    }
-
-                    pre {
-                        background: #f7f7f7;
-                        border: 1px solid #ddd;
-                        border-radius: 4px;
-                        padding: 12px;
-                        overflow-x: auto;
-                        font-size: 0.7em;
-                        line-height: 1.5;
-
-                        code {
-                            background: transparent;
-                            border: none;
-                            padding: 0;
-                            border-radius: 0;
-                            font-size: 0.85em;
-                            color: inherit;
-                        }
-                    }
-
-                    audio {
-                        width: 100%;
-                    }
-
-                    .katex {
-                        font-size: 1em;
-                    }
-                }
-            }
-        }
-    }
-
-    .controls {
-        border-top: 1px solid black;
-
-        form {
-            display: flex;
-            justify-content: space-between;
-
-            .spacer {
-                flex: 1;
-            }
-
-            button {
-                -webkit-appearance: none;
-                appearance: none;
-                background: white;
-                border: 1px solid #999;
-                padding: 7px 12px;
-                font-size: 16px;
-                color: black;
-                font-family:
-                    system-ui,
-                    -apple-system,
-                    "Helvetica Neue",
-                    sans-serif;
-                font-weight: 600;
-                border-radius: 6px;
-                cursor: pointer;
-                box-shadow: #ccc 0px 1px 3px 0px;
-                transition:
-                    background-color 0.15s,
-                    border-color 0.15s,
-                    box-shadow 0.15s;
-
-                &:hover {
-                    background: #f0f0f0;
-                    border-color: #777;
-                    box-shadow: #bbb 0px 2px 5px 0px;
-                }
-
-                &:active {
-                    background: #e4e4e4;
-                    border-color: #666;
-                    box-shadow: #ddd 0px 0px 2px 0px;
-                }
-
-                &.bookmark-active {
-                    background: #fffde7;
-                    border-color: #f9a825;
-                    color: #5d4037;
-
-                    &:hover {
-                        background: #fff9c4;
-                        border-color: #f9a825;
-                    }
-                }
-            }
-
-            input {
-                -webkit-appearance: none;
-                appearance: none;
-                background: white;
-                border: 1px solid #999;
-                padding: 7px 12px;
-                font-size: 16px;
-                color: black;
-                font-family:
-                    system-ui,
-                    -apple-system,
-                    "Helvetica Neue",
-                    sans-serif;
-                font-weight: 600;
-                border-radius: 6px;
-                cursor: pointer;
-                box-shadow: #ccc 0px 1px 3px 0px;
-                transition:
-                    background-color 0.15s,
-                    border-color 0.15s,
-                    box-shadow 0.15s;
-
-                &:hover {
-                    background: #f0f0f0;
-                    border-color: #777;
-                    box-shadow: #bbb 0px 2px 5px 0px;
-                }
-
-                &:active {
-                    background: #e4e4e4;
-                    border-color: #666;
-                    box-shadow: #ddd 0px 0px 2px 0px;
-                }
-
-                &:disabled {
-                    cursor: not-allowed;
-                    opacity: 0.4;
-                }
-
-                &:disabled:hover,
-                &:disabled:active {
-                    background: white;
-                    border-color: #999;
-                    box-shadow: #ccc 0px 1px 3px 0px;
-                }
-            }
-        }
-    }
+/* A small uppercase caption. Named rather than applied to an element, so a
+   real heading can stay a real heading. */
+.label {
+  font-size: var(--text-xs); color: var(--color-fg-muted);
+  text-transform: uppercase; letter-spacing: 0.04em;
 }
 
-/* ── Shared button system ──────────────────────────────────────── */
-.btn {
-    -webkit-appearance: none;
-    appearance: none;
-    display: inline-block;
-    font-family: system-ui, -apple-system, "Helvetica Neue", sans-serif;
-    font-weight: 600;
-    font-size: 16px;
-    border-radius: 6px;
-    padding: 10px 24px;
-    cursor: pointer;
-    border: 1px solid transparent;
-    text-decoration: none;
-    text-align: center;
-    transition:
-        background-color 0.15s,
-        border-color 0.15s;
+.muted { color: var(--color-fg-muted); }
 
-    &:disabled {
-        opacity: 0.4;
-        cursor: not-allowed;
-    }
+/* Counts, dates and durations line up under each other in tables. */
+.num, .val, .deck-counts, .bookmark-date, .stats .val {
+  font-feature-settings: "tnum";
+  font-variant-numeric: tabular-nums;
+}
+
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--color-border-strong); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--color-fg-muted); }
+
+:focus-visible { outline: 1.5px solid var(--color-accent); outline-offset: 2px; }
+::selection { background: var(--color-accent-dim); }
+
+
+/* ══ 3. Components ═════════════════════════════════════════════════════════ */
+
+/* ── Buttons ───────────────────────────────────────────────────────────────
+   `.btn` is the shape; the modifier is the voice. Submit inputs are included
+   because the drill's grade controls are `input[type=submit]` — a form that
+   must post the value of the button that was pressed, which a `<button>`
+   inside a `<form>` also does but which the existing markup does with
+   inputs. Styling both here keeps them one control. */
+.btn,
+.controls button,
+.controls input[type="submit"] {
+  -webkit-appearance: none;
+  appearance: none;
+  display: inline-flex; align-items: center; justify-content: center; gap: 0.375rem;
+  min-height: 36px; padding: 0 0.875rem;
+  font-family: inherit; font-size: var(--text-base); font-weight: 500;
+  line-height: 1.2; white-space: nowrap; text-align: center; text-decoration: none;
+  border-radius: var(--radius-sm); cursor: pointer;
+  background: var(--color-bg-active); color: var(--color-fg-primary);
+  border: 1px solid var(--color-border-strong);
+  transition: background 120ms ease, border-color 120ms ease, color 120ms ease, opacity 120ms ease;
+}
+
+.btn:hover,
+.controls button:hover,
+.controls input[type="submit"]:hover {
+  background: var(--color-bg-hover);
+  border-color: var(--color-fg-muted);
+}
+
+.btn:disabled,
+.controls button:disabled,
+.controls input[type="submit"]:disabled {
+  opacity: 0.4; cursor: not-allowed; pointer-events: none;
 }
 
 .btn-primary {
-    background: black;
-    color: white;
-    border-color: black;
-
-    &:hover {
-        background: #222;
-        border-color: #222;
-    }
-
-    &:active {
-        background: #000;
-        border-color: #000;
-    }
+  background: var(--color-accent); color: var(--color-accent-fg);
+  font-weight: 600; border-color: transparent;
 }
+.btn-primary:hover { background: var(--color-accent); border-color: transparent; opacity: 0.9; }
 
 .btn-secondary {
-    background: white;
-    color: black;
-    border-color: #999;
-
-    &:hover {
-        background: #f0f0f0;
-        border-color: #777;
-    }
-
-    &:active {
-        background: #e4e4e4;
-        border-color: #666;
-    }
+  background: var(--color-bg-elevated); color: var(--color-fg-primary);
+  border-color: var(--color-border-strong);
 }
+.btn-secondary:hover { background: var(--color-bg-hover); }
 
 .btn-danger {
-    background: #dc3545;
-    color: white;
-    border-color: #c82333;
-    box-shadow: rgba(220, 53, 69, 0.3) 0px 2px 8px 0px;
+  background: var(--color-danger-dim); color: var(--color-danger);
+  border-color: var(--color-danger);
+}
+.btn-danger:hover { background: var(--color-danger); color: #fff; border-color: var(--color-danger); }
 
-    &:hover {
-        background: #c82333;
-        box-shadow: rgba(220, 53, 69, 0.5) 0px 4px 12px 0px;
-    }
+.btn-sm { min-height: 30px; padding: 0 0.625rem; font-size: var(--text-xs); }
 
-    &:active {
-        background: #bd2130;
-        box-shadow: rgba(220, 53, 69, 0.2) 0px 1px 4px 0px;
-    }
+/* ── Fields ────────────────────────────────────────────────────────────── */
+
+.input, .textarea, .select,
+.add-source-url, .note-input, .edit-textarea, .limit-select {
+  width: 100%;
+  font-family: inherit; font-size: var(--text-base);
+  color: var(--color-fg-primary); background: var(--color-bg-elevated);
+  border: 1px solid var(--color-border-strong); border-radius: var(--radius-sm);
+  padding: 0 0.75rem;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+.input, .select, .add-source-url, .note-input, .limit-select { min-height: 36px; }
+.textarea, .edit-textarea {
+  padding: 0.625rem 0.75rem; resize: vertical;
+  font-family: var(--font-mono); line-height: 1.6;
 }
 
-.finished {
-    h1 {
-        text-align: center;
-    }
+.input::placeholder, .textarea::placeholder,
+.add-source-url::placeholder, .note-input::placeholder,
+.edit-textarea::placeholder { color: var(--color-fg-muted); }
 
-    .summary {
-        font-size: 24px;
-        margin-bottom: 24px;
-    }
-
-    .redirect-notice {
-        font-size: 16px;
-        color: #666;
-        margin-bottom: 32px;
-        text-align: center;
-
-        a {
-            color: black;
-            text-decoration: underline;
-        }
-    }
-
-    details {
-        margin-bottom: 32px;
-
-        summary {
-            font-size: 20px;
-            font-weight: 600;
-            cursor: pointer;
-            padding-bottom: 8px;
-            border-bottom: 1px solid #ccc;
-            margin-bottom: 8px;
-            list-style: none;
-
-            &::marker, &::-webkit-details-marker {
-                display: none;
-            }
-
-            &::before {
-                content: "\25b6\00a0";
-                font-size: 14px;
-                color: #666;
-            }
-        }
-
-        &[open] summary::before {
-            content: "\25bc\00a0";
-        }
-    }
-
-    .stats {
-        table {
-            width: 100%;
-            border-collapse: collapse;
-
-            tr {
-                border-bottom: 1px solid #eee;
-
-                td {
-                    padding-top: 12px;
-                    padding-bottom: 12px;
-
-                    &.key {
-                        font-family: "SF Pro", sans-serif;
-                        font-weight: 500;
-                        width: auto;
-                        white-space: nowrap;
-                    }
-
-                    &.val {
-                        font-family: "SF Pro", sans-serif;
-                        font-feature-settings: "tnum";
-                        font-variant-numeric: tabular-nums;
-                        width: 100%;
-                    }
-                }
-            }
-        }
-    }
-
-    .shutdown-container {
-        margin-top: 48px;
-        text-align: center;
-
-        form {
-            display: inline-block;
-        }
-
-        .shutdown-button,
-        .home-button {
-            font-size: 18px;
-            padding: 12px 24px;
-        }
-    }
+.input:focus, .textarea:focus, .select:focus,
+.add-source-url:focus, .note-input:focus,
+.edit-textarea:focus, .limit-select:focus {
+  outline: none; border-color: var(--color-accent);
 }
 
-.browse {
-    max-width: 800px;
-    margin: 0 auto;
-    padding: 48px 24px;
+.select, .limit-select {
+  -webkit-appearance: none; appearance: none;
+  width: auto; padding-right: 2rem; cursor: pointer;
+  /* The disclosure caret, drawn rather than fetched: an inline SVG data URI
+     needs no route and no second request. `currentColor` cannot cross into a
+     background image, so the arrow is drawn in a colour that reads against
+     both themes. */
+  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath fill='none' stroke='%237a7a72' stroke-width='1.5' d='M2.5 4.5 6 8l3.5-3.5'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 0.625rem center;
+  background-size: 12px;
+}
+.select:hover, .limit-select:hover { background-color: var(--color-bg-hover); }
 
-    .browse-header {
-        margin-bottom: 32px;
+input[type="checkbox"] { accent-color: var(--color-accent); }
 
-        .back-link {
-            display: inline-flex;
-            align-items: center;
-            color: #666;
-            text-decoration: none;
-            font-size: 14px;
-            padding: 4px 10px;
-            border: 1px solid #ddd;
-            border-radius: 6px;
+/* ── Tables ────────────────────────────────────────────────────────────── */
 
-            &:hover {
-                color: #333;
-                background: #f5f5f5;
-                border-color: #bbb;
-            }
-        }
-
-        h1 {
-            font-size: 36px;
-            margin-top: 8px;
-        }
-    }
-
-    .deck-tree {
-        border: 1px solid black;
-        overflow-x: auto;
-        overflow-y: hidden;
-        margin-bottom: 24px;
-    }
-
-    .deck-node {
-        .deck-row {
-            display: flex;
-            align-items: center;
-            padding: 10px 16px;
-            border-bottom: 1px solid #eee;
-            gap: 8px;
-
-            &:hover {
-                background: #f8f8f8;
-            }
-
-            .toggle-children {
-                cursor: pointer;
-                width: 20px;
-                text-align: center;
-                user-select: none;
-                font-size: 12px;
-                color: #666;
-            }
-
-            .toggle-placeholder {
-                width: 20px;
-            }
-
-            .deck-label {
-                flex: 1;
-                display: flex;
-                align-items: center;
-                gap: 8px;
-                cursor: pointer;
-
-                input[type="checkbox"] {
-                    width: 16px;
-                    height: 16px;
-                    cursor: pointer;
-                }
-
-                .deck-name {
-                    font-size: 16px;
-                }
-            }
-
-            .deck-counts {
-                font-size: 14px;
-                font-feature-settings: "tnum";
-                font-variant-numeric: tabular-nums;
-                color: #666;
-                white-space: nowrap;
-
-                .deck-due {
-                    font-weight: 600;
-                    color: #333;
-                }
-
-                .deck-due.muted {
-                    color: #767676;
-                    font-weight: normal;
-                }
-            }
-
-            .edit-link {
-                font-size: 12px;
-                color: #666;
-                text-decoration: none;
-                white-space: nowrap;
-                margin-left: 4px;
-
-                &:hover {
-                    color: #333;
-                }
-            }
-        }
-
-        &:last-child > .deck-row {
-            border-bottom: none;
-        }
-    }
-
-    .browse-controls {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-
-        .select-controls {
-            font-size: 14px;
-
-            a {
-                color: black;
-                text-decoration: none;
-
-                &:hover {
-                    text-decoration: underline;
-                }
-            }
-        }
-
-        /* .drill-button visual styles come from .btn.btn-primary */
-
-        .limit-drill {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-        }
-
-        .limit-select {
-            -webkit-appearance: none;
-            appearance: none;
-            padding: 10px 16px;
-            border: 1px solid #999;
-            border-radius: 6px;
-            font-size: 16px;
-            font-family: system-ui, -apple-system, "Helvetica Neue", sans-serif;
-            background: white;
-            cursor: pointer;
-
-            &:hover {
-                background: #f0f0f0;
-                border-color: #777;
-            }
-        }
-    }
-
-    .empty {
-        color: #666;
-        font-size: 18px;
-    }
-
-    .bookmark-bar {
-        margin-top: 16px;
-    }
+.collection-table, .deck-stats, .grade-dist, .stats table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--text-base);
 }
 
-.landing {
-    max-width: 800px;
-    margin: 0 auto;
-    padding: 48px 24px;
+.collection-table th, .deck-stats th {
+  text-align: left; font-weight: 500; font-size: var(--text-xs);
+  color: var(--color-fg-muted); text-transform: uppercase; letter-spacing: 0.03em;
+  padding: 0 0.75rem 0.5rem;
+  border-bottom: 1px solid var(--color-border);
+}
+.collection-table td, .deck-stats td {
+  padding: 0.625rem 0.75rem;
+  border-bottom: 1px solid var(--color-border-subtle);
+}
+.collection-table tr:hover td { background: var(--color-bg-hover); }
+.collection-table .num { text-align: right; }
+.collection-table .muted td { color: var(--color-fg-muted); }
+.collection-table .no-cards { font-size: var(--text-xs); color: var(--color-fg-muted); }
+.collection-table .drill-link { min-height: 30px; padding: 0 0.75rem; font-size: var(--text-xs); }
 
-    --error-color: #b42318;
-    --success-color: #027a48;
+.table-scroll { overflow-x: auto; }
 
-    h1 {
-        font-size: 36px;
-        margin-bottom: 32px;
-    }
-
-    h2 {
-        font-size: 26px;
-        margin-bottom: 12px;
-    }
-
-    .notice {
-        margin-bottom: 24px;
-        padding: 12px 16px;
-        border: 1px solid #f3c5bd;
-        border-radius: 8px;
-        background: #fff4f1;
-        color: #7a271a;
-
-        p:not(:last-child) {
-            margin-bottom: 8px;
-        }
-    }
-
-    .inline-form {
-        display: inline;
-    }
-
-    .sync-button {
-        /* visual styles come from .btn.btn-secondary */
-        font-size: 14px;
-        padding: 6px 16px;
-    }
-
-    .sync-bar {
-        display: flex;
-        align-items: center;
-        gap: 16px;
-        margin-bottom: 32px;
-        padding: 12px 16px;
-        background: #f8f8f8;
-        border: 1px solid #e0e0e0;
-        border-radius: 8px;
-
-        .sync-status {
-            flex: 1;
-            font-size: 14px;
-            color: #666;
-        }
-    }
-
-    .add-source-form {
-        margin-bottom: 28px;
-    }
-
-    .add-source-row {
-        display: flex;
-        align-items: center;
-        gap: 8px;
-    }
-
-    .add-source-url {
-        flex: 1;
-        padding: 0.4rem 0.6rem;
-        font-size: 1rem;
-        border: 1px solid #bbb;
-        border-radius: 6px;
-    }
-
-    .source-url-cell {
-        font-size: 0.85rem;
-        word-break: break-all;
-    }
-
-    .status-error {
-        color: var(--error-color);
-        font-weight: 600;
-    }
-
-    .status-ok {
-        color: var(--success-color);
-        font-weight: 600;
-    }
-
-    .empty {
-        color: #666;
-        font-size: 18px;
-    }
-
-    .collection-table {
-        width: 100%;
-        border-collapse: collapse;
-        font-size: 18px;
-
-        th {
-            text-align: left;
-            padding: 12px 16px;
-            border-bottom: 1px solid black;
-        }
-
-        td {
-            padding: 12px 16px;
-            border-bottom: 1px solid #eee;
-        }
-
-        .num {
-            text-align: right;
-            font-feature-settings: "tnum";
-            font-variant-numeric: tabular-nums;
-        }
-
-        .muted td {
-            color: #666;
-        }
-
-        .drill-link {
-            /* visual styles come from .btn.btn-primary */
-            font-size: 14px;
-            padding: 6px 16px;
-        }
-
-        .no-cards {
-            font-size: 14px;
-            color: #666;
-        }
-    }
+/* ── Surfaces: notices, flashes, the error page ────────────────────────────
+   Four things that say something went right, went wrong, or needs attention.
+   One shape — tinted panel, matching border, matching text — and the tint is
+   the only difference, so they are recognisably the same object speaking in
+   different registers. */
+.notice, .flash, .error, .edit-warning {
+  padding: 0.75rem 1rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-surface);
+  font-size: var(--text-base);
 }
 
-/* ── Bookmark list ─────────────────────────────────────────────────────────── */
-.bookmarks {
-    max-width: 800px;
-    margin: 0 auto;
-    padding: 48px 24px;
-
-    .browse-header {
-        margin-bottom: 32px;
-
-        .back-link {
-            display: inline-flex;
-            align-items: center;
-            color: #666;
-            text-decoration: none;
-            font-size: 14px;
-            padding: 4px 10px;
-            border: 1px solid #ddd;
-            border-radius: 6px;
-
-            &:hover {
-                color: #333;
-                background: #f5f5f5;
-                border-color: #bbb;
-            }
-        }
-
-        h1 {
-            font-size: 36px;
-            margin-top: 8px;
-        }
-    }
-
-    .empty {
-        color: #666;
-        font-size: 18px;
-    }
-
-    .orphaned-heading {
-        font-size: 20px;
-        margin: 32px 0 8px;
-        color: #999;
-    }
-
-    .orphaned-note {
-        font-size: 14px;
-        color: #999;
-        margin-bottom: 16px;
-    }
-
-    .bookmark-list {
-        border: 1px solid #ddd;
-        border-radius: 6px;
-        overflow: hidden;
-        margin-bottom: 24px;
-    }
-
-    .bookmark-row {
-        padding: 16px;
-        border-bottom: 1px solid #eee;
-        font-family: system-ui, -apple-system, sans-serif;
-
-        &:last-child {
-            border-bottom: none;
-        }
-
-        &.bookmark-orphaned {
-            background: #fafafa;
-            color: #999;
-        }
-
-        .bookmark-meta {
-            display: flex;
-            gap: 12px;
-            margin-bottom: 6px;
-            font-size: 13px;
-            color: #666;
-
-            .bookmark-deck {
-                font-weight: 600;
-                color: #333;
-            }
-
-            .bookmark-path {
-                font-family: "Menlo", "Monaco", monospace;
-                font-size: 11px;
-                color: #999;
-            }
-        }
-
-        .bookmark-preview {
-            font-size: 15px;
-            color: #222;
-            margin-bottom: 10px;
-            line-height: 1.4;
-        }
-
-        .bookmark-note-display {
-            font-size: 13px;
-            color: #555;
-            font-style: italic;
-            margin-bottom: 10px;
-        }
-
-        .bookmark-actions {
-            display: flex;
-            gap: 8px;
-            flex-wrap: wrap;
-            align-items: center;
-
-            .inline-form {
-                display: inline;
-            }
-
-            .note-form {
-                display: flex;
-                gap: 6px;
-                flex: 1;
-                min-width: 200px;
-
-                .note-input {
-                    flex: 1;
-                    padding: 6px 10px;
-                    font-size: 14px;
-                    border: 1px solid #bbb;
-                    border-radius: 6px;
-                    font-family: system-ui, -apple-system, sans-serif;
-
-                    &:focus {
-                        outline: none;
-                        border-color: #666;
-                    }
-                }
-            }
-        }
-    }
+.notice {
+  margin-bottom: 1.5rem;
+  border-color: var(--color-warning); background: var(--color-warning-dim);
+  color: var(--color-fg-primary);
 }
-
-/* ── Edit page ─────────────────────────────────────────────────────────────── */
-.edit-page {
-    max-width: 800px;
-    margin: 0 auto;
-    padding: 48px 24px;
-
-    .browse-header {
-        margin-bottom: 24px;
-
-        .back-link {
-            display: inline-flex;
-            align-items: center;
-            color: #666;
-            text-decoration: none;
-            font-size: 14px;
-            padding: 4px 10px;
-            border: 1px solid #ddd;
-            border-radius: 6px;
-
-            &:hover {
-                color: #333;
-                background: #f5f5f5;
-                border-color: #bbb;
-            }
-        }
-
-        h1 {
-            font-size: 36px;
-            margin-top: 8px;
-        }
-    }
-
-    .edit-path {
-        font-size: 13px;
-        color: #666;
-        margin-bottom: 12px;
-
-        code {
-            font-family: "Menlo", "Monaco", monospace;
-            background: #f4f4f4;
-            padding: 2px 6px;
-            border-radius: 3px;
-        }
-    }
-
-    .edit-warning {
-        background: #fff8e1;
-        border: 1px solid #ffe082;
-        border-radius: 6px;
-        padding: 10px 14px;
-        font-size: 14px;
-        color: #5d4037;
-        margin-bottom: 16px;
-        font-family: system-ui, -apple-system, sans-serif;
-    }
-
-    .edit-textarea {
-        width: 100%;
-        font-family: "Menlo", "Monaco", "Courier New", monospace;
-        font-size: 14px;
-        line-height: 1.5;
-        padding: 12px;
-        border: 1px solid #bbb;
-        border-radius: 6px;
-        resize: vertical;
-        margin-bottom: 16px;
-        background: #fafafa;
-        color: #111;
-
-        &:focus {
-            outline: none;
-            border-color: #555;
-            background: white;
-        }
-    }
-
-    .edit-controls {
-        display: flex;
-        gap: 8px;
-        align-items: center;
-    }
-}
-
-/* Mobile */
-@media (max-width: 768px) {
-    .header {
-        padding: 16px;
-    }
-
-    .card {
-        width: 100%;
-        height: 100%;
-        box-shadow: none;
-    }
-
-    .card-header h1 {
-        font-size: 24px;
-    }
-
-    .rich-text {
-        font-size: 20px;
-        text-align: left;
-    }
-
-    .controls {
-        padding: 12px;
-
-        form {
-            flex-direction: column;
-
-            input, button {
-                margin: 6px 0;
-                min-height: 44px;
-            }
-
-            .grades {
-                display: flex;
-                flex-direction: row;
-                justify-content: space-between;
-            }
-        }
-    }
-
-    .finished {
-        padding: 24px;
-
-        h1 {
-            font-size: 36px;
-            margin-bottom: 36px;
-        }
-
-        h2 {
-            font-size: 30px;
-            margin-bottom: 16px;
-        }
-
-        .stats {
-            font-size: 16px;
-        }
-
-        .val {
-            padding-left: 24px;
-        }
-    }
-
-    .btn {
-        min-height: 44px;
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-    }
-
-    .landing,
-    .browse {
-        padding: 24px 16px;
-    }
-
-    .landing h1,
-    .browse .browse-header h1 {
-        font-size: 28px;
-        margin-top: 6px;
-    }
-
-    .landing h2 {
-        font-size: 22px;
-    }
-
-    .browse .browse-header {
-        margin-bottom: 16px;
-    }
-
-    .browse-controls {
-        flex-direction: column;
-        gap: 12px;
-        align-items: stretch;
-
-        .limit-drill {
-            flex-direction: column;
-            align-items: stretch;
-        }
-
-        .drill-button {
-            width: 100%;
-        }
-    }
-
-    .collection-table {
-        display: block;
-        overflow-x: auto;
-        font-size: 15px;
-
-        th,
-        td {
-            padding: 8px 10px;
-        }
-    }
-
-    .deck-row {
-        min-height: 44px;
-    }
-
-    .deck-label {
-        input[type="checkbox"] {
-            width: 20px;
-            height: 20px;
-        }
-    }
-}
-
-/* Desktop */
-@media (min-width: 769px) {
-    .card {
-        width: 900px;
-        min-height: 400px;
-        max-height: 90%;
-        box-shadow: 0px 0px 48px 16px #ddd;
-        border: 1px solid black;
-    }
-
-    .controls {
-        padding: 32px;
-
-        form {
-            flex-direction: row;
-
-            input, button {
-                margin: 0 12px;
-            }
-        }
-    }
-
-    .finished {
-        padding: 48px;
-
-        h1 {
-            font-size: 48px;
-            margin-bottom: 48px;
-        }
-
-        h2 {
-            font-size: 36px;
-            margin-bottom: 24px;
-        }
-
-        .stats {
-            font-size: 22px;
-        }
-
-        .val {
-            padding-left: 48px;
-        }
-    }
+.notice-warning ul { margin: 0.5rem 0 0; padding-left: 1.2rem; }
+.notice-warning li {
+  font-family: var(--font-mono); font-size: var(--text-xs);
+  overflow-wrap: anywhere;
 }
 
 .flash {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    max-width: 800px;
-    margin: 16px auto;
-    padding: 12px 16px;
-    border: 1px solid;
-    border-radius: 8px;
-    font-size: 14px;
+  display: flex; align-items: center; gap: 0.75rem;
+  max-width: 56rem; margin: 1rem auto;
 }
-
-.flash-message {
-    flex: 1;
-}
-
+.flash-message { flex: 1; }
 .flash-dismiss {
-    background: none;
-    border: none;
-    font-size: 18px;
-    line-height: 1;
-    padding: 0 4px;
-    cursor: pointer;
-    color: inherit;
+  background: none; border: none; color: inherit;
+  font-size: var(--text-lg); line-height: 1; padding: 0 0.25rem; cursor: pointer;
 }
-
-.flash-error {
-    background: #fff4f1;
-    border-color: #f3c5bd;
-    color: #7a271a;
-}
-
-.flash-success {
-    background: #f0fdf4;
-    border-color: #bbe5c8;
-    color: #027a48;
-}
+.flash-error   { background: var(--color-danger-dim);  border-color: var(--color-danger);  color: var(--color-danger); }
+.flash-success { background: var(--color-success-dim); border-color: var(--color-success); color: var(--color-success); }
 
 .error {
-    max-width: 800px;
-    margin: 48px auto;
-    padding: 24px;
-    border: 1px solid #f3c5bd;
-    border-radius: 8px;
-    background: #fff4f1;
-    color: #7a271a;
+  max-width: 56rem; margin: 3rem auto;
+  padding: 1.5rem;
+  border-color: var(--color-danger); background: var(--color-danger-dim);
+  color: var(--color-fg-primary);
+}
+.error h1 { margin-bottom: 0.75rem; color: var(--color-danger); }
+.error a { color: var(--color-danger); font-weight: 600; }
 
-    h1 {
-        margin-bottom: 12px;
-    }
+.status-error { color: var(--color-danger); font-weight: 600; }
+.status-ok    { color: var(--color-success); font-weight: 600; }
 
-    p {
-        margin-bottom: 8px;
-    }
-
-    a {
-        color: inherit;
-        font-weight: 600;
-    }
+.empty {
+  color: var(--color-fg-muted);
+  font-size: var(--text-md);
 }
 
-.browse .notice {
-    background: #fff8e1;
-    border: 1px solid #e0c97f;
-    border-radius: 4px;
-    padding: 0.5em 1em;
+/* ── Page frame ───────────────────────────────────────────────────────────
+   Every document page is one measure, centred. Named for each page rather
+   than given a shared class because the markup names them that way; the
+   declaration is one list so the measure cannot drift between them. */
+.landing, .browse, .bookmarks, .edit-page, .stats-page {
+  max-width: 56rem;
+  margin: 0 auto;
+  padding: 3rem 1.5rem 4rem;
 }
 
-/* Duplicate-card warning: the card locations are file paths, so they need
-   room to wrap without stretching the page. */
-.browse .notice-warning ul {
-    margin: 0.5em 0 0 0;
-    padding-left: 1.2em;
+/* The header of a subpage: the way back, then the title. */
+.browse-header { margin-bottom: 2rem; }
+.browse-header h1 { margin-top: 0.5rem; }
+
+.back-link {
+  display: inline-flex; align-items: center; gap: 0.375rem;
+  font-size: var(--text-xs);
+  color: var(--color-fg-secondary); text-decoration: none;
+  padding: 0.25rem 0.625rem;
+  border: 1px solid var(--color-border); border-radius: var(--radius-sm);
+  transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+.back-link:hover {
+  color: var(--color-fg-primary);
+  background: var(--color-bg-hover);
+  border-color: var(--color-border-strong);
 }
 
-.browse .notice-warning li {
-    font-family: monospace;
-    font-size: 0.85em;
-    overflow-wrap: anywhere;
+.inline-form { display: inline; }
+.spacer { flex: 1; }
+
+
+/* ══ 4. Pages ══════════════════════════════════════════════════════════════ */
+
+/* ── The drill ─────────────────────────────────────────────────────────────
+   Three rows: progress, card, controls. The card is the only one that
+   scrolls, so the grade buttons are always where the hand left them. */
+.root {
+  height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  background: var(--color-bg-base);
 }
 
-/* ---- Stats page (FEAT-02) ---- */
-
-.stats-page {
-    max-width: 720px;
-    margin: 0 auto;
-    padding: 1rem;
+.root .header {
+  flex: none;
+  display: flex; justify-content: center; align-items: center;
+  padding: 1.25rem 1.5rem;
+  background: var(--color-bg-surface);
+  border-bottom: 1px solid var(--color-border);
 }
 
-.stats-header h1 {
-    margin: 0.5rem 0 1.5rem 0;
+.root .progress { display: flex; flex-direction: column; align-items: center; gap: 0.5rem; }
+.root .progress-text { font-size: var(--text-xs); color: var(--color-fg-muted); }
+.root .progress-bar {
+  width: min(24rem, 80vw); height: 6px;
+  background: var(--color-bg-active);
+  border-radius: 999px; overflow: hidden;
+}
+.root .progress-fill {
+  height: 100%;
+  background: var(--color-accent);
+  border-radius: 999px;
+  transition: width 240ms ease;
 }
 
-.stats-section {
-    margin-bottom: 2rem;
+.root .card-container {
+  flex: 1; min-height: 0;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  padding: 1.5rem;
+  overflow: hidden;
 }
 
+.root .card {
+  display: flex; flex-direction: column;
+  width: min(56rem, 100%);
+  max-height: 100%;
+  background: var(--color-bg-elevated);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-card);
+  overflow: hidden;
+}
+
+/* The deck name, as a caption over the card rather than a title competing
+   with the question. The question is what is being read; the deck is only
+   where it came from. */
+.root .card-header {
+  flex: none;
+  padding: 0.75rem 1.5rem;
+  border-bottom: 1px solid var(--color-border-subtle);
+  background: var(--color-bg-surface);
+}
+.root .card-header h1 {
+  font-size: var(--text-xs); font-weight: 500;
+  color: var(--color-fg-muted);
+  text-transform: uppercase; letter-spacing: 0.04em;
+}
+
+.root .card-content {
+  flex: 1; min-height: 0;
+  display: flex; flex-direction: column;
+  overflow-x: hidden; overflow-y: auto;
+}
+
+.root .question, .root .answer, .root .prompt { padding: 1.5rem; }
+.root .question { border-bottom: 1px solid var(--color-border-subtle); }
+.root .answer { min-height: 2rem; }
+
+/* ── Card prose ────────────────────────────────────────────────────────────
+   The one place in the app where type is set to be read at arm's length
+   rather than scanned, so it is the one place with its own size. Everything
+   inside it is the author's markdown. */
+.rich-text {
+  font-size: 1.375rem;
+  line-height: 1.5;
+  text-align: left;
+  color: var(--color-fg-primary);
+}
+
+.rich-text > :last-child { margin-bottom: 0; }
+.rich-text p, .rich-text img, .rich-text ol, .rich-text ul,
+.rich-text blockquote, .rich-text table, .rich-text pre {
+  margin: 0 0 1rem;
+}
+
+.rich-text ul, .rich-text ol { padding-left: 1.5rem; }
+
+.rich-text img {
+  display: block; margin-left: auto; margin-right: auto;
+  max-width: 100%; height: auto;
+  border-radius: var(--radius-sm);
+}
+.rich-text audio { width: 100%; }
+
+.rich-text blockquote {
+  padding: 0.5rem 0.875rem;
+  background: var(--color-bg-surface);
+  border-left: 3px solid var(--color-border-strong);
+  color: var(--color-fg-secondary);
+}
+
+.rich-text table {
+  border-collapse: collapse; width: 100%;
+  font-family: var(--font-sans); font-size: 0.65em; line-height: 1.6;
+  border: 1px solid var(--color-border-strong);
+}
+.rich-text th, .rich-text td {
+  border: 1px solid var(--color-border);
+  padding: 0.5rem 0.75rem;
+  text-align: left; vertical-align: top;
+}
+.rich-text th {
+  background: var(--color-bg-surface); font-weight: 600;
+  border-color: var(--color-border-strong);
+}
+.rich-text tbody tr:nth-child(even) { background: var(--color-bg-surface); }
+
+.rich-text code {
+  font-size: 0.7em;
+  background: var(--color-bg-surface);
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-sm);
+  padding: 0.1em 0.35em;
+  color: inherit;
+}
+.rich-text pre {
+  font-size: 0.7em; line-height: 1.5;
+  background: var(--color-bg-surface);
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-sm);
+  padding: 0.75rem;
+  overflow-x: auto;
+}
+.rich-text pre code {
+  background: none; border: none; padding: 0; border-radius: 0;
+  font-size: 1em;
+}
+
+.rich-text .katex { font-size: 1em; }
+
+/* A cloze is a hole in the sentence: the same width whatever word is under
+   it, so its length gives nothing away. `color: transparent` rather than
+   removing the text, so the answer is one repaint away and the line does not
+   reflow when it arrives. */
+.rich-text .cloze {
+  width: 2rem;
+  background: var(--color-border-strong);
+  color: transparent;
+  border-radius: var(--radius-sm);
+  text-decoration: none;
+}
+.rich-text .cloze-reveal {
+  width: auto; background: var(--color-accent-dim);
+  color: var(--color-accent); border-radius: var(--radius-sm);
+  padding: 0 0.15em;
+}
+
+/* ── The grade bar ─────────────────────────────────────────────────────────
+   Pinned under the card. The four grades are colour-coded because they are
+   pressed hundreds of times a session and never read: at that rate the button
+   is found by position and hue, not by its word. */
+.root .controls {
+  flex: none;
+  padding: 1rem 1.5rem;
+  background: var(--color-bg-surface);
+  border-top: 1px solid var(--color-border);
+}
+.root .controls form {
+  display: flex; align-items: center; gap: 0.5rem;
+  max-width: 56rem; margin: 0 auto;
+}
+.root .controls .grades { display: flex; gap: 0.5rem; }
+
+#reveal { background: var(--color-accent); color: var(--color-accent-fg);
+          border-color: transparent; font-weight: 600; }
+#reveal:hover { background: var(--color-accent); border-color: transparent; opacity: 0.9; }
+
+#forgot { background: var(--color-danger-dim);  color: var(--color-danger);  border-color: var(--color-danger); }
+#hard   { background: var(--color-warning-dim); color: var(--color-warning); border-color: var(--color-warning); }
+#good   { background: var(--color-success-dim); color: var(--color-success); border-color: var(--color-success); }
+#easy   { background: var(--color-accent-dim);  color: var(--color-accent);  border-color: var(--color-accent-muted); }
+
+#forgot:hover { background: var(--color-danger);  color: #fff; border-color: var(--color-danger); }
+#hard:hover   { background: var(--color-warning); color: #fff; border-color: var(--color-warning); }
+#good:hover   { background: var(--color-success); color: #fff; border-color: var(--color-success); }
+#easy:hover   { background: var(--color-accent);  color: var(--color-accent-fg); border-color: var(--color-accent); }
+
+/* Bookmarked is a state, not an action, so the button stays lit while it
+   holds. */
+.controls button.bookmark-active {
+  background: var(--color-warning-dim); color: var(--color-warning);
+  border-color: var(--color-warning);
+}
+.controls button.bookmark-active:hover {
+  background: var(--color-warning); color: #fff; border-color: var(--color-warning);
+}
+
+/* ── The end of a session ──────────────────────────────────────────────── */
+.finished {
+  max-width: 48rem;
+  margin: 0 auto;
+  padding: 3rem 1.5rem 4rem;
+}
+.finished h1 { text-align: center; margin-bottom: 0.75rem; }
+.finished .summary {
+  text-align: center; font-size: var(--text-lg);
+  color: var(--color-fg-secondary); margin-bottom: 2rem;
+}
+.finished .redirect-notice {
+  text-align: center; font-size: var(--text-base);
+  color: var(--color-fg-muted); margin-bottom: 2rem;
+}
+.finished .redirect-notice a { color: var(--color-accent); }
+
+.finished details {
+  margin-bottom: 2rem;
+  background: var(--color-bg-elevated);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: 0.875rem 1rem;
+}
+.finished summary {
+  font-size: var(--text-md); font-weight: 600; cursor: pointer;
+  list-style: none;
+}
+.finished summary::marker,
+.finished summary::-webkit-details-marker { display: none; }
+.finished summary::before {
+  content: "\25b6\00a0"; font-size: 0.7em; color: var(--color-fg-muted);
+}
+.finished details[open] summary::before { content: "\25bc\00a0"; }
+.finished details[open] summary {
+  padding-bottom: 0.625rem;
+  margin-bottom: 0.625rem;
+  border-bottom: 1px solid var(--color-border-subtle);
+}
+
+.finished .stats tr { border-bottom: 1px solid var(--color-border-subtle); }
+.finished .stats tr:last-child { border-bottom: none; }
+.finished .stats td { padding: 0.5rem 0; }
+.finished .stats td.key { white-space: nowrap; color: var(--color-fg-secondary); }
+.finished .stats td.val { width: 100%; padding-left: 1.5rem; font-weight: 500; }
+
+.finished .shutdown-container { margin-top: 2.5rem; text-align: center; }
+.finished .shutdown-container form { display: inline-block; }
+.finished .shutdown-button,
+.finished .home-button { min-height: 40px; padding: 0 1.5rem; font-size: var(--text-md); }
+
+/* ── Landing ───────────────────────────────────────────────────────────── */
+.landing h1 { margin-bottom: 2rem; }
+.landing h2 { margin: 2rem 0 0.75rem; }
+.landing h2:first-of-type { margin-top: 0; }
+
+.sync-bar {
+  display: flex; align-items: center; gap: 1rem;
+  margin-bottom: 2rem;
+  padding: 0.75rem 1rem;
+  background: var(--color-bg-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+.sync-status { flex: 1; font-size: var(--text-xs); color: var(--color-fg-muted); }
+
+/* The verb on a management row: sync, add, delete. It is written without
+   `.btn` in the templates, so it carries the whole button here rather than
+   only its size — which is what left the HedgeDoc and Decks pages showing
+   the browser's own grey submit buttons. */
+.sync-button {
+  -webkit-appearance: none; appearance: none;
+  display: inline-flex; align-items: center; justify-content: center;
+  min-height: 30px; padding: 0 0.75rem;
+  font-family: inherit; font-size: var(--text-xs); font-weight: 500;
+  line-height: 1.2; white-space: nowrap; text-decoration: none;
+  border-radius: var(--radius-sm); cursor: pointer;
+  background: var(--color-bg-elevated); color: var(--color-fg-primary);
+  border: 1px solid var(--color-border-strong);
+  transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+.sync-button:hover { background: var(--color-bg-hover); border-color: var(--color-fg-muted); }
+.sync-button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* A named group of checkboxes — one collection's decks on /decks. The
+   default `fieldset` is a 2px inset ridge with the legend notched into it,
+   which is the one piece of browser chrome no other surface in the app
+   resembles. */
+fieldset {
+  margin: 0 0 0.75rem;
+  padding: 0.75rem 1rem;
+  background: var(--color-bg-elevated);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+legend {
+  padding: 0 0.375rem;
+  font-size: var(--text-xs); color: var(--color-fg-muted);
+  text-transform: uppercase; letter-spacing: 0.04em;
+}
+fieldset label {
+  display: flex; align-items: center; gap: 0.5rem;
+  padding: 0.25rem 0;
+  cursor: pointer;
+}
+
+.add-source-form { margin-bottom: 1.75rem; }
+.add-source-row { display: flex; align-items: center; gap: 0.5rem; }
+/* On /decks the name field is followed by the deck picker rather than by a
+   submit, so the row is the top of a stack rather than the whole of one. */
+.add-source-row + fieldset { margin-top: 0.75rem; }
+.add-source-url { flex: 1; }
+.source-url-cell { font-size: var(--text-xs); font-family: var(--font-mono); word-break: break-all; }
+
+/* ── Browse: the deck tree ─────────────────────────────────────────────────
+   A tree of rows, not a list of boxes: the border belongs to the container so
+   nested decks stay flush with their parent rather than each drawing an inset
+   of its own. */
+.deck-tree {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-elevated);
+  overflow-x: auto; overflow-y: hidden;
+  margin-bottom: 1.5rem;
+}
+
+.deck-row {
+  display: flex; align-items: center; gap: 0.5rem;
+  padding: 0.5rem 1rem;
+  border-bottom: 1px solid var(--color-border-subtle);
+}
+.deck-row:hover { background: var(--color-bg-hover); }
+.deck-node:last-child > .deck-row { border-bottom: none; }
+
+.toggle-children {
+  width: 1.25rem; text-align: center; cursor: pointer; user-select: none;
+  font-size: var(--text-xs); color: var(--color-fg-muted);
+}
+.toggle-children:hover { color: var(--color-fg-primary); }
+.toggle-placeholder { width: 1.25rem; }
+
+.deck-label {
+  flex: 1; display: flex; align-items: center; gap: 0.5rem; cursor: pointer;
+}
+.deck-label input[type="checkbox"] { width: 1rem; height: 1rem; cursor: pointer; }
+.deck-name { font-size: var(--text-md); }
+
+.deck-counts {
+  font-size: var(--text-xs); color: var(--color-fg-muted); white-space: nowrap;
+}
+/* Cards due now are the only number on the row that asks for anything. */
+.deck-due { font-weight: 600; color: var(--color-due); }
+.deck-due.muted { font-weight: 400; color: var(--color-fg-muted); }
+.deck-total { color: var(--color-fg-muted); }
+
+.edit-link {
+  font-size: var(--text-xs); color: var(--color-fg-muted);
+  text-decoration: none; white-space: nowrap; margin-left: 0.25rem;
+}
+.edit-link:hover { color: var(--color-fg-primary); }
+
+.browse-controls {
+  display: flex; justify-content: space-between; align-items: center; gap: 1rem;
+}
+.select-controls { font-size: var(--text-xs); display: flex; gap: 0.75rem; }
+.select-controls a { color: var(--color-fg-secondary); text-decoration: none; }
+.select-controls a:hover { color: var(--color-fg-primary); text-decoration: underline; }
+
+.limit-drill { display: flex; align-items: center; gap: 0.5rem; }
+.bookmark-bar { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 1rem; }
+
+/* ── Bookmarks ─────────────────────────────────────────────────────────── */
+.bookmark-list {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-elevated);
+  overflow: hidden;
+  margin-bottom: 1.5rem;
+}
+
+.bookmark-row {
+  padding: 1rem;
+  border-bottom: 1px solid var(--color-border-subtle);
+}
+.bookmark-row:last-child { border-bottom: none; }
+/* A bookmark whose card is gone from the markdown. Dimmed rather than
+   removed: it is the only remaining record that the card existed. */
+.bookmark-row.bookmark-orphaned { background: var(--color-bg-surface); color: var(--color-fg-muted); }
+
+.bookmark-meta {
+  display: flex; flex-wrap: wrap; gap: 0.75rem;
+  margin-bottom: 0.375rem;
+  font-size: var(--text-xs); color: var(--color-fg-muted);
+}
+.bookmark-deck { font-weight: 600; color: var(--color-fg-secondary); }
+.bookmark-path { font-family: var(--font-mono); overflow-wrap: anywhere; }
+
+.bookmark-preview { font-size: var(--text-md); margin-bottom: 0.625rem; line-height: 1.45; }
+.bookmark-note-display {
+  font-size: var(--text-sm); color: var(--color-fg-secondary);
+  font-style: italic; margin-bottom: 0.625rem;
+}
+
+.bookmark-actions {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem;
+}
+.note-form { display: flex; gap: 0.375rem; flex: 1; min-width: 12rem; }
+.note-input { flex: 1; min-height: 30px; font-size: var(--text-xs); }
+
+.orphaned-heading { margin: 2rem 0 0.5rem; color: var(--color-fg-muted); }
+.orphaned-note { font-size: var(--text-xs); color: var(--color-fg-muted); margin-bottom: 1rem; }
+
+/* ── Edit ──────────────────────────────────────────────────────────────── */
+.edit-path { font-size: var(--text-xs); color: var(--color-fg-muted); margin-bottom: 0.75rem; }
+.edit-path code {
+  background: var(--color-bg-surface);
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-sm);
+  padding: 0.1em 0.35em;
+}
+
+.edit-warning {
+  margin-bottom: 1rem;
+  border-color: var(--color-warning); background: var(--color-warning-dim);
+}
+
+.edit-textarea { min-height: 24rem; margin-bottom: 1rem; font-size: var(--text-sm); }
+.edit-controls { display: flex; gap: 0.5rem; align-items: center; }
+
+/* ── Stats ─────────────────────────────────────────────────────────────── */
+.stats-header h1 { margin-bottom: 2rem; }
+.stats-section { margin-bottom: 2.5rem; }
+.stats-section h2 { margin-bottom: 0.75rem; }
+
+/* Reviews per day. One slot per day, so a quiet day is a gap in a run rather
+   than a bar that was left out. */
 .bar-chart {
-    display: flex;
-    align-items: flex-end;
-    gap: 1px;
-    height: 120px;
-    border-bottom: 1px solid #999;
+  display: flex; align-items: flex-end; gap: 1px;
+  height: 7.5rem;
+  padding: 0 0.25rem;
+  background: var(--color-bg-elevated);
+  border: 1px solid var(--color-border);
+  border-bottom-width: 2px;
+  border-radius: var(--radius-md);
 }
-
-.bar-slot {
-    flex: 1 1 0;
-    display: flex;
-    align-items: flex-end;
-    height: 100%;
-}
-
+.bar-slot { flex: 1 1 0; display: flex; align-items: flex-end; height: 100%; }
+/* No minimum height: a day with nothing on it is empty, and the chart's own
+   bottom rule is the baseline. A floor here drew a 1px line across every
+   empty day instead, which read as a dashed border rather than as zero. The
+   floor that does belong — so that one review in a month of hundreds is still
+   visible — is on the percentage, in `bar_chart`. */
 .bar-slot .bar {
-    width: 100%;
-    background: #444;
-    min-height: 1px;
+  width: 100%;
+  background: var(--color-accent);
+  border-radius: 1px 1px 0 0;
 }
 
-.grade-dist {
-    width: 100%;
-    max-width: 480px;
+.grade-dist { max-width: 30rem; }
+.grade-dist td { padding: 0.25rem 0; }
+.grade-dist .key { padding-right: 1rem; color: var(--color-fg-secondary); white-space: nowrap; }
+.grade-dist .val { padding-right: 1rem; text-align: right; }
+.grade-dist .bar-cell { width: 60%; }
+.grade-dist .hbar { height: 0.8em; background: var(--color-accent); border-radius: 1px; }
+
+.deck-stats th, .deck-stats td { padding: 0.375rem 1.5rem 0.375rem 0; text-align: left; }
+
+.retention { color: var(--color-fg-secondary); }
+
+
+/* ══ 5. Vendor: highlight.js in the dark ═══════════════════════════════════
+   `vendor/highlightjs/github.min.css` is the light theme only, and it paints
+   its own white background and near-black text — which, in the dark theme,
+   is a white slab in the middle of a card. This stylesheet is linked after
+   it, so the block's own chrome is handed back to the tokens and only the
+   token colours are restated for dark.
+
+   Scoped to the same two selectors as the palette above, so a `data-theme`
+   override moves the code blocks with everything else. */
+.hljs { background: transparent; color: inherit; }
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .hljs-comment,
+  :root:not([data-theme="light"]) .hljs-quote { color: var(--color-fg-muted); }
+  :root:not([data-theme="light"]) .hljs-keyword,
+  :root:not([data-theme="light"]) .hljs-selector-tag,
+  :root:not([data-theme="light"]) .hljs-literal,
+  :root:not([data-theme="light"]) .hljs-type { color: #d08ad0; }
+  :root:not([data-theme="light"]) .hljs-string,
+  :root:not([data-theme="light"]) .hljs-regexp,
+  :root:not([data-theme="light"]) .hljs-addition { color: #8fd39a; }
+  :root:not([data-theme="light"]) .hljs-number,
+  :root:not([data-theme="light"]) .hljs-attr,
+  :root:not([data-theme="light"]) .hljs-attribute,
+  :root:not([data-theme="light"]) .hljs-variable,
+  :root:not([data-theme="light"]) .hljs-template-variable { color: #e8a839; }
+  :root:not([data-theme="light"]) .hljs-title,
+  :root:not([data-theme="light"]) .hljs-section,
+  :root:not([data-theme="light"]) .hljs-name,
+  :root:not([data-theme="light"]) .hljs-selector-id,
+  :root:not([data-theme="light"]) .hljs-selector-class { color: #5aa8b0; }
+  :root:not([data-theme="light"]) .hljs-built_in,
+  :root:not([data-theme="light"]) .hljs-symbol,
+  :root:not([data-theme="light"]) .hljs-meta { color: #7fb3e0; }
+  :root:not([data-theme="light"]) .hljs-deletion { color: #e05252; }
 }
 
-.grade-dist .key {
-    padding-right: 1em;
+:root[data-theme="dark"] .hljs-comment,
+:root[data-theme="dark"] .hljs-quote { color: var(--color-fg-muted); }
+:root[data-theme="dark"] .hljs-keyword,
+:root[data-theme="dark"] .hljs-selector-tag,
+:root[data-theme="dark"] .hljs-literal,
+:root[data-theme="dark"] .hljs-type { color: #d08ad0; }
+:root[data-theme="dark"] .hljs-string,
+:root[data-theme="dark"] .hljs-regexp,
+:root[data-theme="dark"] .hljs-addition { color: #8fd39a; }
+:root[data-theme="dark"] .hljs-number,
+:root[data-theme="dark"] .hljs-attr,
+:root[data-theme="dark"] .hljs-attribute,
+:root[data-theme="dark"] .hljs-variable,
+:root[data-theme="dark"] .hljs-template-variable { color: #e8a839; }
+:root[data-theme="dark"] .hljs-title,
+:root[data-theme="dark"] .hljs-section,
+:root[data-theme="dark"] .hljs-name,
+:root[data-theme="dark"] .hljs-selector-id,
+:root[data-theme="dark"] .hljs-selector-class { color: #5aa8b0; }
+:root[data-theme="dark"] .hljs-built_in,
+:root[data-theme="dark"] .hljs-symbol,
+:root[data-theme="dark"] .hljs-meta { color: #7fb3e0; }
+:root[data-theme="dark"] .hljs-deletion { color: #e05252; }
+
+/* KaTeX inherits the surrounding colour rather than the black it assumes. */
+.katex { color: inherit; }
+
+
+/* ══ 6. The phone ══════════════════════════════════════════════════════════
+   One breakpoint. The drill is the screen that actually changes shape: the
+   card fills the frame, and the controls stack into a column with targets big
+   enough to hit with a thumb. */
+@media (max-width: 768px) {
+  .landing, .browse, .bookmarks, .edit-page, .stats-page, .finished {
+    padding: 1.5rem 1rem 3rem;
+  }
+
+  h1 { font-size: var(--text-xl); }
+  h2 { font-size: var(--text-lg); }
+
+  .root .header { padding: 0.75rem 1rem; }
+  .root .card-container { padding: 0; }
+  .root .card {
+    width: 100%; height: 100%; max-height: none;
+    border: none; border-radius: 0; box-shadow: none;
+  }
+  .root .question, .root .answer, .root .prompt { padding: 1rem; }
+
+  .rich-text { font-size: 1.125rem; }
+
+  .root .controls { padding: 0.75rem; }
+  .root .controls form { flex-direction: column; align-items: stretch; gap: 0.5rem; }
+  .root .controls .grades { flex-direction: row; justify-content: space-between; }
+  .root .controls .grades > * { flex: 1; }
+  .root .controls button,
+  .root .controls input[type="submit"] { min-height: 44px; }
+  /* The spacers exist to push the grades to the middle of a row. In a column
+     they are empty flex children that only add gaps. */
+  .root .controls .spacer { display: none; }
+
+  .btn { min-height: 44px; }
+
+  .browse-controls { flex-direction: column; align-items: stretch; gap: 0.75rem; }
+  .limit-drill { flex-direction: column; align-items: stretch; }
+  .limit-select { width: 100%; }
+  .drill-button { width: 100%; }
+
+  .collection-table { display: block; overflow-x: auto; }
+  .collection-table th, .collection-table td { padding: 0.5rem; }
+
+  .deck-row { min-height: 44px; }
+  .deck-label input[type="checkbox"] { width: 1.25rem; height: 1.25rem; }
+
+  .sync-bar { flex-wrap: wrap; }
+  .add-source-row { flex-direction: column; align-items: stretch; }
 }
 
-.grade-dist .val {
-    padding-right: 1em;
-    text-align: right;
-}
-
-.grade-dist .bar-cell {
-    width: 60%;
-}
-
-.grade-dist .hbar {
-    height: 0.8em;
-    background: #444;
-}
-
-.table-scroll {
-    overflow-x: auto;
-}
-
-.deck-stats th,
-.deck-stats td {
-    padding: 0.2em 1.2em 0.2em 0;
-    text-align: left;
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
 }

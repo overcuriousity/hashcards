@@ -215,13 +215,21 @@ pub fn render_stats_page(
 
 /// A vertical CSS bar chart: one flex column per day, height proportional to
 /// the maximum value. Dependency-free: no JS, no chart library.
+/// A day with reviews on it is drawn, however few: `1 * 100 / 500` is zero,
+/// and a zero-height bar is indistinguishable from a day with nothing on it.
+/// A day with none is still zero.
+fn bar_percent(count: usize, max: usize) -> usize {
+    let scaled = count * 100 / max;
+    if count > 0 { scaled.max(1) } else { 0 }
+}
+
 fn bar_chart(data: &[(Date, usize)]) -> Markup {
     let max = data.iter().map(|&(_, n)| n).max().unwrap_or(0).max(1);
     html! {
         div.bar-chart {
             @for (date, count) in data {
                 div.bar-slot title=(format!("{date}: {count}")) {
-                    div.bar style=(format!("height: {}%;", count * 100 / max)) {}
+                    div.bar style=(format!("height: {}%;", bar_percent(*count, max))) {}
                 }
             }
         }
@@ -263,6 +271,18 @@ mod tests {
     use crate::types::card::CardContent;
     use crate::types::card_hash::CardHash;
     use crate::types::timestamp::Timestamp;
+
+    /// Regression: a day with reviews on it was drawn at zero height when it
+    /// rounded below one percent of the busiest day, and a day with none was
+    /// drawn as a 1px line by the stylesheet's old floor. Zero must be the
+    /// only thing that is invisible.
+    #[test]
+    fn test_bar_percent_floors_only_nonzero_days() {
+        assert_eq!(bar_percent(0, 500), 0);
+        assert_eq!(bar_percent(1, 500), 1);
+        assert_eq!(bar_percent(250, 500), 50);
+        assert_eq!(bar_percent(500, 500), 100);
+    }
 
     fn date(s: &str) -> Date {
         Date::try_from(s.to_string()).unwrap()

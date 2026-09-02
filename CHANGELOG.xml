@@ -1,5 +1,16 @@
 <changelog>
     <unreleased>
+        <changed>
+            <change author="claude">
+            The interface is restyled to the corporate identity shared with Vestigo and engram: one palette of named tokens, a warm paper light theme and a cool ink dark theme that follows the system preference, Inter and JetBrains Mono served from the binary, and one button, field, table and notice shared by every page. The stylesheet was previously a set of per-page rules written against hard-coded greys, so pages built later — Decks, HedgeDoc sources, the stats charts — arrived with browser-default fieldsets and submit buttons, and nothing had a dark theme at all. `vendor/highlightjs` ships the light GitHub theme only, so its code colours are restated for dark here rather than a second theme being vendored.
+            </change>
+            <change author="claude">
+            The stylesheet, its fonts and the vendored KaTeX and highlight.js assets are served outside the OIDC gate. They hold nothing about anyone's cards, and the pages shown to a user who is not logged in — the login page and the "session expired" page — link them, so under `[oidc]` exactly those pages were the ones whose stylesheet redirected to `/auth/login` and arrived unstyled.
+            </change>
+            <change author="claude">
+            On the stats page a day with reviews on it is now drawn at least one percent high, and a day with none is drawn as nothing. Days rounding below one percent of the busiest day vanished, while the stylesheet's one-pixel floor drew a line across every empty day — so a chart of a quiet month read as a dashed rule rather than as zero.
+            </change>
+            </changed>
         <fixed>
             <change author="claude">
             The server now creates `data_dir` and its `db/` and `hedgedoc/` subdirectories at startup, and refuses to start with a message naming the directory when it cannot. Only the git-mode directories were created before, and only when `[git]` was configured, so a `data_dir` the server could not write went unnoticed until the first write — adding a HedgeDoc note, possibly many restarts later — which failed with a bare "I/O error: Permission denied (os error 13)" naming no path at all. Every directory the server creates now reports its own path and role on failure. The shipped example points `data_dir` at `/var/lib/hashcards`, which is root-owned unless the systemd unit declares `StateDirectory=hashcards`; the README and the example config now say so and show the unit file.
