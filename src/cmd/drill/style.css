@@ -1278,6 +1278,19 @@ body {
     padding: 0.5em 1em;
 }
 
+/* Duplicate-card warning: the card locations are file paths, so they need
+   room to wrap without stretching the page. */
+.browse .notice-warning ul {
+    margin: 0.5em 0 0 0;
+    padding-left: 1.2em;
+}
+
+.browse .notice-warning li {
+    font-family: monospace;
+    font-size: 0.85em;
+    overflow-wrap: anywhere;
+}
+
 /* ---- Stats page (FEAT-02) ---- */
 
 .stats-page {

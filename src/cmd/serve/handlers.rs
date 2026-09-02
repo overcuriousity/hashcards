@@ -152,7 +152,7 @@ fn collection_get_inner(
         // No active session: show the deck browser.
         let rc = find_collection(state, slug, owner)
             .ok_or_else(|| crate::error::ErrorReport::new(format!("Unknown collection: {slug}")))?;
-        let tree = build_deck_tree(&rc.coll_dir, &rc.db_path)?;
+        let browse = build_deck_tree(&rc.coll_dir, &rc.db_path)?;
         // Build a deck-name → HedgeDoc URL map so the browse page can show
         // edit links. A HedgeDoc collection is exactly one note, so this is
         // at most one entry. All URLs were validated as HTTPS when added.
@@ -178,19 +178,20 @@ fn collection_get_inner(
         let db = Database::new(db_path)?;
         // FEAT-03: report the session rows the startup sweep closed. The
         // sweep itself runs once, at startup: it cannot tell a crashed
-        // session from a live one, and `serve` may share a database with a
-        // running CLI `drill`, so doing it per request would stamp
-        // `ended_at` on a session that is still going. Taking the entry also
-        // means the notice appears once instead of on every visit.
+        // session from a live one, and a second server may share the same
+        // database, so doing it per request would stamp `ended_at` on a
+        // session that is still going. Taking the entry also means the
+        // notice appears once instead of on every visit.
         let interrupted_closed = state.interrupted_closed.lock().remove(slug).unwrap_or(0);
         let bookmark_count = db.count_bookmarks()?;
         let html = render_browse_page(
             &rc.name,
             slug,
-            &tree,
+            &browse.tree,
             &hedge_urls,
             bookmark_count,
             interrupted_closed,
+            &browse.duplicates,
             flash,
         );
         return Ok(html.into_string());

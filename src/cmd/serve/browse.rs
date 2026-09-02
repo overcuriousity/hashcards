@@ -10,6 +10,7 @@ use crate::cmd::serve::href::safe_href;
 use crate::collection::Collection;
 use crate::error::Fallible;
 use crate::flash::Flash;
+use crate::parser::DuplicateCard;
 use crate::types::card_hash::CardHash;
 use crate::types::date::Date;
 use crate::types::timestamp::Timestamp;
@@ -57,7 +58,16 @@ struct DeckCounts {
 }
 
 /// Build a deck tree from a collection, computing per-deck due/total counts.
-pub fn build_deck_tree(coll_dir: &Path, db_path: &Path) -> Fallible<DeckNode> {
+/// The deck tree for a collection, plus what loading it turned up that the
+/// user should be told about.
+pub struct BrowseData {
+    pub tree: DeckNode,
+    /// Byte-identical cards found in two places. One copy is dropped at load
+    /// time, so only one of them carries review history.
+    pub duplicates: Vec<DuplicateCard>,
+}
+
+pub fn build_deck_tree(coll_dir: &Path, db_path: &Path) -> Fallible<BrowseData> {
     let collection = Collection::with_db_path(coll_dir.to_path_buf(), db_path.to_path_buf())?;
     let session_started_at = Timestamp::now();
     let today: Date = session_started_at.date();
@@ -84,7 +94,10 @@ pub fn build_deck_tree(coll_dir: &Path, db_path: &Path) -> Fallible<DeckNode> {
         }
     }
 
-    Ok(build_tree_from_counts(counts))
+    Ok(BrowseData {
+        tree: build_tree_from_counts(counts),
+        duplicates: collection.duplicates,
+    })
 }
 
 /// Build a hierarchical tree from flat deck name → counts mapping.
@@ -166,6 +179,7 @@ pub fn render_browse_page(
     hedge_urls: &HashMap<String, String>,
     bookmark_count: usize,
     interrupted_sessions_closed: usize,
+    duplicates: &[DuplicateCard],
     flash: Option<Flash>,
 ) -> Markup {
     let total_due = tree.due_today_recursive();
@@ -175,6 +189,21 @@ pub fn render_browse_page(
             div.browse-header {
                 a.back-link href="/" { "\u{2190} Collections" }
                 h1 { (collection_name) }
+            }
+            @if !duplicates.is_empty() {
+                div.notice.notice-warning {
+                    p {
+                        (format!(
+                            "{} of these cards are byte-identical to another card in this collection. Only one copy is drilled, and only that copy carries review history.",
+                            duplicates.len()
+                        ))
+                    }
+                    ul {
+                        @for duplicate in duplicates {
+                            li { (duplicate.to_string()) }
+                        }
+                    }
+                }
             }
             @if interrupted_sessions_closed > 0 {
                 p.notice {
@@ -356,6 +385,7 @@ function updateDrillButton() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::helper::create_tmp_directory;
 
     #[test]
     fn browse_page_never_links_unsafe_edit_urls() {
@@ -375,10 +405,66 @@ mod tests {
         };
         let mut hedge_urls: HashMap<String, String> = HashMap::new();
         hedge_urls.insert("deck".to_string(), "javascript:alert(1)".to_string());
-        let html = render_browse_page("Coll", "coll", &tree, &hedge_urls, 0, 0, None).into_string();
+        let html =
+            render_browse_page("Coll", "coll", &tree, &hedge_urls, 0, 0, &[], None).into_string();
         assert!(
             !html.contains(r#"href="javascript:"#),
             "unsafe scheme must not become an edit link: {html}"
         );
+    }
+
+    /// Byte-identical cards are silently deduplicated at load time, so one
+    /// copy's review history is the one that counts. The drill CLI warned
+    /// about that on stderr; with the CLI gone the browse page is the only
+    /// place a user can be told.
+    #[test]
+    fn browse_page_reports_duplicate_cards() -> Fallible<()> {
+        let dir = create_tmp_directory()?;
+        std::fs::write(dir.join("One.md"), "Q: Same?\nA: Yes.\n")?;
+        std::fs::write(dir.join("Two.md"), "Q: Same?\nA: Yes.\n")?;
+        let db_path = dir.join("hashcards.db");
+
+        let browse = build_deck_tree(&dir, &db_path)?;
+        assert_eq!(
+            browse.duplicates.len(),
+            1,
+            "the two identical cards must be reported as one duplicate"
+        );
+
+        let html = render_browse_page(
+            "Coll",
+            "coll",
+            &browse.tree,
+            &HashMap::new(),
+            0,
+            0,
+            &browse.duplicates,
+            None,
+        )
+        .into_string();
+        assert!(
+            html.contains("duplicate card"),
+            "the duplicate must be named on the page: {html}"
+        );
+        assert!(
+            html.contains("One.md") && html.contains("Two.md"),
+            "both locations must be named: {html}"
+        );
+        Ok(())
+    }
+
+    /// A collection with no duplicates shows no warning at all.
+    #[test]
+    fn browse_page_omits_the_duplicate_warning_when_there_are_none() {
+        let tree = DeckNode {
+            name: String::new(),
+            path: String::new(),
+            total_cards: 0,
+            due_today: 0,
+            children: vec![],
+        };
+        let html = render_browse_page("Coll", "coll", &tree, &HashMap::new(), 0, 0, &[], None)
+            .into_string();
+        assert!(!html.contains("duplicate"), "html: {html}");
     }
 }

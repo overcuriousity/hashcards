@@ -84,7 +84,6 @@ pub enum ActionResult {
     Ignored(String),
 }
 
-
 /// Core action handling logic, reusable by both drill and serve modes.
 ///
 /// `submitted_card` is the card hash the client's grade form carried; a

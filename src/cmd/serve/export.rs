@@ -72,7 +72,10 @@ pub async fn collection_export_handler(
                 (CONTENT_TYPE, "application/json".to_string()),
                 (
                     CONTENT_DISPOSITION,
-                    format!("attachment; filename=\"{}-export.json\"", download_name(&slug)),
+                    format!(
+                        "attachment; filename=\"{}-export.json\"",
+                        download_name(&slug)
+                    ),
                 ),
             ],
             json,
