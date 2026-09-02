@@ -187,11 +187,10 @@ fn collection_get_inner(
         let html = render_browse_page(
             &rc.name,
             slug,
-            &browse.tree,
+            &browse,
             &hedge_urls,
             bookmark_count,
             interrupted_closed,
-            &browse.duplicates,
             flash,
         );
         return Ok(html.into_string());

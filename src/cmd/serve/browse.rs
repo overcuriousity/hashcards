@@ -175,13 +175,13 @@ fn insert_into_tree(
 pub fn render_browse_page(
     collection_name: &str,
     slug: &str,
-    tree: &DeckNode,
+    browse: &BrowseData,
     hedge_urls: &HashMap<String, String>,
     bookmark_count: usize,
     interrupted_sessions_closed: usize,
-    duplicates: &[DuplicateCard],
     flash: Option<Flash>,
 ) -> Markup {
+    let BrowseData { tree, duplicates } = browse;
     let total_due = tree.due_today_recursive();
     page_template(html! {
         @if let Some(f) = &flash { (f.render()) }
@@ -405,8 +405,12 @@ mod tests {
         };
         let mut hedge_urls: HashMap<String, String> = HashMap::new();
         hedge_urls.insert("deck".to_string(), "javascript:alert(1)".to_string());
+        let browse = BrowseData {
+            tree,
+            duplicates: Vec::new(),
+        };
         let html =
-            render_browse_page("Coll", "coll", &tree, &hedge_urls, 0, 0, &[], None).into_string();
+            render_browse_page("Coll", "coll", &browse, &hedge_urls, 0, 0, None).into_string();
         assert!(
             !html.contains(r#"href="javascript:"#),
             "unsafe scheme must not become an edit link: {html}"
@@ -431,17 +435,8 @@ mod tests {
             "the two identical cards must be reported as one duplicate"
         );
 
-        let html = render_browse_page(
-            "Coll",
-            "coll",
-            &browse.tree,
-            &HashMap::new(),
-            0,
-            0,
-            &browse.duplicates,
-            None,
-        )
-        .into_string();
+        let html =
+            render_browse_page("Coll", "coll", &browse, &HashMap::new(), 0, 0, None).into_string();
         assert!(
             html.contains("duplicate card"),
             "the duplicate must be named on the page: {html}"
@@ -463,8 +458,12 @@ mod tests {
             due_today: 0,
             children: vec![],
         };
-        let html = render_browse_page("Coll", "coll", &tree, &HashMap::new(), 0, 0, &[], None)
-            .into_string();
+        let browse = BrowseData {
+            tree,
+            duplicates: Vec::new(),
+        };
+        let html =
+            render_browse_page("Coll", "coll", &browse, &HashMap::new(), 0, 0, None).into_string();
         assert!(!html.contains("duplicate"), "html: {html}");
     }
 }
