@@ -21,6 +21,7 @@ use crate::error::ErrorReport;
 use crate::error::Fallible;
 use crate::error::fail;
 use crate::types::timestamp::Timestamp;
+use crate::utils::ensure_dir;
 
 /// Extract the note ID (last non-empty path segment) from a HedgeDoc URL.
 /// Query parameters and fragments are ignored.
@@ -647,9 +648,9 @@ pub async fn build_source(
     })?;
 
     let mut rc = resolved_collection(url, data_dir, owner);
-    tokio::fs::create_dir_all(&rc.coll_dir).await?;
+    ensure_dir(&rc.coll_dir, "HedgeDoc note directory")?;
     if let Some(parent) = rc.db_path.parent() {
-        tokio::fs::create_dir_all(parent).await?;
+        ensure_dir(parent, "review database directory")?;
     }
     let note = build_note(url, &rc).await?;
     // A note that synced knows its own title; show that rather than the

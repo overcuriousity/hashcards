@@ -74,6 +74,7 @@ use crate::error::ErrorReport;
 use crate::error::Fallible;
 use crate::error::fail;
 use crate::types::timestamp::Timestamp;
+use crate::utils::ensure_dir;
 
 /// How long a session's heartbeat must have been silent before the startup
 /// sweep treats it as abandoned. Generous on purpose: closing a session that
@@ -176,11 +177,27 @@ fn session_key(oidc: Option<&ResolvedOidc>) -> Fallible<Key> {
 }
 
 pub async fn start_serve(config: ResolvedServeConfig) -> Fallible<()> {
+    // Everything the server writes lives under `data_dir`, so it is created
+    // and proved writable here rather than at the first write.
+    //
+    // `data_dir` has no default and the shipped example says
+    // `/var/lib/hashcards`, which on a systemd deployment only exists, and is
+    // only owned by the service user, when the unit declares
+    // `StateDirectory=hashcards`. Without that nothing created it, and the
+    // first attempt to write -- adding a HedgeDoc note, minutes or restarts
+    // later -- failed with a bare "Permission denied (os error 13)" naming no
+    // path at all.
+    if let Some(data_dir) = &config.data_dir {
+        ensure_dir(data_dir, "data directory")?;
+        ensure_dir(&data_dir.join("db"), "review database directory")?;
+        ensure_dir(&data_dir.join("hedgedoc"), "HedgeDoc note directory")?;
+    }
+
     // Git mode: clone/pull repo and create data directories
     let sync_git = match &config.git {
         Some(git) => {
-            std::fs::create_dir_all(&git.repo_dir)?;
-            std::fs::create_dir_all(&git.db_dir)?;
+            ensure_dir(&git.repo_dir, "git repository directory")?;
+            ensure_dir(&git.db_dir, "review database directory")?;
 
             log::debug!("Initial git sync...");
             clone_or_pull(&git.repo_url, &git.branch, &git.repo_dir).await?;

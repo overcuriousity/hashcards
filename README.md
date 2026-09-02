@@ -88,9 +88,27 @@ data_dir = "/var/lib/hashcards"     # required
 session_timeout_minutes = 1440      # 0 disables eviction
 ```
 
-`data_dir` is where the server keeps the repository clone (`{data_dir}/repo`)
-and the review databases (`{data_dir}/db`). Collection paths are always
-resolved inside `{data_dir}/repo`.
+`data_dir` is where the server keeps the repository clone (`{data_dir}/repo`),
+the review databases (`{data_dir}/db`) and any HedgeDoc notes
+(`{data_dir}/hedgedoc`). Collection paths are always resolved inside
+`{data_dir}/repo`.
+
+The server creates all of these at startup, and refuses to start with a message
+naming the directory if it cannot. **It must be writable by the user the server
+runs as.** `/var/lib/hashcards` is the conventional choice for a system
+service, but nothing creates it for you unless the systemd unit says so:
+
+```ini
+[Service]
+User=hashcards
+StateDirectory=hashcards          # creates /var/lib/hashcards owned by User=
+WorkingDirectory=/var/lib/hashcards
+ExecStart=/usr/local/bin/hashcards-web --config /etc/hashcards/hashcards.toml
+```
+
+Without `StateDirectory=` (or an equivalent `mkdir` + `chown`), `/var/lib` is
+root-owned and the server cannot write there. Running as your own user? Point
+`data_dir` somewhere you already own, such as `~/.local/share/hashcards`.
 
 `session_timeout_minutes` evicts drill sessions left idle that long and closes
 their database session row. Nothing is lost: every grade is written the moment
