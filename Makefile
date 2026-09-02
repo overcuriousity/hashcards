@@ -5,7 +5,7 @@ KATEX_VERSION = 0.16.25
 KATEX_URL = https://github.com/KaTeX/KaTeX/releases/download/v$(KATEX_VERSION)/katex.tar.gz
 
 .PHONY: all
-all: hashcards
+all: hashcards-web
 
 vendor/katex:
 	@echo "Downloading KaTeX $(KATEX_VERSION)..."
@@ -36,23 +36,28 @@ vendor/katex:
 	@rm vendor/katex/fonts/*.ttf
 	@rm vendor/katex/fonts/*.woff
 
-hashcards: vendor/katex $(SRC) Cargo.toml Cargo.lock
+hashcards-web: vendor/katex $(SRC) Cargo.toml Cargo.lock
 	cargo build --release
-	cp "target/release/hashcards" hashcards
+	cp "target/release/hashcards-web" hashcards-web
 
 .PHONY: install
-install: hashcards
+install: hashcards-web
 	install -d $(BINDIR)
-	install -m 755 hashcards $(BINDIR)/hashcards
+	install -m 755 hashcards-web $(BINDIR)/hashcards-web
 
 .PHONY: uninstall
 uninstall:
-	rm -f $(BINDIR)/hashcards
+	rm -f $(BINDIR)/hashcards-web
 
+# Serve the bundled example collection. Collections resolve under
+# {data_dir}/repo, so the cards are staged into that layout first. The
+# review database lands in target/example-data/db and is thrown away with it.
 .PHONY: example
 example:
-	rm -f example/hashcards.db
-	RUST_LOG=debug cargo run -- drill example
+	rm -rf target/example-data
+	mkdir -p target/example-data/repo
+	cp -r example target/example-data/repo/cards
+	RUST_LOG=debug cargo run -- --config example/hashcards.toml
 
 .PHONY: coverage
 coverage:
@@ -60,6 +65,7 @@ coverage:
 
 .PHONY: clean
 clean:
-	rm -f hashcards
+	rm -f hashcards-web
+	rm -rf target/example-data
 	rm -rf vendor
 	cargo clean

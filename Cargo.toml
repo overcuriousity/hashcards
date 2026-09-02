@@ -1,12 +1,12 @@
 [package]
-name = "hashcards"
+name = "hashcards-web"
 version = "0.4.2"
 edition = "2024"
-description = "A plain text-based spaced repetition system."
-homepage = "https://github.com/eudoxia0/hashcards"
-repository = "https://github.com/eudoxia0/hashcards"
+description = "A multi-user web server for plain text spaced repetition."
+homepage = "https://github.com/overcuriousity/hashcards-web"
+repository = "https://github.com/overcuriousity/hashcards-web"
 license = "Apache-2.0"
-categories = ["command-line-utilities"]
+categories = ["web-programming"]
 
 [dependencies]
 axum = "0.8.9"
@@ -17,7 +17,6 @@ clap = { version = "4.6.1", features = ["derive"] }
 env_logger = "0.11.10"
 log = "0.4.29"
 maud = "0.27.0"
-open = "5.3.4"
 openidconnect = "4"
 parking_lot = "0.12"
 percent-encoding = "2.3.2"
