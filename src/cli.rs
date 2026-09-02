@@ -54,9 +54,16 @@ pub async fn entrypoint() -> Fallible<()> {
 /// config file is what declares the collections, their owners, and the
 /// OIDC settings that gate them.
 fn resolve_config(config: Option<&str>) -> Fallible<ResolvedServeConfig> {
+    resolve_config_at(config, Path::new(DEFAULT_CONFIG_FILE))
+}
+
+/// `resolve_config` with the fallback path injected, so the no-`--config`
+/// branch can be tested without depending on the process's working
+/// directory (which tests share, and cannot change without racing).
+fn resolve_config_at(config: Option<&str>, default_path: &Path) -> Fallible<ResolvedServeConfig> {
     let path: PathBuf = match config {
         Some(path) => PathBuf::from(path),
-        None => PathBuf::from(DEFAULT_CONFIG_FILE),
+        None => default_path.to_path_buf(),
     };
 
     if !path.exists() {
@@ -96,17 +103,44 @@ mod tests {
     }
 
     /// Running with no config at all used to start an unauthenticated
-    /// HedgeDoc-only server in a temp directory. It must now fail loudly.
+    /// HedgeDoc-only server in a temp directory. It must now fail loudly,
+    /// naming the file it looked for.
     #[test]
     fn test_missing_default_config_is_an_error() -> Fallible<()> {
         let dir = tempdir()?;
         let missing = dir.path().join(DEFAULT_CONFIG_FILE);
-        let e = resolve_config(Some(
-            missing.to_str().expect("temp path must be valid UTF-8"),
-        ))
-        .err()
-        .expect("expected an error when the default config is absent");
-        assert!(e.to_string().contains("Config file not found"));
+        let e = resolve_config_at(None, &missing)
+            .err()
+            .expect("expected an error when the default config is absent");
+        let message = e.to_string();
+        assert!(
+            message.contains("No configuration file found"),
+            "the no-config branch must report its own error, got: {message}"
+        );
+        assert!(
+            message.contains(DEFAULT_CONFIG_FILE),
+            "the error must name the file it looked for, got: {message}"
+        );
+        Ok(())
+    }
+
+    /// The default config is loaded when it does exist, rather than the
+    /// absence of `--config` being an error in itself.
+    #[test]
+    fn test_default_config_is_loaded_when_present() -> Fallible<()> {
+        let dir = tempdir()?;
+        let data_dir = dir.path().join("data");
+        let config_path = dir.path().join(DEFAULT_CONFIG_FILE);
+        write(
+            &config_path,
+            format!(
+                "[server]\ndata_dir = {:?}\n",
+                data_dir.to_str().expect("temp path must be valid UTF-8")
+            ),
+        )?;
+
+        let resolved = resolve_config_at(None, &config_path)?;
+        assert!(resolved.config_path.is_some());
         Ok(())
     }
 

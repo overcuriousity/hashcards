@@ -28,7 +28,7 @@ use crate::cmd::drill::post::Action;
 use crate::cmd::drill::post::ActionResult;
 use crate::cmd::drill::post::FormData;
 use crate::cmd::drill::post::handle_action;
-use crate::cmd::drill::render::escape_js_string_literal;
+use crate::cmd::drill::render::render_macros_declaration;
 use crate::cmd::drill::state::MutableState;
 use crate::cmd::drill::state::SessionDb;
 use crate::cmd::drill::state::SessionDbs;
@@ -805,7 +805,7 @@ fn collection_post_inner(
     // `Action::Home` returned early above, and it is the only action for which
     // `handle_action` yields `ActionResult::Home`. Every action reaching here
     // leaves the session running; the only result needing dispatch is
-    // `ContinueWithFlash`, which carries a one-shot message for the user.
+    // `Ignored`, which carries a one-shot message for the user.
     let result = handle_action(&mut session.mutable, action, submitted_card, submitted_undo)?;
 
     // BUG-45: a finished session changes due counts; refresh them in the
@@ -831,9 +831,6 @@ fn collection_post_inner(
     }
 
     match result {
-        ActionResult::ContinueWithFlash(flash) => {
-            Ok(flash.redirect(&format!("/collection/{slug}")))
-        }
         ActionResult::Ignored(reason) => {
             Ok(Flash::error(reason).redirect(&format!("/collection/{slug}")))
         }
@@ -913,35 +910,31 @@ pub async fn collection_script_handler(
     current_user: Option<CurrentUser>,
 ) -> (StatusCode, [(HeaderName, &'static str); 1], String) {
     let owner = current_user.map(|u| u.email);
-    if find_drill_target(&state, &slug, owner.as_deref()).is_none() {
-        let content = format!(
-            "let MACROS = {{}};\n\n{}",
+    let script = |macros: &[(String, String)]| {
+        format!(
+            "{}\n{}",
+            render_macros_declaration(macros),
             include_str!("../drill/script.js")
+        )
+    };
+    if find_drill_target(&state, &slug, owner.as_deref()).is_none() {
+        return (
+            StatusCode::OK,
+            [(CONTENT_TYPE, "text/javascript")],
+            script(&[]),
         );
-        return (StatusCode::OK, [(CONTENT_TYPE, "text/javascript")], content);
     }
     let session: Option<SharedSession> = state.sessions.lock().get(&slug).cloned();
     let macros: Vec<(String, String)> = match session {
         Some(session) => session.lock().macros.clone(),
-        None => {
-            // No active session; serve script without macros
-            let content = format!(
-                "let MACROS = {{}};\n\n{}",
-                include_str!("../drill/script.js")
-            );
-            return (StatusCode::OK, [(CONTENT_TYPE, "text/javascript")], content);
-        }
+        // No active session; serve the script without macros.
+        None => Vec::new(),
     };
-    let mut content = String::new();
-    content.push_str("let MACROS = {};\n");
-    for (name, definition) in &macros {
-        let name = escape_js_string_literal(name);
-        let definition = escape_js_string_literal(definition);
-        content.push_str(&format!("MACROS['{name}'] = '{definition}';\n"));
-    }
-    content.push('\n');
-    content.push_str(include_str!("../drill/script.js"));
-    (StatusCode::OK, [(CONTENT_TYPE, "text/javascript")], content)
+    (
+        StatusCode::OK,
+        [(CONTENT_TYPE, "text/javascript")],
+        script(&macros),
+    )
 }
 
 pub async fn sync_handler(State(state): State<AppState>) -> Redirect {

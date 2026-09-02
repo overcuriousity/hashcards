@@ -17,6 +17,7 @@ use std::error::Error;
 use std::fmt::Display;
 use std::fmt::Formatter;
 use std::fs::read_to_string;
+use std::path::Path;
 use std::path::PathBuf;
 
 use serde::Deserialize;
@@ -245,6 +246,18 @@ impl CardLocation {
             line: card.range().0 + 1,
         }
     }
+
+    /// The location as shown to a reader of the collection, with `base`
+    /// stripped from the file path.
+    ///
+    /// `Display` prints the path the parser walked, which is absolute and
+    /// rooted at the server's `data_dir`. That belongs in logs, not on a
+    /// page: under `[oidc]` the reader has no filesystem access, and the
+    /// server's directory layout is none of their business.
+    pub fn display_under(&self, base: &Path) -> String {
+        let path = self.file_path.strip_prefix(base).unwrap_or(&self.file_path);
+        format!("{}:{}", path.display(), self.line)
+    }
 }
 
 impl Display for CardLocation {
@@ -277,6 +290,17 @@ impl DuplicateCard {
 
     pub fn ignored(&self) -> &CardLocation {
         &self.ignored
+    }
+
+    /// The report as shown to a reader of the collection, with `base`
+    /// stripped from both file paths. See `CardLocation::display_under`.
+    pub fn display_under(&self, base: &Path) -> String {
+        format!(
+            "duplicate card {}: kept {}, ignored {}",
+            self.hash,
+            self.kept.display_under(base),
+            self.ignored.display_under(base)
+        )
     }
 }
 

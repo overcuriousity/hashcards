@@ -19,7 +19,6 @@ use crate::cmd::drill::state::Review;
 use crate::db::ReviewRecord;
 use crate::error::Fallible;
 use crate::error::fail;
-use crate::flash::Flash;
 use crate::fsrs::Grade;
 use crate::types::card::Card;
 use crate::types::card_hash::CardHash;
@@ -37,7 +36,6 @@ pub enum Action {
     Hard,
     Good,
     Easy,
-    Shutdown,
     Home,
     Bookmark,
     Unbookmark,
@@ -71,12 +69,8 @@ pub struct FormData {
 pub enum ActionResult {
     /// Continue drilling (redirect back to the same page).
     Continue,
-    /// Continue drilling, showing a one-shot flash message.
-    ContinueWithFlash(Flash),
     /// The session finished (all cards done or user pressed End).
     SessionFinished,
-    /// The user requested server shutdown (drill mode only).
-    Shutdown,
     /// The user requested to go back to the collection list (serve mode).
     Home,
     /// The action was a harmless no-op (stale page, double submit); the
@@ -163,15 +157,6 @@ pub fn handle_action(
         Action::End => {
             finish_session(mutable)?;
             Ok(ActionResult::SessionFinished)
-        }
-        Action::Shutdown => {
-            if mutable.finished_at.is_some() {
-                Ok(ActionResult::Shutdown)
-            } else {
-                Ok(ActionResult::ContinueWithFlash(Flash::error(
-                    "The session is still in progress. Press End to finish it before shutting down.",
-                )))
-            }
         }
         Action::Home => Ok(ActionResult::Home),
         Action::Bookmark => {
@@ -304,7 +289,6 @@ mod tests {
     use crate::cmd::drill::state::MutableState;
     use crate::cmd::drill::state::SessionDbs;
     use crate::db::Database;
-    use crate::flash::FlashKind;
     use crate::rng::TinyRng;
     use crate::types::card::CardContent;
     use crate::types::performance::Jitter;
@@ -409,20 +393,6 @@ mod tests {
         let mut mutable = make_mutable();
         let result = handle_action(&mut mutable, Action::Home, None, None).unwrap();
         assert!(matches!(result, ActionResult::Home));
-    }
-
-    #[test]
-    fn test_shutdown_before_finish_flashes_explanation() {
-        let mut mutable = make_mutable();
-        assert!(mutable.finished_at.is_none());
-        let result = handle_action(&mut mutable, Action::Shutdown, None, None).unwrap();
-        match result {
-            ActionResult::ContinueWithFlash(flash) => {
-                assert_eq!(flash.kind, FlashKind::Error);
-                assert!(flash.message.contains("still in progress"));
-            }
-            _ => panic!("expected ContinueWithFlash"),
-        }
     }
 
     #[test]

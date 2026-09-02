@@ -219,7 +219,15 @@ pub mod test_support {
     }
 
     /// An `AppState` wrapping an already-built config.
+    ///
+    /// `config_path` is taken from the config rather than left empty, so a
+    /// test that passes a config recording where it was loaded from gets a
+    /// state that agrees with it. `hedgedoc_sources` and `custom_decks`
+    /// stay empty: the config holds *entries*, which the real startup path
+    /// turns into sources and resolved decks by fetching notes and reading
+    /// collections. A test needing those must build them itself.
     pub fn state_with_config(config: ResolvedServeConfig) -> AppState {
+        let config_path = config.config_path.clone();
         AppState {
             config: Arc::new(config),
             collections: Arc::new(RwLock::new(Vec::new())),
@@ -228,7 +236,7 @@ pub mod test_support {
             hedgedoc_sources: Arc::new(Mutex::new(Vec::new())),
             custom_decks: Arc::new(Mutex::new(Vec::new())),
             hedgedoc_last_synced: Arc::new(Mutex::new(None)),
-            config_path: Arc::new(Mutex::new(None)),
+            config_path: Arc::new(Mutex::new(config_path)),
             counts_refreshed_at: Arc::new(Mutex::new(None)),
             interrupted_closed: Arc::new(Mutex::new(HashMap::new())),
             session_key: Key::generate(),
