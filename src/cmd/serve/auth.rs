@@ -234,6 +234,59 @@ fn safe_return_to(raw: &str) -> String {
     }
 }
 
+/// Scheme, host and effective port: what a redirect has to keep unchanged
+/// to count as staying on the provider's own server.
+fn origin_of(url: &openidconnect::reqwest::Url) -> (String, Option<String>, Option<u16>) {
+    (
+        url.scheme().to_string(),
+        url.host_str().map(str::to_string),
+        url.port_or_known_default(),
+    )
+}
+
+/// The HTTP client used for OIDC discovery and token exchange.
+///
+/// Redirects are followed only while they stay on the origin the request
+/// started from, and only a few times. Following one to a third-party host
+/// would hand that host the request — and at the token endpoint, the client
+/// credentials with it — which is why openidconnect's own examples disable
+/// redirects outright.
+///
+/// Refusing every redirect, though, leaves some providers with no working
+/// `issuer_url` at all. Nextcloud serves its discovery document at
+/// `/index.php/.well-known/openid-configuration` and 301s the spec-mandated
+/// `/.well-known/openid-configuration` there, while the document correctly
+/// declares the bare host as its issuer: the bare `issuer_url` then failed
+/// on the 301, and the `/index.php` form failed the issuer check that
+/// OpenID Connect Discovery §4.3 requires. Same-origin redirects are the
+/// narrowest thing that fixes that without giving up the hardening.
+fn oidc_http_client() -> Fallible<openidconnect::reqwest::Client> {
+    /// Enough for a path rewrite and an http->https bump, far short of a loop.
+    const MAX_REDIRECTS: usize = 5;
+
+    let policy = openidconnect::reqwest::redirect::Policy::custom(|attempt| {
+        let Some(start) = attempt.previous().first() else {
+            return attempt.stop();
+        };
+        if attempt.previous().len() > MAX_REDIRECTS {
+            return attempt.stop();
+        }
+        if origin_of(attempt.url()) == origin_of(start) {
+            attempt.follow()
+        } else {
+            // Stopping yields the redirect response itself, which the caller
+            // reports as the unexpected status it is.
+            attempt.stop()
+        }
+    });
+
+    openidconnect::reqwest::ClientBuilder::new()
+        .redirect(policy)
+        .connect_timeout(std::time::Duration::from_secs(5))
+        .build()
+        .map_err(|e| ErrorReport::new(format!("failed to build OIDC HTTP client: {e}")))
+}
+
 pub(super) async fn build_oidc_runtime(config: &ResolvedOidc) -> Fallible<OidcRuntime> {
     use openidconnect::ClientId;
     use openidconnect::ClientSecret;
@@ -243,14 +296,7 @@ pub(super) async fn build_oidc_runtime(config: &ResolvedOidc) -> Fallible<OidcRu
     use openidconnect::core::CoreClient;
     use openidconnect::core::CoreProviderMetadata;
 
-    // Redirects disabled: discovery/token requests should not follow
-    // redirects to third-party hosts (SSRF hardening), matching current
-    // openidconnect guidance for the caller-supplied HTTP client.
-    let http_client = openidconnect::reqwest::ClientBuilder::new()
-        .redirect(openidconnect::reqwest::redirect::Policy::none())
-        .connect_timeout(std::time::Duration::from_secs(5))
-        .build()
-        .map_err(|e| ErrorReport::new(format!("failed to build OIDC HTTP client: {e}")))?;
+    let http_client = oidc_http_client()?;
 
     let issuer_url = IssuerUrl::new(config.issuer_url.clone())
         .map_err(|e| ErrorReport::new(format!("invalid [oidc].issuer_url: {e}")))?;
@@ -368,10 +414,7 @@ pub(super) async fn callback_handler(
             .into_response();
     }
 
-    let http_client = match openidconnect::reqwest::ClientBuilder::new()
-        .redirect(openidconnect::reqwest::redirect::Policy::none())
-        .build()
-    {
+    let http_client = match oidc_http_client() {
         Ok(client) => client,
         Err(e) => {
             return (
@@ -602,6 +645,97 @@ mod tests {
             result.is_err(),
             "expected discovery against a closed port to fail"
         );
+    }
+
+    /// Nextcloud serves its discovery document at
+    /// `/index.php/.well-known/openid-configuration` and 301s the
+    /// spec-mandated `/.well-known/openid-configuration` there, while the
+    /// document itself correctly declares the bare host as its issuer.
+    /// Discovery has to survive that: refusing the redirect leaves no
+    /// `issuer_url` that works at all.
+    #[tokio::test]
+    async fn test_discovery_follows_a_same_origin_redirect() -> Fallible<()> {
+        let port = portpicker::pick_unused_port().expect("no free port for mock IdP");
+        let issuer = format!("http://127.0.0.1:{port}");
+        let state = MockIdpState {
+            issuer: issuer.clone(),
+            client_secret: "secret".to_string(),
+            last_nonce: std::sync::Arc::new(Mutex::new(None)),
+            email: "me@example.com".to_string(),
+        };
+        let app = axum::Router::new()
+            .route(
+                "/.well-known/openid-configuration",
+                axum::routing::get(|| async {
+                    axum::response::Redirect::permanent(
+                        "/index.php/.well-known/openid-configuration",
+                    )
+                }),
+            )
+            .route(
+                "/index.php/.well-known/openid-configuration",
+                axum::routing::get(mock_discovery_handler),
+            )
+            // Discovery fetches the JWK set named by the metadata too.
+            .route("/jwks", axum::routing::get(mock_jwks_handler))
+            .with_state(state);
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+        crate::utils::wait_for_server("127.0.0.1", port).await?;
+
+        let config = ResolvedOidc {
+            issuer_url: issuer,
+            client_id: "abc".to_string(),
+            client_secret: "secret".to_string(),
+            external_url: "https://hashcards.example.com".to_string(),
+            session_secret: "a-very-long-random-session-secret-value".to_string(),
+            scopes: vec!["openid".to_string(), "email".to_string()],
+        };
+        build_oidc_runtime(&config)
+            .await
+            .map_err(|e| ErrorReport::new(format!("discovery must follow the redirect: {e}")))?;
+        Ok(())
+    }
+
+    /// A redirect off the issuer's own origin is still refused: following it
+    /// would hand a third-party host the request, and at the token endpoint
+    /// the client credentials with it.
+    #[tokio::test]
+    async fn test_discovery_refuses_a_cross_origin_redirect() -> Fallible<()> {
+        // The destination is a real, working discovery endpoint, so the only
+        // thing that can make this fail is the refusal to go there.
+        let elsewhere_port = spawn_mock_oidc_provider("me@example.com", "secret").await?;
+
+        let port = portpicker::pick_unused_port().expect("no free port for mock IdP");
+        let target = format!("http://localhost:{elsewhere_port}/.well-known/openid-configuration");
+        let app = axum::Router::new().route(
+            "/.well-known/openid-configuration",
+            axum::routing::get(move || {
+                let target = target.clone();
+                async move { axum::response::Redirect::permanent(&target) }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+        crate::utils::wait_for_server("127.0.0.1", port).await?;
+
+        let config = ResolvedOidc {
+            issuer_url: format!("http://127.0.0.1:{port}"),
+            client_id: "abc".to_string(),
+            client_secret: "secret".to_string(),
+            external_url: "https://hashcards.example.com".to_string(),
+            session_secret: "a-very-long-random-session-secret-value".to_string(),
+            scopes: vec!["openid".to_string(), "email".to_string()],
+        };
+        assert!(
+            build_oidc_runtime(&config).await.is_err(),
+            "a redirect to another origin must not be followed"
+        );
+        Ok(())
     }
 
     // ── Mock OIDC provider ──────────────────────────────────────────────

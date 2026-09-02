@@ -36,7 +36,18 @@ repo_url = "https://github.com/user/flashcards.git"
 # would ever be logged in to match it.
 
 # [oidc]
-# issuer_url = "https://cloud.example.com/index.php/apps/oidc"
+# issuer_url = "https://cloud.example.com"
+#                                     # The provider's issuer, exactly as its
+#                                     # discovery document declares it -- not the
+#                                     # path the document happens to be served
+#                                     # from. For Nextcloud that is the bare base
+#                                     # URL: it serves the document at
+#                                     # /index.php/.well-known/openid-configuration
+#                                     # and redirects the standard path there,
+#                                     # which hashcards follows, but the issuer
+#                                     # itself has no /index.php. Check with
+#                                     # `curl {issuer_url}/.well-known/openid-configuration`
+#                                     # and use the "issuer" field you get back.
 # client_id = "..."
 # client_secret = "..."
 # external_url = "https://hashcards.example.com"
