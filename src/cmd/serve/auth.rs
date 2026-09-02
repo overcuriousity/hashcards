@@ -455,7 +455,7 @@ pub(super) async fn logout_handler(
     // endpoint) would need discovering with a metadata type that carries
     // `end_session_endpoint`, which CoreProviderMetadata does not — out of
     // scope for now; clearing the local session cookie is sufficient to
-    // log the user out of hashcards itself.
+    // log the user out of hashcards-web itself.
     let target = "/".to_string();
     (jar, axum::response::Redirect::to(&target))
 }
@@ -763,7 +763,6 @@ mod tests {
                 session_secret: "a-very-long-random-session-secret-value".to_string(),
                 scopes: vec!["openid".to_string(), "email".to_string()],
             }),
-            _temp_dir: None,
         };
         tokio::spawn(async move { start_serve(config).await });
         crate::utils::wait_for_server("127.0.0.1", port).await?;
@@ -841,7 +840,6 @@ mod tests {
                 session_secret: "a-very-long-random-session-secret-value".to_string(),
                 scopes: vec!["openid".to_string(), "email".to_string()],
             }),
-            _temp_dir: None,
         };
         tokio::spawn(async move { start_serve(config).await });
         crate::utils::wait_for_server("127.0.0.1", port).await?;
@@ -912,7 +910,6 @@ mod tests {
                 session_secret: "a-very-long-random-session-secret-value".to_string(),
                 scopes: vec!["openid".to_string(), "email".to_string()],
             }),
-            _temp_dir: None,
         };
         tokio::spawn(async move { start_serve(config).await });
         crate::utils::wait_for_server("127.0.0.1", port).await?;
@@ -1099,7 +1096,6 @@ mod tests {
                 session_secret: "a-very-long-random-session-secret-value".to_string(),
                 scopes: vec!["openid".to_string(), "email".to_string()],
             }),
-            _temp_dir: None,
         };
         tokio::spawn(async move { start_serve(config).await });
         crate::utils::wait_for_server("127.0.0.1", port).await?;

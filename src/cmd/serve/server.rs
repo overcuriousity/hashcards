@@ -45,6 +45,7 @@ use crate::cmd::serve::decks::decks_manage_handler;
 use crate::cmd::serve::decks::resolve_custom_decks;
 use crate::cmd::serve::edit::edit_get_handler;
 use crate::cmd::serve::edit::edit_post_handler;
+use crate::cmd::serve::export::collection_export_handler;
 use crate::cmd::serve::git::clone_or_pull;
 use crate::cmd::serve::git::spawn_sync_task;
 use crate::cmd::serve::handlers::collection_file_handler;
@@ -352,6 +353,7 @@ pub async fn start_serve(config: ResolvedServeConfig) -> Fallible<()> {
         .route("/collection/{slug}", post(collection_post_handler))
         .route("/collection/{slug}/start", post(collection_start_handler))
         .route("/collection/{slug}/stats", get(collection_stats_handler))
+        .route("/collection/{slug}/export", get(collection_export_handler))
         .route("/collection/{slug}/bookmarks", get(bookmark_list_handler))
         .route(
             "/collection/{slug}/bookmarks/{hash}/delete",
@@ -404,7 +406,7 @@ pub async fn start_serve(config: ResolvedServeConfig) -> Fallible<()> {
 
     log::debug!("Starting server on {bind}");
     let listener = TcpListener::bind(&bind).await?;
-    println!("hashcards server running on http://{bind}/");
+    println!("hashcards-web running on http://{bind}/");
 
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())

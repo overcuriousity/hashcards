@@ -1,0 +1,10 @@
+# Configuration for `make example`, which stages the bundled cards into
+# target/example-data/repo/cards first. Not a deployment example: see
+# hashcards.example.toml at the repository root for that.
+
+[server]
+data_dir = "target/example-data"
+
+[[collection]]
+name = "Example"
+path = "cards"

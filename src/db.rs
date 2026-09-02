@@ -871,7 +871,7 @@ fn migrate(tx: &Transaction) -> Fallible<()> {
     let current = get_schema_version(tx)?;
     if current > SCHEMA_VERSION {
         return fail(format!(
-            "This database uses schema version {current}, but this version of hashcards only supports up to schema version {SCHEMA_VERSION}. Please upgrade hashcards."
+            "This database uses schema version {current}, but this version of hashcards-web only supports up to schema version {SCHEMA_VERSION}. Please upgrade hashcards-web."
         ));
     }
     for version in (current + 1)..=SCHEMA_VERSION {

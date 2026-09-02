@@ -2,7 +2,11 @@ Dear Claude: this document is to help you in your work.
 
 # Overview
 
-hashcards is a plain-text spaced repetition system written in Rust. It parses Markdown files containing flashcards, stores performance data in SQLite, and presents cards through a web interface using the FSRS algorithm for scheduling.
+hashcards-web is a multi-user web server for plain-text spaced repetition,
+written in Rust. It parses Markdown files containing flashcards, stores
+performance data in SQLite, and presents cards through a web interface using
+the FSRS algorithm for scheduling. Forked from eudoxia0/hashcards, which was
+a local CLI tool; the CLI is gone.
 
 # Design and Internals
 
@@ -12,15 +16,21 @@ hashcards is a plain-text spaced repetition system written in Rust. It parses Ma
 - In `markdown.rs`: URLs are rewritten to `/file/{url}` endpoints for serving.
 - In `media.rs`: Image references are extracted and validated during collection loading.
 - Files are served via `/file/*path` endpoint, resolved relative to collection directory.
-- Path validation (in `cmd/drill/file.rs`) prevents directory traversal attacks.
+- Path validation (in `src/media/load.rs`) prevents directory traversal attacks.
 
-# Ongoing work
+# Layout
 
-- The big update (SPEC.md) is planned in `docs/superpowers/plans/`. Before
-  working on it, read `2026-08-31-00-master.md` there: it holds the status
-  ledger (claim a plan before starting), execution order, and the session
-  batching guide.
-- Path validation lives in `src/media/load.rs` (there is no `cmd/drill/file.rs`).
+- One binary, one job: `hashcards-web [--config <path>]`, defaulting to
+  `hashcards.toml`. There are no subcommands. A config file is mandatory.
+- `src/cmd/serve/` is the server: routing, handlers, auth, config, git,
+  HedgeDoc, editing, decks, export.
+- `src/cmd/drill/` is the drill engine the server embeds — rendering
+  (`get.rs`), actions (`post.rs`), session state, cache, templates and
+  static assets. The directory names predate the fork; there is no drill
+  command any more.
+- `Collection::new`, `ResolvedServeConfig::from_directories` and
+  `wait_for_server` are `#[cfg(test)]`. Do not reach for them in production
+  code: the server resolves databases through the config, not by convention.
 
 # Rules
 

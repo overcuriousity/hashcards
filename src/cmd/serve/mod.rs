@@ -4,6 +4,7 @@ mod browse;
 pub mod config;
 mod decks;
 mod edit;
+pub mod export;
 mod git;
 mod handlers;
 mod hedgedoc;
@@ -56,7 +57,6 @@ mod tests {
             hedgedoc_entries: Vec::new(),
             custom_decks: Vec::new(),
             session_timeout_minutes: 1440,
-            _temp_dir: None,
             oidc: None,
         };
         spawn(async move { start_serve(config).await });
@@ -134,7 +134,6 @@ mod tests {
             hedgedoc_entries: Vec::new(),
             custom_decks: Vec::new(),
             session_timeout_minutes: 1440,
-            _temp_dir: None,
             oidc: None,
         };
 
@@ -258,7 +257,6 @@ mod tests {
             hedgedoc_entries: Vec::new(),
             custom_decks: Vec::new(),
             session_timeout_minutes: 1440,
-            _temp_dir: None,
             oidc: None,
         };
         spawn(async move { start_serve(config).await });
@@ -314,7 +312,6 @@ mod tests {
             hedgedoc_entries: Vec::new(),
             custom_decks: Vec::new(),
             session_timeout_minutes: 1440,
-            _temp_dir: None,
             oidc: None,
         };
         spawn(async move { start_serve(config).await });
@@ -394,7 +391,6 @@ mod tests {
             hedgedoc_entries: Vec::new(),
             custom_decks: Vec::new(),
             session_timeout_minutes: 1440,
-            _temp_dir: None,
             oidc: None,
         };
         spawn(async move { start_serve(config).await });
@@ -471,7 +467,6 @@ mod tests {
             hedgedoc_entries: Vec::new(),
             custom_decks: Vec::new(),
             session_timeout_minutes: 1440,
-            _temp_dir: None,
             oidc: None,
         };
         spawn(async move { start_serve(config).await });
@@ -530,7 +525,6 @@ mod tests {
             hedgedoc_entries: Vec::new(),
             custom_decks: Vec::new(),
             session_timeout_minutes: 1440,
-            _temp_dir: None,
             oidc: None,
         };
 

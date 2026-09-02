@@ -21,7 +21,6 @@ use maud::html;
 use crate::flash::Flash;
 
 use crate::cmd::drill::cache::Cache;
-use crate::cmd::drill::get::CompletionAction;
 use crate::cmd::drill::get::RenderContext;
 use crate::cmd::drill::get::render_completion_page;
 use crate::cmd::drill::get::render_session_page;
@@ -29,7 +28,7 @@ use crate::cmd::drill::post::Action;
 use crate::cmd::drill::post::ActionResult;
 use crate::cmd::drill::post::FormData;
 use crate::cmd::drill::post::handle_action;
-use crate::cmd::drill::server::escape_js_string_literal;
+use crate::cmd::drill::render::render_macros_declaration;
 use crate::cmd::drill::state::MutableState;
 use crate::cmd::drill::state::SessionDb;
 use crate::cmd::drill::state::SessionDbs;
@@ -50,7 +49,6 @@ use crate::cmd::serve::hedgedoc::build_source;
 use crate::cmd::serve::hedgedoc::cleanup_after_delete;
 use crate::cmd::serve::hedgedoc::commit_add;
 use crate::cmd::serve::hedgedoc::commit_delete;
-use crate::cmd::serve::hedgedoc::create_minimal_config;
 use crate::cmd::serve::hedgedoc::find_slug_collision;
 use crate::cmd::serve::hedgedoc::normalize_hedgedoc_url;
 use crate::cmd::serve::hedgedoc::slug_for_note;
@@ -154,7 +152,7 @@ fn collection_get_inner(
         // No active session: show the deck browser.
         let rc = find_collection(state, slug, owner)
             .ok_or_else(|| crate::error::ErrorReport::new(format!("Unknown collection: {slug}")))?;
-        let tree = build_deck_tree(&rc.coll_dir, &rc.db_path)?;
+        let browse = build_deck_tree(&rc.coll_dir, &rc.db_path)?;
         // Build a deck-name → HedgeDoc URL map so the browse page can show
         // edit links. A HedgeDoc collection is exactly one note, so this is
         // at most one entry. All URLs were validated as HTTPS when added.
@@ -180,16 +178,16 @@ fn collection_get_inner(
         let db = Database::new(db_path)?;
         // FEAT-03: report the session rows the startup sweep closed. The
         // sweep itself runs once, at startup: it cannot tell a crashed
-        // session from a live one, and `serve` may share a database with a
-        // running CLI `drill`, so doing it per request would stamp
-        // `ended_at` on a session that is still going. Taking the entry also
-        // means the notice appears once instead of on every visit.
+        // session from a live one, and a second server may share the same
+        // database, so doing it per request would stamp `ended_at` on a
+        // session that is still going. Taking the entry also means the
+        // notice appears once instead of on every visit.
         let interrupted_closed = state.interrupted_closed.lock().remove(slug).unwrap_or(0);
         let bookmark_count = db.count_bookmarks()?;
         let html = render_browse_page(
             &rc.name,
             slug,
-            &tree,
+            &browse,
             &hedge_urls,
             bookmark_count,
             interrupted_closed,
@@ -217,7 +215,6 @@ fn collection_get_inner(
         answer_controls: session.answer_controls,
         form_action: &form_action,
         file_url_prefix: &file_url_prefix,
-        completion_action: CompletionAction::BackToCollections,
     };
     let body = if session.mutable.finished_at.is_some() {
         render_completion_page(&ctx, &session.mutable)?
@@ -808,7 +805,7 @@ fn collection_post_inner(
     // `Action::Home` returned early above, and it is the only action for which
     // `handle_action` yields `ActionResult::Home`. Every action reaching here
     // leaves the session running; the only result needing dispatch is
-    // `ContinueWithFlash`, which carries a one-shot message for the user.
+    // `Ignored`, which carries a one-shot message for the user.
     let result = handle_action(&mut session.mutable, action, submitted_card, submitted_undo)?;
 
     // BUG-45: a finished session changes due counts; refresh them in the
@@ -834,9 +831,6 @@ fn collection_post_inner(
     }
 
     match result {
-        ActionResult::ContinueWithFlash(flash) => {
-            Ok(flash.redirect(&format!("/collection/{slug}")))
-        }
         ActionResult::Ignored(reason) => {
             Ok(Flash::error(reason).redirect(&format!("/collection/{slug}")))
         }
@@ -916,35 +910,31 @@ pub async fn collection_script_handler(
     current_user: Option<CurrentUser>,
 ) -> (StatusCode, [(HeaderName, &'static str); 1], String) {
     let owner = current_user.map(|u| u.email);
-    if find_drill_target(&state, &slug, owner.as_deref()).is_none() {
-        let content = format!(
-            "let MACROS = {{}};\n\n{}",
+    let script = |macros: &[(String, String)]| {
+        format!(
+            "{}\n{}",
+            render_macros_declaration(macros),
             include_str!("../drill/script.js")
+        )
+    };
+    if find_drill_target(&state, &slug, owner.as_deref()).is_none() {
+        return (
+            StatusCode::OK,
+            [(CONTENT_TYPE, "text/javascript")],
+            script(&[]),
         );
-        return (StatusCode::OK, [(CONTENT_TYPE, "text/javascript")], content);
     }
     let session: Option<SharedSession> = state.sessions.lock().get(&slug).cloned();
     let macros: Vec<(String, String)> = match session {
         Some(session) => session.lock().macros.clone(),
-        None => {
-            // No active session; serve script without macros
-            let content = format!(
-                "let MACROS = {{}};\n\n{}",
-                include_str!("../drill/script.js")
-            );
-            return (StatusCode::OK, [(CONTENT_TYPE, "text/javascript")], content);
-        }
+        // No active session; serve the script without macros.
+        None => Vec::new(),
     };
-    let mut content = String::new();
-    content.push_str("let MACROS = {};\n");
-    for (name, definition) in &macros {
-        let name = escape_js_string_literal(name);
-        let definition = escape_js_string_literal(definition);
-        content.push_str(&format!("MACROS['{name}'] = '{definition}';\n"));
-    }
-    content.push('\n');
-    content.push_str(include_str!("../drill/script.js"));
-    (StatusCode::OK, [(CONTENT_TYPE, "text/javascript")], content)
+    (
+        StatusCode::OK,
+        [(CONTENT_TYPE, "text/javascript")],
+        script(&macros),
+    )
 }
 
 pub async fn sync_handler(State(state): State<AppState>) -> Redirect {
@@ -1034,7 +1024,7 @@ pub async fn hedgedoc_add_handler(
         None => {
             log::error!("Cannot add HedgeDoc source: no data_dir configured");
             return Flash::error(
-                "Cannot add HedgeDoc source: no data directory is configured. Start hashcards with --config.",
+                "Cannot add HedgeDoc source: no data directory is configured. Start hashcards-web with --config.",
             )
             .redirect("/hedgedoc");
         }
@@ -1078,31 +1068,17 @@ pub async fn hedgedoc_add_handler(
         }
     };
 
-    // Get or create config path outside the lock, using spawn_blocking for the
-    // filesystem work so we don't block the async runtime.
-    let maybe_config_path = state.config_path.lock().clone();
-    let config_path = match maybe_config_path {
+    // A config file is mandatory, so the server cannot reach this point
+    // without one. Adding a note has nowhere to be persisted otherwise.
+    let config_path = match state.config_path.lock().clone() {
         Some(p) => p,
         None => {
-            let data_dir_owned = data_dir.clone();
-            let p =
-                match tokio::task::spawn_blocking(move || create_minimal_config(&data_dir_owned))
-                    .await
-                    .map_err(|e| ErrorReport::new(format!("Config creation task panicked: {e}")))
-                {
-                    Ok(Ok(p)) => p,
-                    Ok(Err(e)) | Err(e) => {
-                        log::error!("Failed to create minimal config file: {e}");
-                        return Flash::error(format!("Failed to create config file: {e}"))
-                            .redirect("/hedgedoc");
-                    }
-                };
-            *state.config_path.lock() = Some(p.clone());
-            // The config now references the temp data dir; stop cleanup on exit.
-            if let Some(tracker) = state.config._temp_dir.as_ref() {
-                tracker.dismiss();
-            }
-            p
+            log::error!("Cannot persist a HedgeDoc source: the server has no config file path");
+            return Flash::error(
+                "Cannot save this HedgeDoc source: the server was started without a \
+                 configuration file to write it back to.",
+            )
+            .redirect("/hedgedoc");
         }
     };
 
@@ -1297,7 +1273,7 @@ mod tests {
     use super::create_session_from_sources;
     use super::deck_sources;
     use super::run_blocking;
-    use crate::cmd::drill::server::AnswerControls;
+    use crate::cmd::drill::render::AnswerControls;
     use crate::cmd::drill::state::MutableState;
     use crate::cmd::drill::state::SessionDbs;
     use crate::cmd::serve::config::ResolvedCollection;
@@ -1349,7 +1325,6 @@ mod tests {
             hedgedoc_entries: Vec::new(),
             custom_decks: Vec::new(),
             session_timeout_minutes: 1440,
-            _temp_dir: None,
             oidc: None,
         };
         let state = AppState {

@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#[cfg(test)]
 use std::env::current_dir;
 use std::fs::read_to_string;
 use std::path::PathBuf;
@@ -36,6 +37,10 @@ pub struct Collection {
 }
 
 impl Collection {
+    /// Load a collection from `directory`, using the `hashcards.db` inside
+    /// it. Test-only: the server resolves each collection's database path
+    /// from the config and uses `with_db_path`.
+    #[cfg(test)]
     pub fn new(directory: Option<String>) -> Fallible<Self> {
         let directory: PathBuf = match directory {
             Some(dir) => PathBuf::from(dir),

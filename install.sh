@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Installs the latest hashcards release from GitHub.
+# Installs the latest hashcards-web release from GitHub.
 #
 #   curl -fsSL https://raw.githubusercontent.com/overcuriousity/hashcards-web/master/install.sh | sh
 #
@@ -47,7 +47,7 @@ if [ -z "$version" ]; then
     exit 1
 fi
 
-asset="hashcards-${version}-${target}.${ext}"
+asset="hashcards-web-${version}-${target}.${ext}"
 base_url="https://github.com/$REPO/releases/download/${version}"
 
 tmp_dir="$(mktemp -d)"
@@ -70,9 +70,9 @@ fi
 echo "Installing to $INSTALL_DIR..."
 mkdir -p "$INSTALL_DIR"
 tar xzf "$tmp_dir/$asset" -C "$tmp_dir"
-install -m 755 "$tmp_dir/hashcards-${version}-${target}/hashcards" "$INSTALL_DIR/hashcards"
+install -m 755 "$tmp_dir/hashcards-web-${version}-${target}/hashcards-web" "$INSTALL_DIR/hashcards-web"
 
-echo "Installed hashcards ${version} to $INSTALL_DIR/hashcards"
+echo "Installed hashcards-web ${version} to $INSTALL_DIR/hashcards-web"
 case ":$PATH:" in
     *":$INSTALL_DIR:"*) ;;
     *)

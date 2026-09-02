@@ -12,18 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use axum::Form;
-use axum::extract::State;
-use axum::response::Redirect;
 use serde::Deserialize;
 
 use crate::cmd::drill::state::MutableState;
 use crate::cmd::drill::state::Review;
-use crate::cmd::drill::state::ServerState;
 use crate::db::ReviewRecord;
 use crate::error::Fallible;
 use crate::error::fail;
-use crate::flash::Flash;
 use crate::fsrs::Grade;
 use crate::types::card::Card;
 use crate::types::card_hash::CardHash;
@@ -41,7 +36,6 @@ pub enum Action {
     Hard,
     Good,
     Easy,
-    Shutdown,
     Home,
     Bookmark,
     Unbookmark,
@@ -75,66 +69,13 @@ pub struct FormData {
 pub enum ActionResult {
     /// Continue drilling (redirect back to the same page).
     Continue,
-    /// Continue drilling, showing a one-shot flash message.
-    ContinueWithFlash(Flash),
     /// The session finished (all cards done or user pressed End).
     SessionFinished,
-    /// The user requested server shutdown (drill mode only).
-    Shutdown,
     /// The user requested to go back to the collection list (serve mode).
     Home,
     /// The action was a harmless no-op (stale page, double submit); the
     /// message is shown to the user as a flash.
     Ignored(String),
-}
-
-pub async fn post_handler(
-    State(state): State<ServerState>,
-    Form(form): Form<FormData>,
-) -> Redirect {
-    match action_handler(state, form).await {
-        Ok(Some(flash)) => flash.redirect("/"),
-        Ok(None) => Redirect::to("/"),
-        Err(e) => {
-            log::error!("error: {e}");
-            Flash::error(e.to_string()).redirect("/")
-        }
-    }
-}
-
-async fn action_handler(state: ServerState, form: FormData) -> Fallible<Option<Flash>> {
-    let submitted_card: Option<CardHash> = match form.card.as_deref() {
-        Some(hex) => match CardHash::from_hex(hex) {
-            Ok(hash) => Some(hash),
-            Err(_) => {
-                log::debug!("ignoring grade with unparseable card hash");
-                return Ok(Some(Flash::error(
-                    "That grade carried an invalid card reference and was ignored.",
-                )));
-            }
-        },
-        None => None,
-    };
-    let mut mutable = state.mutable.lock();
-    // Heartbeat; see the GET path.
-    if let Err(e) = mutable.dbs.touch_all(Timestamp::now()) {
-        log::debug!("could not stamp session heartbeat: {e}");
-    }
-    let result = handle_action(&mut mutable, form.action, submitted_card, form.undo_review)?;
-    match result {
-        ActionResult::Shutdown => {
-            // Release the lock before sending shutdown signal.
-            drop(mutable);
-            let mut shutdown_tx = state.shutdown_tx.lock();
-            if let Some(tx) = shutdown_tx.take() {
-                let _ = tx.send(());
-            }
-            Ok(None)
-        }
-        ActionResult::ContinueWithFlash(flash) => Ok(Some(flash)),
-        ActionResult::Ignored(reason) => Ok(Some(Flash::error(reason))),
-        ActionResult::Continue | ActionResult::SessionFinished | ActionResult::Home => Ok(None),
-    }
 }
 
 /// Core action handling logic, reusable by both drill and serve modes.
@@ -216,15 +157,6 @@ pub fn handle_action(
         Action::End => {
             finish_session(mutable)?;
             Ok(ActionResult::SessionFinished)
-        }
-        Action::Shutdown => {
-            if mutable.finished_at.is_some() {
-                Ok(ActionResult::Shutdown)
-            } else {
-                Ok(ActionResult::ContinueWithFlash(Flash::error(
-                    "The session is still in progress. Press End to finish it before shutting down.",
-                )))
-            }
         }
         Action::Home => Ok(ActionResult::Home),
         Action::Bookmark => {
@@ -357,7 +289,6 @@ mod tests {
     use crate::cmd::drill::state::MutableState;
     use crate::cmd::drill::state::SessionDbs;
     use crate::db::Database;
-    use crate::flash::FlashKind;
     use crate::rng::TinyRng;
     use crate::types::card::CardContent;
     use crate::types::performance::Jitter;
@@ -462,20 +393,6 @@ mod tests {
         let mut mutable = make_mutable();
         let result = handle_action(&mut mutable, Action::Home, None, None).unwrap();
         assert!(matches!(result, ActionResult::Home));
-    }
-
-    #[test]
-    fn test_shutdown_before_finish_flashes_explanation() {
-        let mut mutable = make_mutable();
-        assert!(mutable.finished_at.is_none());
-        let result = handle_action(&mut mutable, Action::Shutdown, None, None).unwrap();
-        match result {
-            ActionResult::ContinueWithFlash(flash) => {
-                assert_eq!(flash.kind, FlashKind::Error);
-                assert!(flash.message.contains("still in progress"));
-            }
-            _ => panic!("expected ContinueWithFlash"),
-        }
     }
 
     #[test]

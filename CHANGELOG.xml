@@ -1,5 +1,43 @@
 <changelog>
     <unreleased>
+        <added>
+            <change author="claude">
+            The collection page now reports byte-identical duplicate cards, naming both file locations. Duplicates are deduplicated at load time, so one copy is dropped and only the other carries review history; this was previously only warned about on the CLI's stderr.
+            </change>
+                <change author="claude">
+            New route `GET /collection/{slug}/export` returns a collection as JSON — every card, its scheduling state, and the full review history — as a file download, gated to the collection's owner. The markdown lives in git but the review databases do not, and under `[oidc]` a user has no filesystem access, so this is their only route to their own history. It is linked from the collection page, next to Stats.
+            </change>
+            </added>
+        <changed>
+            <change author="claude">
+            The project is now `hashcards-web`: a web server rather than the CLI it was forked from. The package, binary, release artifacts and documentation are renamed; the Apache-2.0 licence and all upstream copyright headers are unchanged. On-disk `hashcards.toml` and `hashcards.db` keep their names, so existing deployments are unaffected — but the binary is now `hashcards-web`, so anyone installed under the old name must reinstall.
+            </change>
+                <change author="claude">
+            The `drill`, `check`, `stats`, `orphans` and `export` subcommands are removed, along with the drill web server they drove. The binary now takes a single optional `--config`, defaulting to `hashcards.toml` in the current directory, and fails with a clear message when there is no configuration file.
+            </change>
+                <change author="claude">
+            `hashcards.example.toml` now documents the `[oidc]` section, the `owner` key on `[[collection]]`/`[[hedgedoc]]`/`[[deck]]` entries, and the `[[deck]]` table itself — all of which shipped in 0.4.2 but were only described in the README. The README is rewritten around the server, and the stale `SPEC.md`, `ROADMAP.md`, `PLAN.md` and `docs/superpowers/plans/` ledgers, which describe already-landed work in terms of deleted code, are removed.
+            </change>
+            </changed>
+        <fixed>
+            <change author="claude">
+            A KaTeX macro containing an apostrophe — `\text{don't}`, say — no longer breaks a collection's `script.js`. Macros were pasted into single-quoted JavaScript literals with only backslashes, backticks and dollar signs escaped, so an apostrophe closed the literal early and killed every script on the page; a crafted `macros.tex` could inject arbitrary JavaScript that way. The macro map is now emitted as JSON.
+            </change>
+                <change author="claude">
+            The duplicate-card notice on the collection page no longer shows the server's absolute path to each file, which under `[oidc]` was leaking the deployment's directory layout to users with no filesystem access. Locations are now relative to the collection, and the notice reads correctly when there is exactly one duplicate.
+            </change>
+                <change author="claude">
+            `make example` works on a fresh clone again: `example/hashcards.toml` was matched by the root `.gitignore` rule for `hashcards.toml` and so was never committed, making the target fail with "Config file not found".
+            </change>
+            </fixed>
+        <removed>
+            <change author="claude">
+            The dead `Shutdown` action, left over from the drill server: it was still accepted from form input but the server-mode handler discarded it, so it silently did nothing or produced a nonsensical "press End before shutting down" message.
+            </change>
+                <change author="claude">
+            The two ways to start the server without a configuration file — passing collection directories positionally, and the config-free HedgeDoc-only mode that ran out of a temporary directory — are gone. Both hardcoded `oidc: None`, so each was an unauthenticated bypass of the access control the rest of the server enforces. `create_minimal_config`, which wrote a config file on the first HedgeDoc add, goes with them.
+            </change>
+            </removed>
         </unreleased>
     <releases>
         <release version="0.4.2" date="2026-09-01">

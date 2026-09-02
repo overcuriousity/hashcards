@@ -12,13 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod check;
 pub mod drill;
-pub mod export;
-pub mod orphans;
 pub mod serve;
 pub mod signals;
-pub mod stats;
 pub mod stats_page;
 
 use crate::error::ErrorReport;

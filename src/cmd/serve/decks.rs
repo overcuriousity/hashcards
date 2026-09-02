@@ -249,7 +249,7 @@ pub(super) fn render_decks_page(
             @if !config_available {
                 div.notice {
                     p { "Decks cannot be saved without a configured data directory." }
-                    p { "Start hashcards with " code { "--config hashcards.toml" } "." }
+                    p { "Start hashcards-web with " code { "--config hashcards.toml" } "." }
                 }
             } @else {
                 h2 { "New deck" }
@@ -435,7 +435,7 @@ pub async fn deck_add_handler(
 
     let Some(config_path) = state.config_path.lock().clone() else {
         return Flash::error(
-            "Decks cannot be saved: no config file is in use. Start hashcards with --config.",
+            "Decks cannot be saved: no config file is in use. Start hashcards-web with --config.",
         )
         .redirect("/decks");
     };

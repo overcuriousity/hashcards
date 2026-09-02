@@ -123,14 +123,14 @@ jobs:
       - name: package
         shell: bash
         run: |
-          ARCHIVE_NAME="hashcards-v${{ needs.create-release.outputs.version }}-${{ matrix.name }}"
+          ARCHIVE_NAME="hashcards-web-v${{ needs.create-release.outputs.version }}-${{ matrix.name }}"
 
           # Determine binary name based on OS
           if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            BINARY_NAME="hashcards.exe"
+            BINARY_NAME="hashcards-web.exe"
             ARCHIVE_EXT=".zip"
           else
-            BINARY_NAME="hashcards"
+            BINARY_NAME="hashcards-web"
             ARCHIVE_EXT=".tar.gz"
           fi
 
