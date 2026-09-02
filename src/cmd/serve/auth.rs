@@ -469,17 +469,28 @@ pub(super) async fn callback_handler(
         }
     };
 
-    let Some(email) = claims.email() else {
-        return (
-            StatusCode::BAD_GATEWAY,
-            "OIDC provider did not return an email claim; add the `email` scope on the \
-             provider side",
-        )
-            .into_response();
+    // Who the user is, for matching against a collection's `owner`.
+    //
+    // The `email` claim is preferred because that is what an operator can
+    // actually write in a config file, but it is not required. OpenID Connect
+    // Core 5.4 puts the `email` scope's claims at the UserInfo endpoint for
+    // the authorization code flow; carrying them in the ID token as well is
+    // the provider's option, and Nextcloud's OIDC app does not. So: try the
+    // ID token, then UserInfo, then fall back to the subject, which every
+    // provider sends and the ID token's signature already vouches for.
+    //
+    // UserInfo is best-effort. A provider without the endpoint, or one that
+    // fails the request, must not turn into a failed login for a user the ID
+    // token itself identifies.
+    let email = match claims.email() {
+        Some(email) => Some(email.as_str().to_lowercase()),
+        None => fetch_userinfo_email(runtime, &token_response, claims.subject(), &http_client)
+            .await
+            .map(|email| email.to_lowercase()),
     };
-    let email = email.as_str().to_lowercase();
+    let identity = email.unwrap_or_else(|| claims.subject().as_str().to_string());
 
-    let jar = set_session_cookie(jar, &email, runtime.secure_cookies);
+    let jar = set_session_cookie(jar, &identity, runtime.secure_cookies);
     // The flow cookie is signed, so `return_to` cannot have been tampered
     // with since `login_handler` validated it — re-checking here keeps the
     // guarantee local to the redirect that acts on it.
@@ -488,6 +499,43 @@ pub(super) async fn callback_handler(
         axum::response::Redirect::to(&safe_return_to(&flow.return_to)),
     )
         .into_response()
+}
+
+/// The `email` claim from the provider's UserInfo endpoint, or `None` if the
+/// provider has no such endpoint, the request fails, or it returns no email.
+///
+/// Best-effort by design: the caller falls back to the subject, so a failure
+/// here costs the operator a readable `owner` value, never a login.
+async fn fetch_userinfo_email(
+    runtime: &OidcRuntime,
+    token_response: &openidconnect::core::CoreTokenResponse,
+    subject: &openidconnect::SubjectIdentifier,
+    http_client: &openidconnect::reqwest::Client,
+) -> Option<String> {
+    use openidconnect::OAuth2TokenResponse;
+
+    let request = match runtime
+        .client
+        .user_info(token_response.access_token().clone(), Some(subject.clone()))
+    {
+        Ok(request) => request,
+        Err(e) => {
+            log::debug!("OIDC provider has no UserInfo endpoint: {e}");
+            return None;
+        }
+    };
+    match request
+        .request_async::<openidconnect::EmptyAdditionalClaims, _, openidconnect::core::CoreGenderClaim>(
+            http_client,
+        )
+        .await
+    {
+        Ok(info) => info.email().map(|email| email.as_str().to_string()),
+        Err(e) => {
+            log::warn!("OIDC UserInfo request failed; continuing without an email claim: {e}");
+            None
+        }
+    }
 }
 
 pub(super) async fn logout_handler(
@@ -662,6 +710,9 @@ mod tests {
             client_secret: "secret".to_string(),
             last_nonce: std::sync::Arc::new(Mutex::new(None)),
             email: "me@example.com".to_string(),
+            subject: "me@example.com".to_string(),
+            email_in_id_token: true,
+            serves_email: true,
         };
         let app = axum::Router::new()
             .route(
@@ -757,6 +808,16 @@ mod tests {
         /// would derive this from the authorization code it minted).
         last_nonce: std::sync::Arc<Mutex<Option<String>>>,
         email: String,
+        /// The `sub` claim. Distinct from `email` so a test can tell which of
+        /// the two an identity was actually built from.
+        subject: String,
+        /// When false the ID token carries no `email` claim and the address
+        /// is only available from the UserInfo endpoint -- which is what the
+        /// spec expects of the authorization code flow, and what Nextcloud
+        /// actually does.
+        email_in_id_token: bool,
+        /// When false the UserInfo endpoint omits `email` too.
+        serves_email: bool,
     }
 
     #[derive(serde::Serialize)]
@@ -767,7 +828,8 @@ mod tests {
         exp: i64,
         iat: i64,
         nonce: Option<String>,
-        email: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        email: Option<String>,
     }
 
     async fn mock_discovery_handler(
@@ -778,6 +840,7 @@ mod tests {
             "authorization_endpoint": format!("{}/authorize", state.issuer),
             "token_endpoint": format!("{}/token", state.issuer),
             "jwks_uri": format!("{}/jwks", state.issuer),
+            "userinfo_endpoint": format!("{}/userinfo", state.issuer),
             "response_types_supported": ["code"],
             "subject_types_supported": ["public"],
             "id_token_signing_alg_values_supported": ["HS256"],
@@ -787,6 +850,18 @@ mod tests {
 
     async fn mock_jwks_handler() -> axum::Json<serde_json::Value> {
         axum::Json(serde_json::json!({ "keys": [] }))
+    }
+
+    async fn mock_userinfo_handler(
+        axum::extract::State(state): axum::extract::State<MockIdpState>,
+    ) -> axum::Json<serde_json::Value> {
+        let mut info = serde_json::json!({ "sub": state.subject });
+        // A provider that puts the address in neither place leaves the server
+        // with only the subject to identify the user by.
+        if state.serves_email {
+            info["email"] = serde_json::Value::String(state.email.clone());
+        }
+        axum::Json(info)
     }
 
     async fn mock_authorize_handler(
@@ -810,12 +885,12 @@ mod tests {
         let now = chrono::Utc::now().timestamp();
         let claims = MockClaims {
             iss: state.issuer.clone(),
-            sub: state.email.clone(),
+            sub: state.subject.clone(),
             aud: "test-client".to_string(),
             exp: now + 300,
             iat: now,
             nonce,
-            email: state.email.clone(),
+            email: state.email_in_id_token.then(|| state.email.clone()),
         };
         let id_token = jsonwebtoken::encode(
             &jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256),
@@ -834,12 +909,37 @@ mod tests {
     /// Starts a mock OIDC provider on a local port, claiming `email` for
     /// whoever logs in. Returns the port.
     async fn spawn_mock_oidc_provider(email: &str, client_secret: &str) -> Fallible<u16> {
+        spawn_mock_oidc_provider_with(email, client_secret, true).await
+    }
+
+    /// As above, but `email_in_id_token` chooses whether the address is in
+    /// the ID token or only at the UserInfo endpoint.
+    async fn spawn_mock_oidc_provider_with(
+        email: &str,
+        client_secret: &str,
+        email_in_id_token: bool,
+    ) -> Fallible<u16> {
+        spawn_mock_idp(email, email, client_secret, email_in_id_token, true).await
+    }
+
+    /// The general form: `subject` and `email` are separate, and either
+    /// carrier of the address can be switched off.
+    async fn spawn_mock_idp(
+        subject: &str,
+        email: &str,
+        client_secret: &str,
+        email_in_id_token: bool,
+        serves_email: bool,
+    ) -> Fallible<u16> {
         let port = portpicker::pick_unused_port().expect("no free port for mock IdP");
         let state = MockIdpState {
             issuer: format!("http://127.0.0.1:{port}"),
             client_secret: client_secret.to_string(),
             last_nonce: std::sync::Arc::new(Mutex::new(None)),
             email: email.to_string(),
+            subject: subject.to_string(),
+            email_in_id_token,
+            serves_email,
         };
         let app = axum::Router::new()
             .route(
@@ -849,6 +949,7 @@ mod tests {
             .route("/jwks", axum::routing::get(mock_jwks_handler))
             .route("/authorize", axum::routing::get(mock_authorize_handler))
             .route("/token", axum::routing::post(mock_token_handler))
+            .route("/userinfo", axum::routing::get(mock_userinfo_handler))
             .with_state(state);
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
         tokio::spawn(async move {
@@ -918,6 +1019,135 @@ mod tests {
             response.status()
         );
         let body = response.text().await?;
+        assert!(body.contains("Test Collection"), "body: {body}");
+        Ok(())
+    }
+
+    /// A provider that returns `email` only from the UserInfo endpoint must
+    /// still log the user in. OpenID Connect Core 5.4 puts the claims of the
+    /// `email`/`profile` scopes at UserInfo for the authorization code flow;
+    /// carrying them in the ID token as well is the provider's option, and
+    /// Nextcloud does not. Reading the ID token alone meant every login there
+    /// failed with "did not return an email claim".
+    #[tokio::test]
+    async fn test_login_uses_userinfo_when_the_id_token_has_no_email() -> Fallible<()> {
+        use crate::cmd::serve::config::DefaultsSection;
+        use crate::cmd::serve::config::ResolvedCollection;
+        use crate::cmd::serve::config::ResolvedServeConfig;
+        use crate::cmd::serve::server::start_serve;
+
+        let client_secret = "test-client-secret-value";
+        let idp_port =
+            spawn_mock_oidc_provider_with("me@example.com", client_secret, false).await?;
+
+        let dir = tempfile::tempdir()?;
+        std::fs::write(dir.path().join("Alpha.md"), "Q: What is 1+1?\nA: 2\n")?;
+
+        let port = portpicker::pick_unused_port().expect("no free port for serve");
+        let config = ResolvedServeConfig {
+            host: "127.0.0.1".to_string(),
+            port,
+            git: None,
+            defaults: DefaultsSection::default(),
+            collections: vec![ResolvedCollection {
+                name: "Test Collection".to_string(),
+                slug: "test-collection".to_string(),
+                coll_dir: dir.path().to_path_buf(),
+                db_path: dir.path().join("hashcards.db"),
+                owner: Some("me@example.com".to_string()),
+            }],
+            data_dir: None,
+            config_path: None,
+            hedgedoc_entries: Vec::new(),
+            custom_decks: Vec::new(),
+            session_timeout_minutes: 1440,
+            oidc: Some(ResolvedOidc {
+                issuer_url: format!("http://127.0.0.1:{idp_port}"),
+                client_id: "test-client".to_string(),
+                client_secret: client_secret.to_string(),
+                external_url: format!("http://127.0.0.1:{port}"),
+                session_secret: "a-very-long-random-session-secret-value".to_string(),
+                scopes: vec!["openid".to_string(), "email".to_string()],
+            }),
+        };
+        tokio::spawn(async move { start_serve(config).await });
+        crate::utils::wait_for_server("127.0.0.1", port).await?;
+
+        let client = reqwest::Client::builder().cookie_store(true).build()?;
+        let response = client
+            .get(format!(
+                "http://127.0.0.1:{port}/collection/test-collection"
+            ))
+            .send()
+            .await?;
+        let status = response.status();
+        let body = response.text().await?;
+        assert!(status.is_success(), "status: {status}, body: {body}");
+        assert!(body.contains("Test Collection"), "body: {body}");
+        Ok(())
+    }
+
+    /// A provider that sends no `email` anywhere still logs the user in, with
+    /// the subject standing in as the identity a collection's `owner` names.
+    /// The subject is mandatory in every ID token and its signature already
+    /// vouches for it, so there is always something to identify a user by.
+    #[tokio::test]
+    async fn test_login_falls_back_to_the_subject_without_any_email() -> Fallible<()> {
+        use crate::cmd::serve::config::DefaultsSection;
+        use crate::cmd::serve::config::ResolvedCollection;
+        use crate::cmd::serve::config::ResolvedServeConfig;
+        use crate::cmd::serve::server::start_serve;
+
+        let client_secret = "test-client-secret-value";
+        let subject = "nextcloud-user-1234";
+        let idp_port =
+            spawn_mock_idp(subject, "unused@example.com", client_secret, false, false).await?;
+
+        let dir = tempfile::tempdir()?;
+        std::fs::write(dir.path().join("Alpha.md"), "Q: What is 1+1?\nA: 2\n")?;
+
+        let port = portpicker::pick_unused_port().expect("no free port for serve");
+        let config = ResolvedServeConfig {
+            host: "127.0.0.1".to_string(),
+            port,
+            git: None,
+            defaults: DefaultsSection::default(),
+            collections: vec![ResolvedCollection {
+                name: "Test Collection".to_string(),
+                slug: "test-collection".to_string(),
+                coll_dir: dir.path().to_path_buf(),
+                db_path: dir.path().join("hashcards.db"),
+                // The owner is the subject, since that is all this provider
+                // gives out.
+                owner: Some(subject.to_string()),
+            }],
+            data_dir: None,
+            config_path: None,
+            hedgedoc_entries: Vec::new(),
+            custom_decks: Vec::new(),
+            session_timeout_minutes: 1440,
+            oidc: Some(ResolvedOidc {
+                issuer_url: format!("http://127.0.0.1:{idp_port}"),
+                client_id: "test-client".to_string(),
+                client_secret: client_secret.to_string(),
+                external_url: format!("http://127.0.0.1:{port}"),
+                session_secret: "a-very-long-random-session-secret-value".to_string(),
+                scopes: vec!["openid".to_string()],
+            }),
+        };
+        tokio::spawn(async move { start_serve(config).await });
+        crate::utils::wait_for_server("127.0.0.1", port).await?;
+
+        let client = reqwest::Client::builder().cookie_store(true).build()?;
+        let response = client
+            .get(format!(
+                "http://127.0.0.1:{port}/collection/test-collection"
+            ))
+            .send()
+            .await?;
+        let status = response.status();
+        let body = response.text().await?;
+        assert!(status.is_success(), "status: {status}, body: {body}");
         assert!(body.contains("Test Collection"), "body: {body}");
         Ok(())
     }

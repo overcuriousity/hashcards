@@ -63,9 +63,18 @@ repo_url = "https://github.com/user/flashcards.git"
 #                                     # -- rotating it logs out every user.
 #                                     # Config load fails if it is shorter.
 # scopes = ["openid", "email", "profile"]
-#                                     # Default shown; must include openid and
-#                                     # email. Owners are matched against the
-#                                     # `email` claim, case-insensitively.
+#                                     # Default shown; only `openid` is
+#                                     # required. `owner` is matched against the
+#                                     # `email` claim, case-insensitively, taken
+#                                     # from the ID token or, failing that, the
+#                                     # UserInfo endpoint -- Nextcloud only
+#                                     # sends it from the latter. A provider
+#                                     # that sends no email at all identifies
+#                                     # users by their `sub` claim instead, and
+#                                     # `owner` must then be written as that
+#                                     # subject. Check what you get with:
+#                                     #   curl -H "Authorization: Bearer <token>" \
+#                                     #     {issuer_url}/apps/oidc/userinfo
 
 # Define one or more collections. Paths are relative to {data_dir}/repo.
 
