@@ -37,7 +37,7 @@ repo_url = "https://github.com/user/flashcards.git"
 
 # Optional: OIDC login. Adding this section gates every route except /auth/*
 # behind a login, and then *requires* an `owner` on every [[collection]],
-# [[hedgedoc]] and [[deck]] entry below. Each collection is visible to exactly
+# [[source]] and [[deck]] entry below. Each collection is visible to exactly
 # its one owner; there is no sharing, signup flow or admin UI. Conversely, an
 # `owner` declared without an [oidc] section is a config error, since nobody
 # would ever be logged in to match it.
@@ -95,25 +95,30 @@ name = "Anatomy"
 path = "medicine/anatomy"
 # owner = "someone-else@example.com"
 
-# Optional: HedgeDoc sources. Each entry is a publicly accessible HedgeDoc note
-# URL. hashcards fetches the raw markdown (via {url}/download), derives the
-# collection name from the document title, and syncs it on the same interval as
-# git. Sources can also be added/removed via the web interface.
+# Optional: remote sources. Each entry is a publicly accessible URL for one
+# markdown document -- a HedgeDoc note or a file in a git repository, worked
+# out from the URL. hashcards fetches the raw markdown, derives the collection
+# name from the document title, and syncs it on the same interval as git.
+# Sources can also be added/removed via the web interface.
 #
-# Each note is a collection of its own, owned by that entry's `owner` alone --
+# Each source is a collection of its own, owned by that entry's `owner` alone --
 # notes are never grouped by host, so several users can take notes from one
 # shared HedgeDoc instance without sharing a collection or a review database.
 
-# [[hedgedoc]]
+# [[source]]
 # url = "https://notes.example.com/q1QcHIRvQFiTxzwnF-_L3g"
 # owner = "me@example.com"            # Required when [oidc] is configured
 
-# [[hedgedoc]]
-# url = "https://notes.example.com/anotherNoteId"
+# A file in a git repository works the same way. GitHub /blob/, GitLab
+# /-/blob/, Gitea and Forgejo /src/branch/ URLs are rewritten to their raw
+# endpoints; a URL already ending in .md is fetched as-is.
+
+# [[source]]
+# url = "https://github.com/me/cards/blob/main/spanish.md"
 
 # Optional: decks assembled across collections, drilled together in one session.
 # `members` are "{collection-slug}/{deck-name}" pairs. Decks created through the
-# web interface are written back to this file, exactly as HedgeDoc sources are.
+# web interface are written back to this file, exactly as sources are.
 
 # [[deck]]
 # name = "Exam revision"

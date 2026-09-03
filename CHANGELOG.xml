@@ -1,5 +1,24 @@
 <changelog>
     <unreleased>
+        <added>
+            <change author="claude">
+            Cards can now be written in hashcards itself. **My Cards** (`/files`) is a folder tree kept at `{data_dir}/local/{user}` that only its owner writes to, with a file manager for creating, renaming and deleting folders and files, and a Markdown editor whose buttons insert Q/A, cloze, term, separator, LaTeX and image skeletons at the caret. It sits outside `{data_dir}/repo` deliberately: `clone_or_pull` hard-updates that directory and source sync overwrites the files it owns, so a separate root makes "sync cannot clobber your writing" a property of the layout rather than a rule to remember. Each top-level folder is a collection, discovered rather than configured, and carries a `.hashcards.toml` holding a stable id — review databases are named from that id rather than from the slug, so renaming a folder keeps its history instead of silently orphaning the database. Saving reuses the card editor's atomic write, revert and hash migration, so a buffer that does not parse never survives on disk and a reworded card keeps its schedule.
+            </change>
+            <change author="claude">
+            The editor previews as you type, running the buffer through the production parser rather than a JavaScript approximation, and reporting either the parsed cards or the parse error with its line number. An approximation could render a card hashcards cannot actually read, which is the one thing the preview exists to rule out. Duplicate cards are reported too.
+            </change>
+            <change author="claude">
+            A link to a Markdown file in a git repository can be added as a source, exactly like a HedgeDoc note. GitHub `/blob/`, GitLab `/-/blob/`, Gitea and Forgejo `/src/branch/` URLs are rewritten to their raw endpoints, and any URL already ending in `.md` is fetched as-is; anything else stays a HedgeDoc note, which cannot collide because note ids never carry an extension. Only the step that builds the fetch URL differs, so adding, syncing, deleting and slugging are shared with HedgeDoc sources.
+            </change>
+            </added>
+        <changed>
+            <change author="claude">
+            `[[hedgedoc]]` config entries are now `[[source]]`, since a GitHub URL under a `hedgedoc` heading reads as a mistake. The old spelling still parses, so existing configs keep working; entries written back by the web interface use the new one, and the old array is removed when they are, because entries in both places would load every source twice.
+            </change>
+            <change author="claude">
+            `/hedgedoc` is now `/sources` and permanently redirects, so existing bookmarks keep working. The page gains a Kind column, whose badge is derived from the same URL logic that chooses where the markdown is fetched from, and offers a starter card template for copying into a note, a repository or a local file.
+            </change>
+            </changed>
         </unreleased>
     <releases>
         <release version="0.4.7" date="2026-09-02">
