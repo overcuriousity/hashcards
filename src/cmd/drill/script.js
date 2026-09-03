@@ -186,3 +186,16 @@ document.querySelectorAll('.editor-toolbar button[data-snippet]').forEach(functi
   });
   refresh();
 })();
+
+// Sources page: copy the starter template.
+(function () {
+  var button = document.getElementById('copy-template');
+  var block = document.getElementById('card-template');
+  if (!button || !block) return;
+  button.addEventListener('click', function () {
+    navigator.clipboard.writeText(block.textContent).then(function () {
+      button.textContent = 'Copied';
+      setTimeout(function () { button.textContent = 'Copy template'; }, 2000);
+    });
+  });
+})();

@@ -1012,11 +1012,11 @@ pub async fn hedgedoc_add_handler(
     // anything that is not a well-formed HTTPS URL so no raw string is
     // ever persisted or rendered into an href.
     if form.url.trim().is_empty() {
-        return Flash::error("Enter a HedgeDoc URL.").redirect("/hedgedoc");
+        return Flash::error("Enter a HedgeDoc URL.").redirect("/sources");
     }
     let url = match normalize_hedgedoc_url(&form.url) {
         Ok(url) => url,
-        Err(e) => return Flash::error(e.to_string()).redirect("/hedgedoc"),
+        Err(e) => return Flash::error(e.to_string()).redirect("/sources"),
     };
 
     let data_dir = match &state.config.data_dir {
@@ -1026,7 +1026,7 @@ pub async fn hedgedoc_add_handler(
             return Flash::error(
                 "Cannot add HedgeDoc source: no data directory is configured. Start hashcards-web with --config.",
             )
-            .redirect("/hedgedoc");
+            .redirect("/sources");
         }
     };
 
@@ -1038,14 +1038,14 @@ pub async fn hedgedoc_add_handler(
             .iter()
             .any(|s| s.note.url == url && s.collection.owner == owner)
         {
-            return Flash::error("This note is already added.").redirect("/hedgedoc");
+            return Flash::error("This note is already added.").redirect("/sources");
         }
     }
 
     if source_uri_from_url(&url).is_none() {
         log::error!("Failed to parse HedgeDoc source URI from {url}");
         return Flash::error(format!("Could not parse a HedgeDoc note URL from: {url}"))
-            .redirect("/hedgedoc");
+            .redirect("/sources");
     }
 
     // BUG-43: refuse to create a source whose slug collides with a configured
@@ -1056,7 +1056,7 @@ pub async fn hedgedoc_add_handler(
             "Cannot add this HedgeDoc source: its collection slug '{new_slug}' collides with the configured collection '{}'. Rename that collection or use a different source.",
             existing.name
         ))
-        .redirect("/hedgedoc");
+        .redirect("/sources");
     }
 
     let new_source = match build_source(&url, &data_dir, owner.clone()).await {
@@ -1064,7 +1064,7 @@ pub async fn hedgedoc_add_handler(
         Err(e) => {
             log::error!("Failed to add HedgeDoc source {url}: {e}");
             return Flash::error(format!("Failed to add HedgeDoc source: {e}"))
-                .redirect("/hedgedoc");
+                .redirect("/sources");
         }
     };
 
@@ -1078,7 +1078,7 @@ pub async fn hedgedoc_add_handler(
                 "Cannot save this HedgeDoc source: the server was started without a \
                  configuration file to write it back to.",
             )
-            .redirect("/hedgedoc");
+            .redirect("/sources");
         }
     };
 
@@ -1105,7 +1105,7 @@ pub async fn hedgedoc_add_handler(
         Ok(snapshot) => snapshot,
         Err(e) => {
             log::error!("Failed to add HedgeDoc source {url}: {e}");
-            return Flash::error(e.to_string()).redirect("/hedgedoc");
+            return Flash::error(e.to_string()).redirect("/sources");
         }
     };
 
@@ -1129,7 +1129,7 @@ pub async fn hedgedoc_add_handler(
         *state.hedgedoc_last_synced.lock() = Some(Timestamp::now());
     }
 
-    Flash::success("HedgeDoc source added.").redirect("/hedgedoc")
+    Flash::success("HedgeDoc source added.").redirect("/sources")
 }
 
 #[derive(serde::Deserialize)]
@@ -1151,7 +1151,7 @@ pub async fn hedgedoc_delete_handler(
         .any(|s| s.note.url == form.url && s.collection.owner == owner);
     if !owns_url {
         return Flash::error("No HedgeDoc source with this URL: ".to_string() + &form.url)
-            .redirect("/hedgedoc");
+            .redirect("/sources");
     }
     let maybe_config_path: Option<PathBuf> = state.config_path.lock().clone();
     let sources_arc = state.hedgedoc_sources.clone();
@@ -1176,7 +1176,7 @@ pub async fn hedgedoc_delete_handler(
         Ok(pair) => pair,
         Err(e) => {
             log::error!("Failed to delete HedgeDoc source {}: {e}", form.url);
-            return Flash::error(e.to_string()).redirect("/hedgedoc");
+            return Flash::error(e.to_string()).redirect("/sources");
         }
     };
 
@@ -1191,7 +1191,7 @@ pub async fn hedgedoc_delete_handler(
         Err(e) => log::error!("Failed to compute collection counts: {e}"),
     }
 
-    Flash::success(message).redirect("/hedgedoc")
+    Flash::success(message).redirect("/sources")
 }
 
 /// Manually re-sync all HedgeDoc sources.
@@ -1202,7 +1202,7 @@ pub async fn hedgedoc_sync_now_handler(
     let owner = current_user.map(|u| u.email);
     if state.config.data_dir.is_none() {
         return Flash::error("HedgeDoc sync is not available: no data directory is configured.")
-            .redirect("/hedgedoc");
+            .redirect("/sources");
     }
 
     // Collect URLs to sync (release lock before awaiting). Only the caller's
@@ -1254,10 +1254,10 @@ pub async fn hedgedoc_sync_now_handler(
     }
 
     if any_success || entries.is_empty() {
-        Flash::success("HedgeDoc sync finished.").redirect("/hedgedoc")
+        Flash::success("HedgeDoc sync finished.").redirect("/sources")
     } else {
         Flash::error("HedgeDoc sync failed for all notes; see the statuses below.")
-            .redirect("/hedgedoc")
+            .redirect("/sources")
     }
 }
 

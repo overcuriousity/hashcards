@@ -324,7 +324,7 @@ mod tests {
         let port = spawn_test_server(coll_dir, "test-collection").await?;
 
         let response = reqwest::Client::new()
-            .post(format!("http://{TEST_HOST}:{port}/hedgedoc/add"))
+            .post(format!("http://{TEST_HOST}:{port}/sources/add"))
             .body("url=")
             .header("content-type", "application/x-www-form-urlencoded")
             .send()
@@ -366,10 +366,10 @@ mod tests {
         spawn(async move { start_serve(config).await });
         wait_for_server(TEST_HOST, port).await?;
 
-        // reqwest follows the 303 redirect, so `response` is the /hedgedoc
+        // reqwest follows the 303 redirect, so `response` is the /sources
         // manage page rendered with the flash query params.
         let response = reqwest::Client::new()
-            .post(format!("http://{TEST_HOST}:{port}/hedgedoc/add"))
+            .post(format!("http://{TEST_HOST}:{port}/sources/add"))
             .form(&[("url", "http://notes.example.com/abc123")])
             .send()
             .await?;

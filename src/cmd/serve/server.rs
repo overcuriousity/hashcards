@@ -47,6 +47,8 @@ use crate::cmd::serve::decks::resolve_custom_decks;
 use crate::cmd::serve::edit::edit_get_handler;
 use crate::cmd::serve::edit::edit_post_handler;
 use crate::cmd::serve::export::collection_export_handler;
+use axum::response::Redirect;
+
 use crate::cmd::serve::files::editor_get_handler;
 use crate::cmd::serve::files::editor_post_handler;
 use crate::cmd::serve::files::files_delete_handler;
@@ -376,10 +378,15 @@ pub async fn start_serve(config: ResolvedServeConfig) -> Fallible<()> {
         .route("/files/edit/{*path}", get(editor_get_handler))
         .route("/files/edit/{*path}", post(editor_post_handler))
         .route("/files/preview", post(preview_handler))
-        .route("/hedgedoc", get(hedgedoc_manage_handler))
-        .route("/hedgedoc/add", post(hedgedoc_add_handler))
-        .route("/hedgedoc/delete", post(hedgedoc_delete_handler))
-        .route("/hedgedoc/sync", post(hedgedoc_sync_now_handler))
+        .route("/sources", get(hedgedoc_manage_handler))
+        .route("/sources/add", post(hedgedoc_add_handler))
+        .route("/sources/delete", post(hedgedoc_delete_handler))
+        .route("/sources/sync", post(hedgedoc_sync_now_handler))
+        // Kept so bookmarks from before the rename keep working.
+        .route(
+            "/hedgedoc",
+            get(|| async { Redirect::permanent("/sources") }),
+        )
         .route("/decks", get(decks_manage_handler))
         .route("/decks/add", post(deck_add_handler))
         .route("/decks/delete", post(deck_delete_handler))

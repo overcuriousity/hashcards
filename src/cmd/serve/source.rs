@@ -14,6 +14,30 @@ pub enum SourceKind {
     Git,
 }
 
+impl SourceKind {
+    /// Short label shown as a badge on the Sources page.
+    pub fn label(&self) -> &'static str {
+        match self {
+            SourceKind::Hedgedoc => "hedgedoc",
+            SourceKind::Git => "git",
+        }
+    }
+}
+
+/// Which kind of source a pasted URL names, for display.
+///
+/// Shares `git_raw_url` with `raw_url`, so the badge cannot disagree with
+/// where the markdown is actually fetched from.
+pub fn detect_kind(url: &str) -> SourceKind {
+    match Url::parse(url) {
+        Ok(parsed) => match git_raw_url(&parsed) {
+            Some(_) => SourceKind::Git,
+            None => SourceKind::Hedgedoc,
+        },
+        Err(_) => SourceKind::Hedgedoc,
+    }
+}
+
 /// The kind of a pasted URL, and the URL its markdown is actually fetched
 /// from. HedgeDoc URLs come back unchanged — `hedgedoc::fetch_markdown`
 /// appends `/download` itself, because that rewrite also has to strip the
@@ -139,5 +163,20 @@ mod tests {
     #[test]
     fn non_https_is_rejected() {
         assert!(raw_url("http://github.com/me/cards/blob/main/a.md").is_err());
+    }
+
+    #[test]
+    fn the_badge_never_disagrees_with_the_fetch_target() {
+        for url in [
+            "https://github.com/me/cards/blob/main/a.md",
+            "https://gitlab.com/me/cards/-/blob/main/a.md",
+            "https://codeberg.org/me/cards/src/branch/main/a.md",
+            "https://example.com/raw/a.md",
+            "https://notes.example.com/abc123",
+            "https://notes.example.com/s/abc123",
+        ] {
+            let (kind, _) = raw_url(url).unwrap();
+            assert_eq!(detect_kind(url), kind, "disagreed for {url}");
+        }
     }
 }

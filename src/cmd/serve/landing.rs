@@ -209,11 +209,14 @@ fn render_landing_page(
                                 (format!("{hedgedoc_count} HedgeDoc source(s) — not yet synced"))
                             }
                         } @else {
-                            "No HedgeDoc sources"
+                            "No sources"
                         }
                     }
-                    form action="/hedgedoc" method="get" style="display:inline" {
-                        input .sync-button.btn.btn-secondary type="submit" value="Manage HedgeDoc";
+                    form action="/sources" method="get" style="display:inline" {
+                        input .sync-button.btn.btn-secondary type="submit" value="Manage sources";
+                    }
+                    form action="/files" method="get" style="display:inline" {
+                        input .sync-button.btn.btn-secondary type="submit" value="My Cards";
                     }
                 }
             }
