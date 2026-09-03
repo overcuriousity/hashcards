@@ -26,17 +26,37 @@ pub struct ServeConfig {
     pub oidc: Option<OidcSection>,
     #[serde(rename = "collection", default)]
     pub collections: Vec<CollectionEntry>,
+    #[serde(rename = "source", default)]
+    pub sources: Vec<SourceEntry>,
+    /// Deprecated spelling of `[[source]]`, still accepted so existing
+    /// config files keep working. New entries are written as `[[source]]`.
     #[serde(rename = "hedgedoc", default)]
-    pub hedgedoc: Vec<HedgedocEntry>,
+    pub hedgedoc: Vec<SourceEntry>,
     #[serde(rename = "deck", default)]
     pub decks: Vec<CustomDeckEntry>,
 }
 
+/// One remote markdown document drilled as its own collection: a HedgeDoc
+/// note or a file in a git repository. Which of the two is re-derived from
+/// the URL at load time, never stored.
 #[derive(Deserialize, Serialize, Clone)]
-pub struct HedgedocEntry {
+pub struct SourceEntry {
     pub url: String,
     #[serde(default)]
     pub owner: Option<String>,
+}
+
+/// Former name of [`SourceEntry`], kept so existing call sites compile.
+pub type HedgedocEntry = SourceEntry;
+
+impl ServeConfig {
+    /// Every configured remote source, from both the current `[[source]]`
+    /// spelling and the deprecated `[[hedgedoc]]` one.
+    pub fn source_entries(&self) -> Vec<SourceEntry> {
+        let mut entries = self.sources.clone();
+        entries.extend(self.hedgedoc.iter().cloned());
+        entries
+    }
 }
 
 /// A user-assembled deck: a named selection of decks drawn from any of the
@@ -327,6 +347,9 @@ impl ResolvedServeConfig {
         let repo_dir = data_dir.join("repo");
         let db_dir = data_dir.join("db");
 
+        // Read before the `[oidc]` match below partially moves `config`.
+        let configured_sources = config.source_entries();
+
         let collections = config
             .collections
             .iter()
@@ -403,12 +426,11 @@ impl ResolvedServeConfig {
             }
         };
 
-        // `[[hedgedoc]]` owners are matched against the lowercased email claim
-        // just like collection owners, so they are normalized the same way.
-        let hedgedoc_entries: Vec<HedgedocEntry> = config
-            .hedgedoc
+        // Source owners are matched against the lowercased email claim just
+        // like collection owners, so they are normalized the same way.
+        let hedgedoc_entries: Vec<SourceEntry> = configured_sources
             .iter()
-            .map(|h| HedgedocEntry {
+            .map(|h| SourceEntry {
                 url: h.url.clone(),
                 owner: h.owner.as_ref().map(|o| o.to_lowercase()),
             })
@@ -594,6 +616,25 @@ mod tests {
     use super::*;
     use crate::error::ErrorReport;
     use crate::error::Fallible;
+
+    #[test]
+    fn source_and_hedgedoc_arrays_both_parse() {
+        let toml_text = r#"
+            [server]
+            data_dir = "/tmp/hc"
+
+            [[source]]
+            url = "https://github.com/me/cards/blob/main/a.md"
+
+            [[hedgedoc]]
+            url = "https://notes.example.com/abc123"
+        "#;
+        let parsed: ServeConfig = toml::from_str(toml_text).unwrap();
+        let entries = parsed.source_entries();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].url, "https://github.com/me/cards/blob/main/a.md");
+        assert_eq!(entries[1].url, "https://notes.example.com/abc123");
+    }
 
     /// Regression test for BUG-47: with no `host` key in the config, the
     /// server must bind to localhost, not to all interfaces.

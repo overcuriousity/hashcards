@@ -12,6 +12,7 @@ mod hedgedoc_ui;
 mod href;
 mod landing;
 pub mod server;
+mod source;
 mod state;
 pub mod stats;
 

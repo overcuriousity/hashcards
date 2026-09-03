@@ -155,7 +155,7 @@ pub fn persist_custom_decks(config_path: &Path, entries: &[CustomDeckEntry]) -> 
     }
 
     let serialized = toml::to_string_pretty(&doc)?;
-    // Atomic write, matching `persist_hedgedoc_entries`: a crash mid-write
+    // Atomic write, matching `persist_source_entries`: a crash mid-write
     // must not truncate the user's config.
     static WRITE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = WRITE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);

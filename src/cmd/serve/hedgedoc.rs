@@ -10,10 +10,12 @@ use parking_lot::Mutex;
 use tokio::sync::RwLock;
 use tokio::time::interval;
 
-use crate::cmd::serve::config::HedgedocEntry;
 use crate::cmd::serve::config::ResolvedCollection;
+use crate::cmd::serve::config::SourceEntry;
 use crate::cmd::serve::config::slugify;
 use crate::cmd::serve::git::compute_collection_counts;
+use crate::cmd::serve::source::SourceKind;
+use crate::cmd::serve::source::raw_url;
 use crate::cmd::serve::state::CollectionInfo;
 use crate::cmd::serve::state::HedgedocNote;
 use crate::cmd::serve::state::HedgedocSource;
@@ -197,17 +199,29 @@ fn http_client() -> Fallible<&'static reqwest::Client> {
     Ok(CLIENT.get_or_init(|| client))
 }
 
-/// Fetch raw markdown from a HedgeDoc note URL.
-/// Appends `/download` to the note URL path to get the raw markdown.
+/// The kind of a source URL and the URL its markdown is fetched from.
+///
+/// Git file URLs are rewritten to their forge's raw endpoint. HedgeDoc note
+/// URLs get `/download` appended, which also strips the `/s/` prefix of a
+/// published note.
+fn fetch_target(url: &str) -> Fallible<(SourceKind, reqwest::Url)> {
+    let (kind, rewritten) = raw_url(url)?;
+    match kind {
+        SourceKind::Git => Ok((kind, rewritten)),
+        SourceKind::Hedgedoc => Ok((kind, build_download_url(url)?)),
+    }
+}
+
+/// Fetch raw markdown for a source URL.
+///
 /// Only HTTPS URLs are accepted. Requests time out after 30 seconds.
 pub async fn fetch_markdown(url: &str) -> Fallible<String> {
-    validate_hedgedoc_url(url)?;
-    let download_url = build_download_url(url)?;
+    let (kind, download_url) = fetch_target(url)?;
     let client = http_client()?;
     let response = client.get(download_url.clone()).send().await?;
     if !response.status().is_success() {
         return fail(format!(
-            "HedgeDoc fetch returned HTTP {} for {}",
+            "Source fetch returned HTTP {} for {}",
             response.status(),
             download_url
         ));
@@ -223,12 +237,17 @@ pub async fn fetch_markdown(url: &str) -> Fallible<String> {
         .unwrap_or("")
         .to_string();
     if content_type.starts_with("text/html") {
-        return fail(format!(
-            "HedgeDoc returned an HTML page for {} — the note's permission \
-            level may require sign-in to download (try setting the note to \
-            \"Freely\" or \"Editable\" in HedgeDoc)",
-            download_url
-        ));
+        return fail(match kind {
+            SourceKind::Git => format!(
+                "{download_url} returned a web page instead of markdown — the \
+                 repository may be private, or the branch or path may not exist"
+            ),
+            SourceKind::Hedgedoc => format!(
+                "HedgeDoc returned an HTML page for {download_url} — the note's \
+                 permission level may require sign-in to download (try setting \
+                 the note to \"Freely\" or \"Editable\" in HedgeDoc)"
+            ),
+        });
     }
     Ok(response.text().await?)
 }
@@ -484,7 +503,7 @@ pub fn commit_add(
     let mut updated = guard.clone();
     updated.push(new_source);
     if let Some(path) = config_path {
-        persist_hedgedoc_entries(path, &all_hedgedoc_entries(&updated))?;
+        persist_source_entries(path, &all_hedgedoc_entries(&updated))?;
     }
     *guard = updated.clone();
     Ok(updated)
@@ -521,7 +540,7 @@ pub fn commit_delete(
     };
     updated.retain(|s| !is_target(s));
     if let Some(path) = config_path {
-        persist_hedgedoc_entries(path, &all_hedgedoc_entries(&updated))?;
+        persist_source_entries(path, &all_hedgedoc_entries(&updated))?;
     }
     *guard = updated.clone();
     Ok(DeleteOutcome {
@@ -758,10 +777,10 @@ pub fn build_combined_infos(
     infos
 }
 
-pub fn all_hedgedoc_entries(hedgedoc_sources: &[HedgedocSource]) -> Vec<HedgedocEntry> {
+pub fn all_hedgedoc_entries(hedgedoc_sources: &[HedgedocSource]) -> Vec<SourceEntry> {
     hedgedoc_sources
         .iter()
-        .map(|s| HedgedocEntry {
+        .map(|s| SourceEntry {
             url: s.note.url.clone(),
             owner: s.collection.owner.clone(),
         })
@@ -771,7 +790,7 @@ pub fn all_hedgedoc_entries(hedgedoc_sources: &[HedgedocSource]) -> Vec<Hedgedoc
 /// Write the current set of HedgeDoc URLs back to the TOML config file.
 /// Other config keys are preserved by value, but comments and key ordering
 /// in the file are not guaranteed to survive the round-trip.
-pub fn persist_hedgedoc_entries(config_path: &Path, entries: &[HedgedocEntry]) -> Fallible<()> {
+pub fn persist_source_entries(config_path: &Path, entries: &[SourceEntry]) -> Fallible<()> {
     let content = std::fs::read_to_string(config_path)?;
     let mut doc: toml::Value = toml::from_str(&content)?;
 
@@ -779,8 +798,12 @@ pub fn persist_hedgedoc_entries(config_path: &Path, entries: &[HedgedocEntry]) -
         .as_table_mut()
         .ok_or_else(|| crate::error::ErrorReport::new("Config is not a TOML table"))?;
 
+    // The deprecated `[[hedgedoc]]` spelling is always removed: leaving it
+    // in place alongside `[[source]]` would load every source twice.
+    table.remove("hedgedoc");
+
     if entries.is_empty() {
-        table.remove("hedgedoc");
+        table.remove("source");
     } else {
         let array: Vec<toml::Value> = entries
             .iter()
@@ -797,7 +820,7 @@ pub fn persist_hedgedoc_entries(config_path: &Path, entries: &[HedgedocEntry]) -
                 toml::Value::Table(t)
             })
             .collect();
-        table.insert("hedgedoc".to_string(), toml::Value::Array(array));
+        table.insert("source".to_string(), toml::Value::Array(array));
     }
 
     let serialized = toml::to_string_pretty(&doc)?;
@@ -908,28 +931,28 @@ mod tests {
     }
 
     #[test]
-    fn persist_adds_hedgedoc_array() {
+    fn persist_adds_source_array() {
         let dir = tempfile::tempdir().unwrap();
         let config_path = dir.path().join("hashcards.toml");
         write_toml(&config_path, "[server]\ndata_dir = \"/tmp\"\n");
 
         let entries = vec![
-            HedgedocEntry {
+            SourceEntry {
                 url: "https://notes.example.com/doc1".to_string(),
                 owner: None,
             },
-            HedgedocEntry {
+            SourceEntry {
                 url: "https://notes.example.com/doc2".to_string(),
                 owner: None,
             },
         ];
-        persist_hedgedoc_entries(&config_path, &entries).unwrap();
+        persist_source_entries(&config_path, &entries).unwrap();
 
         let content = std::fs::read_to_string(&config_path).unwrap();
         let value: toml::Value = toml::from_str(&content).unwrap();
         let table = value.as_table().unwrap();
         assert!(table.contains_key("server"));
-        let arr = table["hedgedoc"].as_array().unwrap();
+        let arr = table["source"].as_array().unwrap();
         let urls: Vec<&str> = arr
             .iter()
             .map(|v| v.as_table().unwrap()["url"].as_str().unwrap())
@@ -952,15 +975,18 @@ mod tests {
             "[[hedgedoc]]\nurl = \"https://old.example.com/old\"\n[server]\ndata_dir = \"/tmp\"\n",
         );
 
-        let entries = vec![HedgedocEntry {
+        let entries = vec![SourceEntry {
             url: "https://new.example.com/new".to_string(),
             owner: None,
         }];
-        persist_hedgedoc_entries(&config_path, &entries).unwrap();
+        persist_source_entries(&config_path, &entries).unwrap();
 
         let content = std::fs::read_to_string(&config_path).unwrap();
         let value: toml::Value = toml::from_str(&content).unwrap();
-        let arr = value.as_table().unwrap()["hedgedoc"].as_array().unwrap();
+        // The deprecated spelling must be gone, not merely superseded:
+        // leaving both in place would load every source twice.
+        assert!(!value.as_table().unwrap().contains_key("hedgedoc"));
+        let arr = value.as_table().unwrap()["source"].as_array().unwrap();
         assert_eq!(arr.len(), 1);
         assert_eq!(
             arr[0].as_table().unwrap()["url"].as_str().unwrap(),
@@ -977,13 +1003,33 @@ mod tests {
             "[[hedgedoc]]\nurl = \"https://example.com/doc\"\n[server]\ndata_dir = \"/tmp\"\n",
         );
 
-        persist_hedgedoc_entries(&config_path, &[]).unwrap();
+        persist_source_entries(&config_path, &[]).unwrap();
 
         let content = std::fs::read_to_string(&config_path).unwrap();
         let value: toml::Value = toml::from_str(&content).unwrap();
         let table = value.as_table().unwrap();
+        assert!(!table.contains_key("source"));
         assert!(!table.contains_key("hedgedoc"));
         assert!(table.contains_key("server"));
+    }
+
+    #[test]
+    fn fetch_target_for_git_url_is_the_raw_url() -> Fallible<()> {
+        let (kind, url) = fetch_target("https://github.com/me/cards/blob/main/a.md")?;
+        assert_eq!(kind, SourceKind::Git);
+        assert_eq!(
+            url.as_str(),
+            "https://raw.githubusercontent.com/me/cards/main/a.md"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn fetch_target_for_hedgedoc_url_appends_download() -> Fallible<()> {
+        let (kind, url) = fetch_target("https://notes.example.com/abc123")?;
+        assert_eq!(kind, SourceKind::Hedgedoc);
+        assert_eq!(url.as_str(), "https://notes.example.com/abc123/download");
+        Ok(())
     }
 
     #[test]
@@ -1471,16 +1517,16 @@ mod tests {
         );
 
         let entries = vec![
-            HedgedocEntry {
+            SourceEntry {
                 url: "https://pad.example.com/alice".to_string(),
                 owner: Some("alice@example.com".to_string()),
             },
-            HedgedocEntry {
+            SourceEntry {
                 url: "https://pad.example.com/bob".to_string(),
                 owner: Some("bob@example.com".to_string()),
             },
         ];
-        persist_hedgedoc_entries(&config_path, &entries)?;
+        persist_source_entries(&config_path, &entries)?;
 
         // The rewritten config must still load: with `[oidc]` set, an entry
         // without an owner is a hard error.
@@ -1506,9 +1552,9 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let config_path = dir.path().join("hashcards.toml");
         write_toml(&config_path, "[server]\ndata_dir = \"/tmp\"\n");
-        persist_hedgedoc_entries(
+        persist_source_entries(
             &config_path,
-            &[HedgedocEntry {
+            &[SourceEntry {
                 url: "https://pad.example.com/abc".to_string(),
                 owner: None,
             }],
