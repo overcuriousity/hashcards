@@ -26,17 +26,34 @@ pub struct ServeConfig {
     pub oidc: Option<OidcSection>,
     #[serde(rename = "collection", default)]
     pub collections: Vec<CollectionEntry>,
+    #[serde(rename = "source", default)]
+    pub sources: Vec<SourceEntry>,
+    /// Deprecated spelling of `[[source]]`, still accepted so existing
+    /// config files keep working. New entries are written as `[[source]]`.
     #[serde(rename = "hedgedoc", default)]
-    pub hedgedoc: Vec<HedgedocEntry>,
+    pub hedgedoc: Vec<SourceEntry>,
     #[serde(rename = "deck", default)]
     pub decks: Vec<CustomDeckEntry>,
 }
 
+/// One remote markdown document drilled as its own collection: a HedgeDoc
+/// note or a file in a git repository. Which of the two is re-derived from
+/// the URL at load time, never stored.
 #[derive(Deserialize, Serialize, Clone)]
-pub struct HedgedocEntry {
+pub struct SourceEntry {
     pub url: String,
     #[serde(default)]
     pub owner: Option<String>,
+}
+
+impl ServeConfig {
+    /// Every configured remote source, from both the current `[[source]]`
+    /// spelling and the deprecated `[[hedgedoc]]` one.
+    pub fn source_entries(&self) -> Vec<SourceEntry> {
+        let mut entries = self.sources.clone();
+        entries.extend(self.hedgedoc.iter().cloned());
+        entries
+    }
 }
 
 /// A user-assembled deck: a named selection of decks drawn from any of the
@@ -285,8 +302,8 @@ pub struct ResolvedServeConfig {
     pub data_dir: Option<PathBuf>,
     /// Config file path; needed to persist UI changes back to disk.
     pub config_path: Option<PathBuf>,
-    /// HedgeDoc source URLs loaded from the config file.
-    pub hedgedoc_entries: Vec<HedgedocEntry>,
+    /// Remote source URLs loaded from the config file.
+    pub hedgedoc_entries: Vec<SourceEntry>,
     /// User-assembled cross-collection decks loaded from the config file.
     pub custom_decks: Vec<CustomDeckEntry>,
     /// Idle drill sessions are evicted after this many minutes (0 = never).
@@ -300,7 +317,7 @@ pub struct ResolvedServeConfig {
 ///
 /// `slugify` collapses every non-alphanumeric character to `-`, so distinct
 /// paths like `a/b` and `a-b` collide and would silently share one database.
-fn check_slug_collisions(collections: &[ResolvedCollection]) -> Fallible<()> {
+pub(crate) fn check_slug_collisions(collections: &[ResolvedCollection]) -> Fallible<()> {
     let mut seen: HashMap<&str, &ResolvedCollection> = HashMap::new();
     for rc in collections {
         if let Some(first) = seen.get(rc.slug.as_str()) {
@@ -326,6 +343,9 @@ impl ResolvedServeConfig {
         };
         let repo_dir = data_dir.join("repo");
         let db_dir = data_dir.join("db");
+
+        // Read before the `[oidc]` match below partially moves `config`.
+        let configured_sources = config.source_entries();
 
         let collections = config
             .collections
@@ -366,6 +386,11 @@ impl ResolvedServeConfig {
             })
             .collect::<Fallible<Vec<ResolvedCollection>>>()?;
 
+        // Local card folders share the slug namespace with configured
+        // collections, but they are the user's own writing: one that
+        // shadows a configured collection is dropped from discovery at
+        // runtime with a warning (see `local_collections_for`), rather than
+        // stopping the server from booting.
         check_slug_collisions(&collections)?;
 
         let oidc = match config.oidc {
@@ -403,12 +428,11 @@ impl ResolvedServeConfig {
             }
         };
 
-        // `[[hedgedoc]]` owners are matched against the lowercased email claim
-        // just like collection owners, so they are normalized the same way.
-        let hedgedoc_entries: Vec<HedgedocEntry> = config
-            .hedgedoc
+        // Source owners are matched against the lowercased email claim just
+        // like collection owners, so they are normalized the same way.
+        let hedgedoc_entries: Vec<SourceEntry> = configured_sources
             .iter()
-            .map(|h| HedgedocEntry {
+            .map(|h| SourceEntry {
                 url: h.url.clone(),
                 owner: h.owner.as_ref().map(|o| o.to_lowercase()),
             })
@@ -594,6 +618,25 @@ mod tests {
     use super::*;
     use crate::error::ErrorReport;
     use crate::error::Fallible;
+
+    #[test]
+    fn source_and_hedgedoc_arrays_both_parse() {
+        let toml_text = r#"
+            [server]
+            data_dir = "/tmp/hc"
+
+            [[source]]
+            url = "https://github.com/me/cards/blob/main/a.md"
+
+            [[hedgedoc]]
+            url = "https://notes.example.com/abc123"
+        "#;
+        let parsed: ServeConfig = toml::from_str(toml_text).unwrap();
+        let entries = parsed.source_entries();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].url, "https://github.com/me/cards/blob/main/a.md");
+        assert_eq!(entries[1].url, "https://notes.example.com/abc123");
+    }
 
     /// Regression test for BUG-47: with no `host` key in the config, the
     /// server must bind to localhost, not to all interfaces.
@@ -1020,6 +1063,28 @@ path = "beta"
             ResolvedServeConfig::from_toml(config).is_err(),
             "an `owner` without [oidc] must be rejected for decks too"
         );
+        Ok(())
+    }
+
+    /// A local card folder is the user's own writing, created through the
+    /// web UI or dropped in by hand. It must never be able to stop the
+    /// server from booting: a folder shadowing a configured collection is
+    /// dropped from discovery at runtime, with a warning.
+    #[test]
+    fn a_local_folder_shadowing_a_configured_collection_does_not_stop_startup() -> Fallible<()> {
+        let data_dir = crate::helper::create_tmp_directory()?;
+        let shadow = data_dir.join("local").join("default").join("japanese");
+        std::fs::create_dir_all(&shadow)?;
+        crate::cmd::serve::local::collection_id(&shadow)?;
+
+        let toml = format!(
+            "[server]\ndata_dir = {:?}\n\n\
+             [[collection]]\nname = \"Japanese\"\npath = \"japanese\"\n",
+            data_dir
+        );
+        let config: ServeConfig = toml::from_str(&toml)?;
+        let resolved = ResolvedServeConfig::from_toml(config)?;
+        assert_eq!(resolved.collections.len(), 1);
         Ok(())
     }
 }

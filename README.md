@@ -154,23 +154,92 @@ its own review database at `{data_dir}/db/{slug}.db`. The slug is derived from
 paths produce the same slug are rejected at startup rather than silently
 sharing a database.
 
-### `[[hedgedoc]]`
+### `[[source]]`
 
 ```toml
-[[hedgedoc]]
+[[source]]
 url = "https://notes.example.com/q1QcHIRvQFiTxzwnF-_L3g"
+# owner = "me@example.com"
+
+[[source]]
+url = "https://github.com/me/cards/blob/main/spanish.md"
 # owner = "me@example.com"
 ```
 
-A [HedgeDoc] note served as a collection of its own. The server fetches the raw
-Markdown from `{url}/download`, takes the collection name from the document
-title, and re-fetches on the same interval as git. Notes can also be added and
-removed from the web interface, which writes them back to this file.
+A Markdown document fetched over HTTPS and served as a collection of its own.
+Either a [HedgeDoc] note or a file in a git repository — hashcards works out
+which from the URL, so there is nothing to declare.
 
-Each note is its own collection, owned by that entry's owner alone. Notes are
-never grouped by HedgeDoc host, so several people can take notes from one
-shared instance — including the same note — without sharing a collection or a
+Recognised git URL shapes:
+
+| Pasted | Fetched from |
+|---|---|
+| `github.com/{owner}/{repo}/blob/{ref}/{path}` | `raw.githubusercontent.com/{owner}/{repo}/{ref}/{path}` |
+| `gitlab.com/{owner}/{repo}/-/blob/{ref}/{path}` | the same host, `/-/raw/` |
+| Gitea and Forgejo `/src/branch/{branch}/{path}` | the same host, `/raw/branch/` |
+| any URL whose path ends in `.md` | unchanged — it is already raw |
+
+Anything else is treated as a HedgeDoc note, whose raw Markdown comes from
+`{url}/download`. Note ids never carry an extension, so the two cannot be
+confused. Private repositories are not supported: the file must be reachable
+without authentication.
+
+The collection name comes from the document title, and sources are re-fetched
+on the same interval as git. Sources can also be added and removed from the web
+interface, which writes them back to this file.
+
+Each source is its own collection, owned by that entry's owner alone. Notes are
+never grouped by host, so several people can take notes from one shared
+HedgeDoc instance — including the same note — without sharing a collection or a
 review database.
+
+`[[hedgedoc]]` is still accepted as a deprecated spelling of `[[source]]`.
+Sources added through the web interface are written as `[[source]]`.
+
+## My Cards
+
+Cards do not have to come from anywhere else. **My Cards** (`/files`) is a
+folder tree hashcards keeps at `{data_dir}/local/{user}` and that only you write
+to — no git remote, no sync that can overwrite it.
+
+Each top-level folder is a collection; files inside it are decks. Create a
+folder, add a `.md` file, and write cards in the editor: the buttons insert
+Q/A, cloze and term skeletons, and the pane on the right shows the cards as
+hashcards parses them. A file that does not parse is never saved — you get the
+error and its line number instead.
+
+Renaming a folder is safe. Each one keeps a `.hashcards.toml` holding a stable
+id, and review databases are named from that id rather than from the folder
+name, so your history follows the rename.
+
+A collection folder cannot take the URL slug of a collection or source that
+already exists — routing prefers those, so the folder would be unreachable.
+Names are rejected when you create or rename a folder; a folder that comes to
+collide later (a `[[collection]]` added afterwards, or a folder copied in by
+hand) is left out of the collection list with a warning in the log rather than
+stopping the server.
+
+Deleting a collection folder deletes its review database with it. Folders that
+still hold files are refused, so this only happens once you have emptied one.
+
+### Images
+
+Copy an image and paste it into the editor with Ctrl+V. It is stored under
+`{Collection}/media/`, named after a hash of its own bytes — so the same
+screenshot pasted twice is stored once, and whatever your screenshot tool
+called the file never reaches the disk — and the reference written into the
+card is collection-relative (`![](@/media/a1b2c3d4e5f6a7b8.png)`), which
+resolves the same from a deck at the top of a collection or one three folders
+down. PNG, JPEG, GIF and WebP, up to 10 MB per image; the format is read from
+the file's own bytes, not its name. SVG is not accepted: it is script-bearing
+markup, and media is served inline from the same origin as the app.
+
+The `media` folder is hashcards' storage rather than part of your tree, so the
+file manager does not list it, and a collection whose decks are all deleted
+counts as empty even while their images are still on disk.
+
+Rewording a card keeps its schedule: on save, hashcards matches the new cards
+against the old ones by content and carries the review history across.
 
 ### `[[deck]]`
 
@@ -219,7 +288,7 @@ session_secret = "..."              # at least 32 bytes
 ```
 
 Adding this section turns on login for every route except `/auth/*`, and
-requires every `[[collection]]`, `[[hedgedoc]]` and `[[deck]]` entry to declare
+requires every `[[collection]]`, `[[source]]` and `[[deck]]` entry to declare
 an `owner` — an email, matched case-insensitively against the OIDC `email`
 claim. Config load fails if any entry is missing one, and equally if an `owner`
 appears *without* an `[oidc]` section, since nobody would ever be logged in to

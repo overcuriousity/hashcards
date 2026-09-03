@@ -2,7 +2,9 @@ use maud::Markup;
 use maud::html;
 
 use crate::cmd::drill::template::page_template;
+use crate::cmd::serve::files::CARD_TEMPLATE;
 use crate::cmd::serve::href::safe_href;
+use crate::cmd::serve::source::detect_kind;
 use crate::cmd::serve::state::HedgedocSource;
 use crate::flash::Flash;
 use crate::types::timestamp::Timestamp;
@@ -16,13 +18,13 @@ pub fn render_manage_page(
     page_template(html! {
         @if let Some(f) = &flash { (f.render()) }
         div.landing {
-            h1 { "HedgeDoc Sources" }
+            h1 { "Sources" }
             p { a.back-link href="/" { "← Back to collections" } }
 
             @if !config_available {
                 div.notice {
-                    p { "HedgeDoc sources cannot be managed without a configured data directory." }
-                    p { "To enable HedgeDoc source management, start hashcards with " code { "--config hashcards.toml" } "." }
+                    p { "Sources cannot be managed without a configured data directory." }
+                    p { "To enable source management, start hashcards with " code { "--config hashcards.toml" } "." }
                 }
             } @else {
                 div.sync-bar {
@@ -33,22 +35,29 @@ pub fn render_manage_page(
                             "Not yet synced"
                         }
                     }
-                    form.inline-form action="/hedgedoc/sync" method="post" {
+                    form.inline-form action="/sources/sync" method="post" {
                         input .sync-button type="submit" value="Sync All";
                     }
                 }
 
                 h2 { "Add Source" }
-                form.add-source-form action="/hedgedoc/add" method="post" {
+                form.add-source-form action="/sources/add" method="post" {
                     div.add-source-row {
                         input
                             .add-source-url
                             type="url"
                             name="url"
-                            placeholder="https://notes.example.com/noteId"
+                            placeholder="HedgeDoc note or git file URL"
                             required;
                         input type="submit" value="Add" .sync-button;
                     }
+                }
+
+                details.template-block {
+                    summary { "Need a starting point?" }
+                    p { "Paste this into a HedgeDoc note or a markdown file in a git repository:" }
+                    pre #card-template { (CARD_TEMPLATE) }
+                    button type="button" #copy-template { "Copy template" }
                 }
 
                 @if sources.is_empty() {
@@ -59,6 +68,7 @@ pub fn render_manage_page(
                         thead {
                             tr {
                                 th { "Source" }
+                                th { "Kind" }
                                 th { "Deck" }
                                 th { "URL" }
                                 th { "Status" }
@@ -70,6 +80,7 @@ pub fn render_manage_page(
                                 @let note = &src.note;
                                 tr {
                                     td { (src.source_uri) }
+                                    td { span.source-kind { (detect_kind(&note.url).label()) } }
                                     td { (note.deck_name) }
                                     td.source-url-cell {
                                         @if let Some(href) = safe_href(&note.url) {
@@ -86,10 +97,10 @@ pub fn render_manage_page(
                                         }
                                     }
                                     td {
-                                        form action="/hedgedoc/delete" method="post" {
+                                        form action="/sources/delete" method="post" {
                                             input type="hidden" name="url" value=(note.url);
                                             input type="submit" value="Delete" .sync-button
-                                                onclick="return confirm('Remove this HedgeDoc note?')";
+                                                onclick="return confirm('Remove this source?')";
                                         }
                                     }
                                 }

@@ -5,6 +5,7 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 
 use axum::Router;
+use axum::extract::DefaultBodyLimit;
 use axum::routing::get;
 use axum::routing::post;
 use axum_extra::extract::cookie::Key;
@@ -47,6 +48,16 @@ use crate::cmd::serve::decks::resolve_custom_decks;
 use crate::cmd::serve::edit::edit_get_handler;
 use crate::cmd::serve::edit::edit_post_handler;
 use crate::cmd::serve::export::collection_export_handler;
+use axum::response::Redirect;
+
+use crate::cmd::serve::files::editor_get_handler;
+use crate::cmd::serve::files::editor_post_handler;
+use crate::cmd::serve::files::files_delete_handler;
+use crate::cmd::serve::files::files_file_handler;
+use crate::cmd::serve::files::files_folder_handler;
+use crate::cmd::serve::files::files_get_handler;
+use crate::cmd::serve::files::files_rename_handler;
+use crate::cmd::serve::files::preview_handler;
 use crate::cmd::serve::git::clone_or_pull;
 use crate::cmd::serve::git::spawn_sync_task;
 use crate::cmd::serve::handlers::collection_file_handler;
@@ -69,6 +80,8 @@ use crate::cmd::serve::state::HedgedocSource;
 use crate::cmd::serve::state::SharedSession;
 use crate::cmd::serve::state::evict_idle_sessions;
 use crate::cmd::serve::stats::collection_stats_handler;
+use crate::cmd::serve::upload::MAX_UPLOAD_BYTES;
+use crate::cmd::serve::upload::media_upload_handler;
 use crate::cmd::signals::terminate_signal;
 use crate::db::Database;
 use crate::error::ErrorReport;
@@ -360,10 +373,30 @@ pub async fn start_serve(config: ResolvedServeConfig) -> Fallible<()> {
     let app = Router::new()
         .route("/", get(landing_handler))
         .route("/sync", post(sync_handler))
-        .route("/hedgedoc", get(hedgedoc_manage_handler))
-        .route("/hedgedoc/add", post(hedgedoc_add_handler))
-        .route("/hedgedoc/delete", post(hedgedoc_delete_handler))
-        .route("/hedgedoc/sync", post(hedgedoc_sync_now_handler))
+        .route("/files", get(files_get_handler))
+        .route("/files/folder", post(files_folder_handler))
+        .route("/files/file", post(files_file_handler))
+        .route("/files/rename", post(files_rename_handler))
+        .route("/files/delete", post(files_delete_handler))
+        .route("/files/edit/{*path}", get(editor_get_handler))
+        .route("/files/edit/{*path}", post(editor_post_handler))
+        .route("/files/preview", post(preview_handler))
+        // The body is the image itself, so this one route needs a limit
+        // wider than axum's 2 MB default — and no wider than the one the
+        // editor promises.
+        .route(
+            "/files/media/{*path}",
+            post(media_upload_handler).layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES)),
+        )
+        .route("/sources", get(hedgedoc_manage_handler))
+        .route("/sources/add", post(hedgedoc_add_handler))
+        .route("/sources/delete", post(hedgedoc_delete_handler))
+        .route("/sources/sync", post(hedgedoc_sync_now_handler))
+        // Kept so bookmarks from before the rename keep working.
+        .route(
+            "/hedgedoc",
+            get(|| async { Redirect::permanent("/sources") }),
+        )
         .route("/decks", get(decks_manage_handler))
         .route("/decks/add", post(deck_add_handler))
         .route("/decks/delete", post(deck_delete_handler))

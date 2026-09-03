@@ -42,6 +42,7 @@ use crate::cmd::serve::browse::render_browse_page;
 use crate::cmd::serve::config::ResolvedCollection;
 use crate::cmd::serve::decks::ResolvedCustomDeck;
 use crate::cmd::serve::decks::find_custom_deck;
+use crate::cmd::serve::files::existing_local_collections_for;
 use crate::cmd::serve::git::clone_or_pull;
 use crate::cmd::serve::hedgedoc::apply_sync_result;
 use crate::cmd::serve::hedgedoc::build_combined_infos;
@@ -297,11 +298,57 @@ pub(super) fn find_collection(
     {
         return Some(rc.clone());
     }
+    if let Some(rc) = existing_local_collections_for(state, current_user_for(owner).as_ref())
+        .into_iter()
+        .find(|c| c.slug == slug && c.owner.as_deref() == owner)
+    {
+        return Some(rc);
+    }
     let sources = state.hedgedoc_sources.lock();
     sources
         .iter()
         .find(|s| s.collection.slug == slug && s.collection.owner.as_deref() == owner)
         .map(|s| s.collection.clone())
+}
+
+/// `find_collection`, off the async executor.
+///
+/// The lookup is not free any more: local collections are discovered by
+/// reading the caller's card folder and each folder's `.hashcards.toml`, so
+/// calling it directly in an async handler blocks the executor — once per
+/// request, and `collection_file_handler` serves one request per image on a
+/// card.
+pub(super) async fn find_collection_blocking(
+    state: &AppState,
+    slug: &str,
+    owner: Option<String>,
+) -> Option<ResolvedCollection> {
+    let state = state.clone();
+    let slug = slug.to_string();
+    match tokio::task::spawn_blocking(move || find_collection(&state, &slug, owner.as_deref()))
+        .await
+    {
+        Ok(found) => found,
+        Err(e) => {
+            log::error!("Collection lookup failed: {e}");
+            None
+        }
+    }
+}
+
+/// Whether `slug` names a collection the caller can see. Used to tell "no
+/// such collection" apart from "loading it failed", which is the only thing
+/// the answer is needed for.
+pub(super) async fn collection_exists(state: &AppState, slug: &str, owner: Option<String>) -> bool {
+    find_collection_blocking(state, slug, owner).await.is_some()
+}
+
+/// `local_collections_for` keys the tree off a `CurrentUser`; callers here
+/// already reduced that to an owner email.
+pub(super) fn current_user_for(owner: Option<&str>) -> Option<CurrentUser> {
+    owner.map(|email| CurrentUser {
+        email: email.to_string(),
+    })
 }
 
 /// Form data for the start-drill endpoint.
@@ -838,13 +885,34 @@ fn collection_post_inner(
     }
 }
 
+/// The content type a media file is served as, from its extension.
+///
+/// Every format `upload::sniff_image` will store must have an arm here: a
+/// file served as `application/octet-stream` is offered as a download
+/// rather than drawn in the card that references it.
+fn content_type_for(extension: &str) -> &'static str {
+    match extension {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        "mp3" => "audio/mpeg",
+        "wav" => "audio/wav",
+        "ogg" => "audio/ogg",
+        "mp4" => "video/mp4",
+        "webm" => "video/webm",
+        _ => "application/octet-stream",
+    }
+}
+
 pub async fn collection_file_handler(
     State(state): State<AppState>,
     Path((slug, path)): Path<(String, String)>,
     current_user: Option<CurrentUser>,
 ) -> (StatusCode, [(HeaderName, &'static str); 1], Vec<u8>) {
     let owner = current_user.map(|u| u.email);
-    let coll_dir = match find_collection(&state, &slug, owner.as_deref()) {
+    let coll_dir = match find_collection_blocking(&state, &slug, owner).await {
         Some(rc) => rc.coll_dir.clone(),
         None => {
             return (
@@ -881,18 +949,7 @@ pub async fn collection_file_handler(
         .and_then(|ext| ext.to_str())
         .unwrap_or("")
         .to_lowercase();
-    let content_type: &str = match extension.as_str() {
-        "png" => "image/png",
-        "jpg" | "jpeg" => "image/jpeg",
-        "gif" => "image/gif",
-        "svg" => "image/svg+xml",
-        "mp3" => "audio/mpeg",
-        "wav" => "audio/wav",
-        "ogg" => "audio/ogg",
-        "mp4" => "video/mp4",
-        "webm" => "video/webm",
-        _ => "application/octet-stream",
-    };
+    let content_type: &str = content_type_for(&extension);
     let content = tokio::fs::read(validated_path).await;
     match content {
         Ok(bytes) => (StatusCode::OK, [(CONTENT_TYPE, content_type)], bytes),
@@ -1012,11 +1069,11 @@ pub async fn hedgedoc_add_handler(
     // anything that is not a well-formed HTTPS URL so no raw string is
     // ever persisted or rendered into an href.
     if form.url.trim().is_empty() {
-        return Flash::error("Enter a HedgeDoc URL.").redirect("/hedgedoc");
+        return Flash::error("Enter a HedgeDoc note or git file URL.").redirect("/sources");
     }
     let url = match normalize_hedgedoc_url(&form.url) {
         Ok(url) => url,
-        Err(e) => return Flash::error(e.to_string()).redirect("/hedgedoc"),
+        Err(e) => return Flash::error(e.to_string()).redirect("/sources"),
     };
 
     let data_dir = match &state.config.data_dir {
@@ -1026,7 +1083,7 @@ pub async fn hedgedoc_add_handler(
             return Flash::error(
                 "Cannot add HedgeDoc source: no data directory is configured. Start hashcards-web with --config.",
             )
-            .redirect("/hedgedoc");
+            .redirect("/sources");
         }
     };
 
@@ -1038,14 +1095,14 @@ pub async fn hedgedoc_add_handler(
             .iter()
             .any(|s| s.note.url == url && s.collection.owner == owner)
         {
-            return Flash::error("This note is already added.").redirect("/hedgedoc");
+            return Flash::error("This note is already added.").redirect("/sources");
         }
     }
 
     if source_uri_from_url(&url).is_none() {
         log::error!("Failed to parse HedgeDoc source URI from {url}");
         return Flash::error(format!("Could not parse a HedgeDoc note URL from: {url}"))
-            .redirect("/hedgedoc");
+            .redirect("/sources");
     }
 
     // BUG-43: refuse to create a source whose slug collides with a configured
@@ -1056,7 +1113,7 @@ pub async fn hedgedoc_add_handler(
             "Cannot add this HedgeDoc source: its collection slug '{new_slug}' collides with the configured collection '{}'. Rename that collection or use a different source.",
             existing.name
         ))
-        .redirect("/hedgedoc");
+        .redirect("/sources");
     }
 
     let new_source = match build_source(&url, &data_dir, owner.clone()).await {
@@ -1064,7 +1121,7 @@ pub async fn hedgedoc_add_handler(
         Err(e) => {
             log::error!("Failed to add HedgeDoc source {url}: {e}");
             return Flash::error(format!("Failed to add HedgeDoc source: {e}"))
-                .redirect("/hedgedoc");
+                .redirect("/sources");
         }
     };
 
@@ -1078,7 +1135,7 @@ pub async fn hedgedoc_add_handler(
                 "Cannot save this HedgeDoc source: the server was started without a \
                  configuration file to write it back to.",
             )
-            .redirect("/hedgedoc");
+            .redirect("/sources");
         }
     };
 
@@ -1105,7 +1162,7 @@ pub async fn hedgedoc_add_handler(
         Ok(snapshot) => snapshot,
         Err(e) => {
             log::error!("Failed to add HedgeDoc source {url}: {e}");
-            return Flash::error(e.to_string()).redirect("/hedgedoc");
+            return Flash::error(e.to_string()).redirect("/sources");
         }
     };
 
@@ -1129,7 +1186,7 @@ pub async fn hedgedoc_add_handler(
         *state.hedgedoc_last_synced.lock() = Some(Timestamp::now());
     }
 
-    Flash::success("HedgeDoc source added.").redirect("/hedgedoc")
+    Flash::success("Source added.").redirect("/sources")
 }
 
 #[derive(serde::Deserialize)]
@@ -1151,7 +1208,7 @@ pub async fn hedgedoc_delete_handler(
         .any(|s| s.note.url == form.url && s.collection.owner == owner);
     if !owns_url {
         return Flash::error("No HedgeDoc source with this URL: ".to_string() + &form.url)
-            .redirect("/hedgedoc");
+            .redirect("/sources");
     }
     let maybe_config_path: Option<PathBuf> = state.config_path.lock().clone();
     let sources_arc = state.hedgedoc_sources.clone();
@@ -1176,7 +1233,7 @@ pub async fn hedgedoc_delete_handler(
         Ok(pair) => pair,
         Err(e) => {
             log::error!("Failed to delete HedgeDoc source {}: {e}", form.url);
-            return Flash::error(e.to_string()).redirect("/hedgedoc");
+            return Flash::error(e.to_string()).redirect("/sources");
         }
     };
 
@@ -1191,7 +1248,7 @@ pub async fn hedgedoc_delete_handler(
         Err(e) => log::error!("Failed to compute collection counts: {e}"),
     }
 
-    Flash::success(message).redirect("/hedgedoc")
+    Flash::success(message).redirect("/sources")
 }
 
 /// Manually re-sync all HedgeDoc sources.
@@ -1202,7 +1259,7 @@ pub async fn hedgedoc_sync_now_handler(
     let owner = current_user.map(|u| u.email);
     if state.config.data_dir.is_none() {
         return Flash::error("HedgeDoc sync is not available: no data directory is configured.")
-            .redirect("/hedgedoc");
+            .redirect("/sources");
     }
 
     // Collect URLs to sync (release lock before awaiting). Only the caller's
@@ -1254,10 +1311,10 @@ pub async fn hedgedoc_sync_now_handler(
     }
 
     if any_success || entries.is_empty() {
-        Flash::success("HedgeDoc sync finished.").redirect("/hedgedoc")
+        Flash::success("Source sync finished.").redirect("/sources")
     } else {
         Flash::error("HedgeDoc sync failed for all notes; see the statuses below.")
-            .redirect("/hedgedoc")
+            .redirect("/sources")
     }
 }
 
@@ -1286,6 +1343,28 @@ mod tests {
     use crate::rng::TinyRng;
     use crate::types::performance::Jitter;
     use crate::types::timestamp::Timestamp;
+
+    /// Every image format the paste path will store has to be served as
+    /// an image: `sniff_image` accepts WebP, and a WebP served as
+    /// `application/octet-stream` renders as a broken image in every card
+    /// that references it.
+    #[test]
+    fn every_stored_image_format_is_served_as_an_image() {
+        for bytes in [
+            [0x89u8, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A].to_vec(),
+            vec![0xFF, 0xD8, 0xFF, 0xE0],
+            b"GIF89a".to_vec(),
+            b"RIFF\0\0\0\0WEBPVP8 ".to_vec(),
+        ] {
+            let extension =
+                crate::cmd::serve::upload::sniff_image(&bytes).expect("a supported format");
+            let served = super::content_type_for(extension);
+            assert!(
+                served.starts_with("image/"),
+                "`.{extension}` is served as `{served}`"
+            );
+        }
+    }
 
     /// Cross-user isolation: `find_collection` only matches a collection
     /// whose `owner` equals the caller's, and unauthenticated (`None`)
@@ -1615,6 +1694,35 @@ mod tests {
             1,
             "the shared card must appear once, not twice"
         );
+        Ok(())
+    }
+
+    /// Serving a page must not write into the user's card folder: read
+    /// paths open the tree without creating it and skip folders that have
+    /// no id yet. Otherwise every collection page, stats page and media
+    /// file would create directories — and fail outright on a read-only
+    /// data directory.
+    #[test]
+    fn find_collection_does_not_write_into_the_local_tree() -> Fallible<()> {
+        use crate::cmd::serve::handlers::find_collection;
+        use crate::cmd::serve::local::collection_id;
+        use crate::cmd::serve::state::test_support::state_with_data_dir;
+
+        let dir = tempfile::tempdir()?;
+        let data_dir = dir.path().to_path_buf();
+        let state = state_with_data_dir(data_dir.clone(), Vec::new());
+
+        assert!(find_collection(&state, "Spanish", None).is_none());
+        assert!(
+            !data_dir.join("local").exists(),
+            "a lookup created the local tree"
+        );
+
+        // A folder that already has an id is still found.
+        let folder = data_dir.join("local").join("default").join("Spanish");
+        std::fs::create_dir_all(&folder)?;
+        collection_id(&folder)?;
+        assert!(find_collection(&state, "Spanish", None).is_some());
         Ok(())
     }
 }
