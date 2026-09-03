@@ -55,33 +55,58 @@ impl LocalRoot {
     /// ancestor that *does* exist must canonicalize to somewhere inside the
     /// root, so a symlinked directory cannot be used to escape.
     pub fn resolve(&self, rel: &str) -> Fallible<PathBuf> {
+        Ok(self.resolve_entry(rel)?.path)
+    }
+
+    /// The same, keeping the normalized relative path alongside it.
+    ///
+    /// Callers that both touch the file and reason about *where* it sits —
+    /// which collection owns it, whether it is a collection root — must ask
+    /// both questions of the same string. Splitting the raw request path
+    /// instead answers them differently: `./Spanish` resolves to the
+    /// collection folder while a raw split calls it nested, so the folder
+    /// would be deleted without its review database going with it.
+    pub fn resolve_entry(&self, rel: &str) -> Fallible<ResolvedEntry> {
         let trimmed = rel.trim();
         if trimmed.is_empty() {
             return fail("No file path was given.");
         }
         let rel_path = PathBuf::from(trimmed);
-        // `.` and `./` name the root itself. Nothing addresses the root by
-        // path — every caller wants a file or folder inside it — and one
-        // that did would let the file manager delete the whole tree.
-        if !rel_path
-            .components()
-            .any(|c| matches!(c, Component::Normal(_)))
-        {
-            return fail(format!(
-                "Path must name something inside your card folder: `{trimmed}`"
-            ));
-        }
-        if rel_path.components().any(|c| c == Component::ParentDir) {
-            return fail(format!(
-                "Path must not contain `..` components: `{trimmed}`"
-            ));
-        }
         if rel_path.is_absolute() || rel_path.has_root() {
             return fail(format!(
                 "Path must be relative to your card folder: `{trimmed}`"
             ));
         }
-        let joined = self.root.join(&rel_path);
+        // `.` components are dropped rather than refused: they name the same
+        // place, and normalizing here is what keeps every later answer about
+        // this path consistent.
+        let mut parts: Vec<String> = Vec::new();
+        for component in rel_path.components() {
+            match component {
+                Component::Normal(name) => parts.push(name.to_string_lossy().into_owned()),
+                Component::CurDir => continue,
+                Component::ParentDir => {
+                    return fail(format!(
+                        "Path must not contain `..` components: `{trimmed}`"
+                    ));
+                }
+                _ => {
+                    return fail(format!(
+                        "Path must be relative to your card folder: `{trimmed}`"
+                    ));
+                }
+            }
+        }
+        // Nothing addresses the root by path — every caller wants a file or
+        // folder inside it — and one that did would let the file manager
+        // delete the whole tree.
+        if parts.is_empty() {
+            return fail(format!(
+                "Path must name something inside your card folder: `{trimmed}`"
+            ));
+        }
+        let normalized = parts.join("/");
+        let joined = self.root.join(&normalized);
 
         // Walk up to the deepest ancestor that exists and canonicalize that:
         // the leaf may legitimately be missing.
@@ -100,8 +125,20 @@ impl LocalRoot {
         if !canonical.starts_with(&canonical_root) {
             return fail(format!("Path is outside your card folder: `{trimmed}`"));
         }
-        Ok(joined)
+        Ok(ResolvedEntry {
+            rel: normalized,
+            path: joined,
+        })
     }
+}
+
+/// A checked client-supplied path: where it is on disk, and its relative
+/// path reduced to plain `/`-separated components.
+pub struct ResolvedEntry {
+    /// Normalized, so `./Spanish/verbs.md` and `Spanish/verbs.md` are the
+    /// same string. Never empty, and never starts or ends with `/`.
+    pub rel: String,
+    pub path: PathBuf,
 }
 
 /// Where `owner`'s tree lives, whether or not it exists yet.
@@ -260,6 +297,30 @@ mod tests {
         let dir = create_tmp_directory()?;
         let root = LocalRoot::for_user(&dir, Some("Me@Example.com"))?;
         Ok((dir, root))
+    }
+
+    /// The normalized path is what every later question about the file is
+    /// asked of, so it has to be free of the `.` components a client can
+    /// put in: `./Spanish` and `Spanish` name one collection, and answers
+    /// derived from splitting the raw string disagreed about that.
+    #[test]
+    fn resolving_normalizes_away_dot_components() -> Fallible<()> {
+        let (_dir, root) = fixture()?;
+        let plain = root.resolve_entry("Spanish/verbs.md")?;
+        for path in [
+            "./Spanish/verbs.md",
+            "Spanish/./verbs.md",
+            "Spanish//verbs.md",
+        ] {
+            let entry = root.resolve_entry(path)?;
+            assert_eq!(entry.rel, plain.rel, "for `{path}`");
+            assert_eq!(entry.path, plain.path, "for `{path}`");
+        }
+        // The root itself still names nothing inside the tree.
+        assert!(root.resolve_entry(".").is_err());
+        assert!(root.resolve_entry("./").is_err());
+        assert!(root.resolve_entry("./..").is_err());
+        Ok(())
     }
 
     #[test]

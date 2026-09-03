@@ -273,10 +273,28 @@ document.querySelectorAll('.editor-toolbar button[data-snippet]').forEach(functi
   var button = document.getElementById('copy-template');
   var block = document.getElementById('card-template');
   if (!button || !block) return;
+  function done(label, ms) {
+    button.textContent = label;
+    setTimeout(function () { button.textContent = 'Copy template'; }, ms);
+  }
+  // `navigator.clipboard` is undefined outside a secure context, and serving
+  // over plain HTTP on a LAN address is a supported deployment. Select the
+  // block instead, so Ctrl+C still works, and say so on the button.
+  function selectInstead() {
+    var range = document.createRange();
+    range.selectNodeContents(block);
+    var selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+    done('Press Ctrl+C', 4000);
+  }
   button.addEventListener('click', function () {
+    if (!navigator.clipboard) {
+      selectInstead();
+      return;
+    }
     navigator.clipboard.writeText(block.textContent).then(function () {
-      button.textContent = 'Copied';
-      setTimeout(function () { button.textContent = 'Copy template'; }, 2000);
-    });
+      done('Copied', 2000);
+    }, selectInstead);
   });
 })();
