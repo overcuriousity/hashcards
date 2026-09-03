@@ -3,11 +3,13 @@ use maud::html;
 
 use crate::cmd::drill::template::page_template;
 use crate::cmd::serve::config::slugify;
+use crate::cmd::serve::files::LOOSE_FILE;
 use crate::cmd::serve::files::TreeEntry;
 use crate::cmd::serve::files::parse_buffer;
 use crate::cmd::serve::href::encoded_path;
 use crate::cmd::serve::local::LocalRoot;
 use crate::error::Fallible;
+use crate::error::fail;
 use crate::flash::Flash;
 use crate::markdown::MarkdownRenderConfig;
 use crate::media::resolve::MediaResolverBuilder;
@@ -57,6 +59,10 @@ pub fn render_tree_page(tree: &[TreeEntry], flash: Option<Flash>) -> Markup {
                         li.file-row style=(indent(entry.depth)) {
                             @if entry.is_dir {
                                 span.file-name.folder { (entry.name) }
+                            } @else if entry.depth == 0 {
+                                // Not inside a collection, so the editor
+                                // would open a page that cannot save.
+                                span.file-name.file-loose title=(LOOSE_FILE) { (entry.name) }
                             } @else {
                                 a.file-name href=(format!("/files/edit/{}", encoded_path(&entry.rel_path))) {
                                     (entry.name)
@@ -197,8 +203,13 @@ pub fn render_preview(root: &LocalRoot, rel_path: &str, content: &str) -> Markup
 }
 
 /// Resolve media the way the collection itself will: relative to the
-/// top-level folder, which is the collection root. A file sitting loose in
-/// the user's root has no collection, so the root stands in for one.
+/// top-level folder, which is the collection root.
+///
+/// A file sitting loose in the user's root has no collection, and is
+/// refused rather than given the root as a stand-in: the root has no slug,
+/// so every image in the preview would be requested from
+/// `/collection//file` and 404. Such a file cannot be saved either
+/// (`collection_folder` refuses it), so the editor turns it away up front.
 ///
 /// The path comes straight from the browser, so it is resolved inside the
 /// user's root like every other client-supplied path, rather than joined
@@ -207,7 +218,7 @@ fn preview_render_config(root: &LocalRoot, rel_path: &str) -> Fallible<MarkdownR
     let trimmed = rel_path.trim_matches('/');
     let (coll_dir, deck_rel, slug) = match trimmed.split_once('/') {
         Some((top, rest)) => (root.resolve(top)?, rest.to_string(), slugify(top)),
-        None => (root.resolve(".")?, trimmed.to_string(), String::new()),
+        None => return fail(LOOSE_FILE),
     };
     Ok(MarkdownRenderConfig {
         resolver: MediaResolverBuilder::new()

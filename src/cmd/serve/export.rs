@@ -31,6 +31,7 @@ use serde::Serialize;
 
 use crate::cmd::run_blocking;
 use crate::cmd::serve::auth::CurrentUser;
+use crate::cmd::serve::handlers::collection_exists;
 use crate::cmd::serve::handlers::find_collection;
 use crate::cmd::serve::state::AppState;
 use crate::collection::Collection;
@@ -60,7 +61,6 @@ pub async fn collection_export_handler(
     current_user: Option<CurrentUser>,
 ) -> Response {
     let owner = current_user.map(|u| u.email);
-    let known = find_collection(&state, &slug, owner.as_deref()).is_some();
     let state2 = state.clone();
     let slug2 = slug.clone();
     let owner2 = owner.clone();
@@ -82,6 +82,10 @@ pub async fn collection_export_handler(
         )
             .into_response(),
         Err(e) => {
+            // Only now, and off the executor: the lookup reads the caller's
+            // local card folder, and it is needed only to tell "no such
+            // collection" apart from "it broke".
+            let known = collection_exists(&state, &slug, owner).await;
             let status = if known {
                 StatusCode::INTERNAL_SERVER_ERROR
             } else {

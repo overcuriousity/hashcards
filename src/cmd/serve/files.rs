@@ -36,6 +36,7 @@ use crate::db::Database;
 use crate::error::Fallible;
 use crate::error::fail;
 use crate::flash::Flash;
+use crate::media::validate::validate_media_files;
 use crate::parser::ParsedFile;
 use crate::parser::Parser;
 use crate::parser::strip_frontmatter_with_offset;
@@ -355,22 +356,39 @@ fn create_entry(
     if target.exists() {
         return fail(format!("`{rel}` already exists."));
     }
-    if is_dir && parent.is_empty() {
-        check_collection_slug(state, user, &root, &name, None)?;
+
+    // Both branches create every missing ancestor, so either can bring a
+    // top-level folder into being — a file under `parent=New/Deep` as much
+    // as a folder created at the root. That folder is a collection, and one
+    // whose slug is already taken is dropped from the listing with nothing
+    // but a log line to say why, so the name has to be checked wherever it
+    // comes from rather than only on the root form.
+    let top = match rel.split('/').next() {
+        Some(t) if !t.is_empty() => t.to_string(),
+        _ => return fail(format!("`{rel}` is not a valid path.")),
+    };
+    let top_path = root.resolve(&top)?;
+    let new_collection = !top_path.exists();
+    if new_collection {
+        check_collection_slug(state, user, &root, &top, None)?;
     }
+
     if is_dir {
         std::fs::create_dir_all(&target)?;
-        // Give a new top-level folder its id immediately, so the collection
-        // it becomes keeps its database across a later rename.
-        if !rel.contains('/') {
-            collection_id(&target)?;
-        }
-        Ok(format!("Created folder `{rel}`."))
     } else {
         if let Some(parent) = target.parent() {
             std::fs::create_dir_all(parent)?;
         }
         std::fs::write(&target, CARD_TEMPLATE)?;
+    }
+    // Give a new top-level folder its id immediately, so the collection it
+    // becomes keeps its database across a later rename.
+    if new_collection {
+        collection_id(&top_path)?;
+    }
+    if is_dir {
+        Ok(format!("Created folder `{rel}`."))
+    } else {
         Ok(format!("Created `{rel}`."))
     }
 }
@@ -431,25 +449,33 @@ fn delete_entry(
         // with it, so leaving `{id}.db` behind would orphan a database that
         // nothing can ever address again — and a folder recreated under the
         // same name would silently start its history over.
-        if is_collection_root {
-            remove_collection_database(state, &target)?;
-        }
+        //
+        // The id is read first because it lives in the folder, but the
+        // database is removed *after* it: if `remove_dir_all` fails, the
+        // collection is still there and must still have its history.
+        let id = if is_collection_root {
+            existing_collection_id(&target)?
+        } else {
+            None
+        };
         std::fs::remove_dir_all(&target)?;
+        if let Some(id) = id {
+            remove_collection_database(state, &id)?;
+        }
     } else {
         std::fs::remove_file(&target)?;
     }
     Ok(format!("Deleted `{}`.", form.path))
 }
 
-/// Delete the review database of the collection folder `target`, if it has
-/// one. A folder with no id never had a database to begin with.
-fn remove_collection_database(state: &AppState, target: &Path) -> Fallible<()> {
+/// Delete the review database of the collection whose id is `id`.
+///
+/// Called after the folder itself is gone: a folder with no id never had a
+/// database to begin with, and one whose removal failed still needs its
+/// history.
+fn remove_collection_database(state: &AppState, id: &str) -> Fallible<()> {
     let db_dir = match &state.config.data_dir {
         Some(d) => d.join("db"),
-        None => return Ok(()),
-    };
-    let id = match existing_collection_id(target)? {
-        Some(id) => id,
         None => return Ok(()),
     };
     // SQLite leaves the write-ahead log and shared-memory files beside the
@@ -463,11 +489,18 @@ fn remove_collection_database(state: &AppState, target: &Path) -> Fallible<()> {
     Ok(())
 }
 
+/// Why a file directly in the user's root can be neither drilled nor
+/// edited: only a top-level folder is a collection, so such a file has no
+/// review database to save into and no slug to serve its images from.
+pub const LOOSE_FILE: &str = "This file sits directly in your card folder, so it belongs to no \
+     collection — it has nowhere to keep its review history and no way to serve its images. \
+     Move it into a collection folder first.";
+
 /// The collection folder a local file belongs to.
 ///
 /// A collection is a top-level folder, so a file directly under the root
 /// belongs to none: it can be neither reviewed nor given a place to keep
-/// its images, and both callers refuse it rather than inventing one.
+/// its images, and every caller refuses it rather than inventing one.
 pub fn collection_folder(root: &LocalRoot, rel: &str) -> Fallible<PathBuf> {
     let trimmed = rel.trim_matches('/');
     let top = match trimmed.split('/').next() {
@@ -475,9 +508,7 @@ pub fn collection_folder(root: &LocalRoot, rel: &str) -> Fallible<PathBuf> {
         _ => return fail(format!("`{rel}` is not inside a collection folder.")),
     };
     if !trimmed.contains('/') {
-        return fail(format!(
-            "`{rel}` sits directly in your card folder. Move it into a collection folder first."
-        ));
+        return fail(LOOSE_FILE);
     }
     let folder = root.resolve(&top)?;
     if !folder.is_dir() {
@@ -486,10 +517,12 @@ pub fn collection_folder(root: &LocalRoot, rel: &str) -> Fallible<PathBuf> {
     Ok(folder)
 }
 
-/// The review database of the collection a local file belongs to.
-pub fn db_path_for(root: &LocalRoot, db_dir: &Path, rel: &str) -> Fallible<PathBuf> {
-    let id = collection_id(&collection_folder(root, rel)?)?;
-    Ok(db_dir.join(format!("{id}.db")))
+/// The review database of the local collection at `coll_dir`.
+///
+/// Named from the folder's stable id rather than its slug, so renaming a
+/// collection keeps its history.
+pub fn db_path_for(coll_dir: &Path, db_dir: &Path) -> Fallible<PathBuf> {
+    Ok(db_dir.join(format!("{}.db", collection_id(coll_dir)?)))
 }
 
 /// Parse an unsaved buffer as the file at `rel` would be parsed on disk.
@@ -497,6 +530,15 @@ pub fn db_path_for(root: &LocalRoot, db_dir: &Path, rel: &str) -> Fallible<PathB
 /// The deck name comes from the filename, the line offset from the TOML
 /// frontmatter, so reported error lines match what is in the textarea.
 pub fn parse_buffer(rel: &str, content: &str) -> Fallible<ParsedFile> {
+    parse_buffer_at(rel, &PathBuf::from(rel), content)
+}
+
+/// The same, but naming the file by where it actually is on disk.
+///
+/// `validate_media_files` canonicalizes each card's path to place it inside
+/// its collection, which only the absolute path can answer — the relative
+/// one would be resolved against the process's working directory.
+fn parse_buffer_at(rel: &str, file_path: &Path, content: &str) -> Fallible<ParsedFile> {
     let (body, offset) = strip_frontmatter_with_offset(content)?;
     let deck_name = rel
         .rsplit('/')
@@ -504,8 +546,20 @@ pub fn parse_buffer(rel: &str, content: &str) -> Fallible<ParsedFile> {
         .unwrap_or(rel)
         .trim_end_matches(".md")
         .to_string();
-    let parser = Parser::new(deck_name, PathBuf::from(rel), offset);
+    let parser = Parser::new(deck_name, file_path.to_path_buf(), offset);
     Ok(parser.parse_with_duplicates(body)?)
+}
+
+/// The URL slug of the collection the local file at `rel` belongs to.
+///
+/// Derived exactly as `discover_local_collections` derives it, so the slug
+/// used to look for an active drill session is the one that session is
+/// keyed by.
+fn collection_slug_for(rel: &str) -> Fallible<String> {
+    match rel.trim_matches('/').split('/').next() {
+        Some(top) if !top.is_empty() && rel.trim_matches('/').contains('/') => Ok(slugify(top)),
+        _ => fail(LOOSE_FILE),
+    }
 }
 
 #[derive(Deserialize)]
@@ -540,6 +594,10 @@ fn load_for_edit(
     if !path.is_file() {
         return fail(format!("`{rel}` is not a file."));
     }
+    // Refused here rather than on save: a file outside a collection cannot
+    // be saved and cannot have its images previewed, so opening an editor
+    // over it would be a page that does not work.
+    collection_folder(&root, rel)?;
     let content = std::fs::read_to_string(&path)?;
     let mtime = file_mtime_ms(&path)?;
     Ok((content, mtime))
@@ -550,12 +608,46 @@ pub async fn editor_post_handler(
     AxumPath(rel): AxumPath<String>,
     current_user: Option<CurrentUser>,
     Form(form): Form<SaveForm>,
-) -> Redirect {
-    let target = format!("/files/edit/{}", encoded_path(&rel));
+) -> Result<Redirect, (StatusCode, Html<String>)> {
     match save_file(&state, current_user.as_ref(), &rel, &form) {
-        Ok(msg) => Flash::success(msg).redirect(&target),
-        Err(e) => Flash::error(e.to_string()).redirect(&target),
+        Ok(msg) => {
+            let target = format!("/files/edit/{}", encoded_path(&rel));
+            Ok(Flash::success(msg).redirect(&target))
+        }
+        // Redirecting here would send the browser to a GET that re-reads
+        // the file from disk — which a refused save has already put back —
+        // and the whole buffer would be gone. Answer with the editor over
+        // the text that was submitted instead, so the fix is one edit away.
+        Err(e) => Err(rejected_save(
+            &state,
+            current_user.as_ref(),
+            &rel,
+            form,
+            &e.to_string(),
+        )),
     }
+}
+
+/// The editor, redrawn over the buffer that was just refused.
+///
+/// The mtime is re-read rather than echoed back: every refusal leaves the
+/// original content on disk, but `revert_file` rewriting it moves the mtime
+/// on, and a stale one would make the next save fail as a phantom conflict.
+/// On a real conflict this is the mtime of the change that landed, so
+/// saving again deliberately overwrites it — which is what the message says.
+fn rejected_save(
+    state: &AppState,
+    user: Option<&CurrentUser>,
+    rel: &str,
+    form: SaveForm,
+    error: &str,
+) -> (StatusCode, Html<String>) {
+    let mtime = user_root(state, user)
+        .and_then(|root| root.resolve(rel))
+        .and_then(|path| file_mtime_ms(&path))
+        .unwrap_or(form.mtime);
+    let markup = render_editor_page(rel, &form.content, mtime, Some(Flash::error(error)));
+    (StatusCode::UNPROCESSABLE_ENTITY, Html(markup.into_string()))
 }
 
 /// Write the buffer, reparse it, and migrate card hashes so a reworded card
@@ -572,9 +664,18 @@ fn save_file(
         return fail(format!("`{rel}` is not a file."));
     }
 
+    // A live session drills the cards it cached when it started. Rewriting
+    // their hashes underneath it strands the grades it is about to write —
+    // the same reason `edit_post_inner` refuses a card edit mid-session.
+    let slug = collection_slug_for(rel)?;
+    if state.sessions.lock().contains_key(&slug) {
+        return fail("A drill session is active on this collection. End it before editing.");
+    }
+
     if file_mtime_ms(&path)? != form.mtime {
         return fail(
-            "This file changed since you opened it. Reload the page and reapply your edit.",
+            "This file changed since you opened it, so it was not saved. Your edit is still \
+             here — check it against the other change, then save again to overwrite that one.",
         );
     }
 
@@ -583,7 +684,7 @@ fn save_file(
     // restored from elsewhere — has no cards to carry history forward from,
     // but it must still be repairable here rather than rejecting every save
     // with the old content's error.
-    let old_cards = match parse_buffer(rel, &original) {
+    let old_cards = match parse_buffer_at(rel, &path, &original) {
         Ok(parsed) => parsed.cards,
         Err(e) => {
             log::warn!(
@@ -601,7 +702,8 @@ fn save_file(
         None => return fail("No data directory is configured."),
     };
     ensure_dir(&db_dir, "review database directory")?;
-    let db_path = db_path_for(&root, &db_dir, rel)?;
+    let coll_dir = collection_folder(&root, rel)?;
+    let db_path = db_path_for(&coll_dir, &db_dir)?;
     // `Database::new` takes a &str; a non-UTF-8 data directory cannot be
     // named to SQLite at all, so say so rather than lossily converting.
     let db_path_str = match db_path.to_str() {
@@ -616,13 +718,23 @@ fn save_file(
     let mut db = Database::new(db_path_str)?;
 
     write_atomic(&path, &form.content)?;
-    let new_cards = match parse_buffer(rel, &form.content) {
+    let new_cards = match parse_buffer_at(rel, &path, &form.content) {
         Ok(parsed) => parsed.cards,
         Err(e) => {
             revert_file(&path, &original)?;
             return fail(format!("Not saved — {}", e.message()));
         }
     };
+    // `Collection::with_db_path` validates media when it loads, so a
+    // reference to a file that is not there does not merely render as a
+    // broken image: it fails the whole collection, taking its page, its
+    // deck tree, its stats and the landing count down with it. Refused
+    // here, exactly like a parse error, so the editor is never the way that
+    // happens.
+    if let Err(e) = validate_media_files(&new_cards, &coll_dir) {
+        revert_file(&path, &original)?;
+        return fail(format!("Not saved — {}", e.message()));
+    }
     let old_refs: Vec<&Card> = old_cards.iter().collect();
     let new_refs: Vec<&Card> = new_cards.iter().collect();
     let plan = plan_hash_migration(&old_refs, &new_refs);
@@ -863,7 +975,7 @@ mod tests {
         let id = crate::cmd::serve::local::collection_id(&folder)?;
 
         let db_dir = dir.join("db");
-        let path = db_path_for(&root, &db_dir, "Spanish/verbs.md")?;
+        let path = db_path_for(&collection_folder(&root, "Spanish/verbs.md")?, &db_dir)?;
         assert_eq!(path, db_dir.join(format!("{id}.db")));
         Ok(())
     }
@@ -873,7 +985,7 @@ mod tests {
         let dir = create_tmp_directory()?;
         let root = LocalRoot::for_user(&dir, None)?;
         std::fs::write(root.path().join("loose.md"), "Q: a\nA: b\n")?;
-        assert!(db_path_for(&root, &dir.join("db"), "loose.md").is_err());
+        assert!(collection_folder(&root, "loose.md").is_err());
         Ok(())
     }
 
@@ -1165,6 +1277,253 @@ mod tests {
         )?;
         assert!(!root.path().join("Spanish").exists());
         assert!(!db_path.exists(), "the review database is orphaned");
+        Ok(())
+    }
+
+    /// A save while a session is drilling the same collection rewrites the
+    /// card hashes the session is still grading against, stranding its
+    /// review history. `edit_post_inner` refuses a card edit for exactly
+    /// this reason; the whole-file editor has to refuse it too.
+    #[test]
+    fn a_save_is_refused_while_a_session_drills_the_collection() -> Fallible<()> {
+        use crate::cmd::drill::render::AnswerControls;
+        use crate::cmd::drill::state::MutableState;
+        use crate::cmd::drill::state::SessionDbs;
+        use crate::cmd::serve::state::DrillSession;
+        use crate::rng::TinyRng;
+        use crate::types::performance::Jitter;
+
+        let dir = create_tmp_directory()?;
+        let state = state_for(&dir, Vec::new());
+        let root = user_root(&state, None)?;
+        let folder = root.path().join("Spanish");
+        std::fs::create_dir_all(&folder)?;
+        let path = folder.join("verbs.md");
+        let original = "Q: the cat\nA: el gato\n";
+        std::fs::write(&path, original)?;
+
+        // A session keyed by the collection's slug, exactly as a drill on
+        // `/collection/Spanish` would leave one.
+        let db_dir = dir.join("db");
+        ensure_dir(&db_dir, "review database directory")?;
+        let db_path = db_path_for(&folder, &db_dir)?;
+        let db_str = db_path.to_str().expect("temp path is UTF-8");
+        let started_at = Timestamp::now();
+        let db = Database::new(db_str)?;
+        let session_id = db.create_session(started_at)?;
+        let mutable = MutableState::new(
+            SessionDbs::single(db, session_id),
+            crate::cmd::drill::cache::Cache::new(),
+            Vec::new(),
+            Jitter::none(),
+            TinyRng::from_seed(1),
+        );
+        let session = std::sync::Arc::new(parking_lot::Mutex::new(DrillSession::new(
+            folder.clone(),
+            Vec::new(),
+            started_at,
+            AnswerControls::Full,
+            mutable,
+        )));
+        state.sessions.lock().insert("Spanish".to_string(), session);
+
+        let form = SaveForm {
+            content: "Q: the dog\nA: el perro\n".to_string(),
+            mtime: file_mtime_ms(&path)?,
+        };
+        let error = match save_file(&state, None, "Spanish/verbs.md", &form) {
+            Ok(_) => return fail("expected an active session to refuse the save"),
+            Err(e) => e.to_string(),
+        };
+        assert!(error.contains("drill session"), "got: {error}");
+        assert_eq!(std::fs::read_to_string(&path)?, original);
+        Ok(())
+    }
+
+    /// `Collection::with_db_path` validates media when it loads, so an
+    /// image reference to a file that is not there does not render as a
+    /// broken image — it fails the whole collection, and its page, deck
+    /// tree, stats and landing count all go with it. The editor must not be
+    /// a way to get there.
+    #[test]
+    fn a_save_naming_an_image_that_is_not_there_is_refused() -> Fallible<()> {
+        let dir = create_tmp_directory()?;
+        let state = state_for(&dir, Vec::new());
+        let root = user_root(&state, None)?;
+        let folder = root.path().join("Spanish");
+        std::fs::create_dir_all(&folder)?;
+        let path = folder.join("verbs.md");
+        let original = "Q: the cat\nA: el gato\n";
+        std::fs::write(&path, original)?;
+
+        let form = SaveForm {
+            content: "Q: the cat\nA: ![](nope.png)\n".to_string(),
+            mtime: file_mtime_ms(&path)?,
+        };
+        assert!(save_file(&state, None, "Spanish/verbs.md", &form).is_err());
+        assert_eq!(
+            std::fs::read_to_string(&path)?,
+            original,
+            "a refused save must leave the file as it was"
+        );
+
+        // The same reference, once the image is actually there, saves.
+        std::fs::write(folder.join("nope.png"), "x")?;
+        let form = SaveForm {
+            content: "Q: the cat\nA: ![](nope.png)\n".to_string(),
+            mtime: file_mtime_ms(&path)?,
+        };
+        save_file(&state, None, "Spanish/verbs.md", &form)?;
+        Ok(())
+    }
+
+    /// A refused save used to redirect to the editor's GET, which re-reads
+    /// the file the refusal had already put back — so one bad card threw
+    /// away everything the user had typed. The response must carry the
+    /// submitted buffer instead.
+    #[tokio::test]
+    async fn a_refused_save_answers_with_the_buffer_that_was_submitted() -> Fallible<()> {
+        let dir = create_tmp_directory()?;
+        let state = state_for(&dir, Vec::new());
+        let root = user_root(&state, None)?;
+        std::fs::create_dir_all(root.path().join("Spanish"))?;
+        let path = root.path().join("Spanish").join("verbs.md");
+        std::fs::write(&path, "Q: the cat\nA: el gato\n")?;
+
+        let typed = "Q: hours of work\nA: el gato\n\nQ: a dangling question\n";
+        let response = editor_post_handler(
+            State(state),
+            AxumPath("Spanish/verbs.md".to_string()),
+            None,
+            Form(SaveForm {
+                content: typed.to_string(),
+                mtime: file_mtime_ms(&path)?,
+            }),
+        )
+        .await;
+        let (status, html) = match response {
+            Ok(_) => return fail("expected an unparseable buffer to be refused"),
+            Err((status, Html(html))) => (status, html),
+        };
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(html.contains("hours of work"), "the buffer is gone: {html}");
+        // And the mtime is the one on disk now, so the next save is not
+        // refused a second time as a phantom conflict.
+        assert!(
+            html.contains(&format!("value=\"{}\"", file_mtime_ms(&path)?)),
+            "got: {html}"
+        );
+        Ok(())
+    }
+
+    /// A file created under a parent that does not exist yet brings its
+    /// top-level folder into being, and that folder is a collection. One
+    /// whose slug is taken is dropped from the listing with only a log line
+    /// to say why, so the check cannot live on the root form alone.
+    #[test]
+    fn creating_a_file_may_not_conjure_a_shadowing_collection() -> Fallible<()> {
+        let dir = create_tmp_directory()?;
+        let state = state_for(&dir, vec![configured("Spanish", "Spanish")]);
+
+        let form = NewEntryForm {
+            parent: "Spanish".to_string(),
+            name: "verbs".to_string(),
+        };
+        assert!(create_entry(&state, None, &form, false).is_err());
+        assert!(!user_root(&state, None)?.path().join("Spanish").exists());
+
+        // Nested folders are checked by their top-level ancestor too.
+        let nested = NewEntryForm {
+            parent: "Spanish/Unit 2".to_string(),
+            name: "verbs".to_string(),
+        };
+        assert!(create_entry(&state, None, &nested, false).is_err());
+        Ok(())
+    }
+
+    /// A file created deeper down gives its new top-level folder an id, so
+    /// the collection it becomes keeps its database across a rename.
+    #[test]
+    fn a_file_creates_its_collection_with_an_id() -> Fallible<()> {
+        let dir = create_tmp_directory()?;
+        let state = state_for(&dir, Vec::new());
+        create_entry(
+            &state,
+            None,
+            &NewEntryForm {
+                parent: "Spanish/Unit 2".to_string(),
+                name: "verbs".to_string(),
+            },
+            false,
+        )?;
+        let root = user_root(&state, None)?;
+        assert!(root.path().join("Spanish/Unit 2/verbs.md").is_file());
+        assert!(existing_collection_id(&root.path().join("Spanish"))?.is_some());
+        Ok(())
+    }
+
+    /// The editor cannot save a file outside a collection and cannot serve
+    /// its images, so it refuses to open one rather than presenting a page
+    /// that does not work.
+    #[test]
+    fn the_editor_refuses_a_file_outside_any_collection() -> Fallible<()> {
+        let dir = create_tmp_directory()?;
+        let state = state_for(&dir, Vec::new());
+        let root = user_root(&state, None)?;
+        std::fs::write(root.path().join("loose.md"), "Q: a\nA: b\n")?;
+        assert!(load_for_edit(&state, None, "loose.md").is_err());
+        Ok(())
+    }
+
+    /// The database is removed only once the folder actually is. Removing
+    /// it first threw the review history away whenever `remove_dir_all`
+    /// failed — leaving the collection on disk, silently starting over.
+    #[test]
+    fn a_failed_folder_removal_keeps_the_review_database() -> Fallible<()> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = create_tmp_directory()?;
+        let state = state_for(&dir, Vec::new());
+        create_entry(
+            &state,
+            None,
+            &NewEntryForm {
+                parent: String::new(),
+                name: "Spanish".to_string(),
+            },
+            true,
+        )?;
+        let root = user_root(&state, None)?;
+        let folder = root.path().join("Spanish");
+        let db_path = db_path_for(&folder, &dir.join("db"))?;
+        ensure_dir(&dir.join("db"), "review database directory")?;
+        std::fs::write(&db_path, "")?;
+
+        // A read-only parent makes unlinking the folder fail while leaving
+        // everything readable, which is exactly the shape of the failure
+        // (permissions, a file held open) this ordering is for.
+        let original = std::fs::metadata(root.path())?.permissions();
+        let mut locked = original.clone();
+        locked.set_mode(0o555);
+        std::fs::set_permissions(root.path(), locked)?;
+        let outcome = delete_entry(
+            &state,
+            None,
+            &DeleteForm {
+                path: "Spanish".to_string(),
+            },
+        );
+        std::fs::set_permissions(root.path(), original)?;
+
+        // Running as root defeats the permission bits; the ordering is only
+        // observable when the removal really did fail.
+        if outcome.is_err() {
+            assert!(folder.exists(), "the folder survived, as set up");
+            assert!(
+                db_path.exists(),
+                "the folder is still there but its review history is gone"
+            );
+        }
         Ok(())
     }
 

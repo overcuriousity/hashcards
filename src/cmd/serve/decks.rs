@@ -24,6 +24,8 @@ use maud::html;
 
 use crate::cmd::drill::template::page_template;
 use crate::cmd::serve::auth::CurrentUser;
+use crate::cmd::serve::files::local_collections_for;
+use crate::cmd::serve::handlers::current_user_for;
 use crate::cmd::serve::state::AppState;
 use crate::collection::Collection;
 use crate::error::Fallible;
@@ -308,6 +310,31 @@ pub(super) fn render_decks_page(
     })
 }
 
+/// Every collection `owner` can put in a custom deck: configured ones,
+/// their HedgeDoc and git sources, and their own local card folders.
+///
+/// One list for the picker and for the ownership check, so a collection can
+/// never be offered on `/decks` and then refused when it is chosen.
+///
+/// Blocking: local collections are discovered by reading the tree.
+fn owned_collections(state: &AppState, owner: Option<&str>) -> Vec<ResolvedCollection> {
+    let configured = state
+        .config
+        .collections
+        .iter()
+        .filter(|c| c.owner.as_deref() == owner)
+        .cloned();
+    let hedgedoc: Vec<ResolvedCollection> = state
+        .hedgedoc_sources
+        .lock()
+        .iter()
+        .filter(|s| s.collection.owner.as_deref() == owner)
+        .map(|s| s.collection.clone())
+        .collect();
+    let local = local_collections_for(state, current_user_for(owner).as_ref());
+    configured.chain(hedgedoc).chain(local).collect()
+}
+
 // ---- HTTP handlers ----
 
 /// Render the deck management page, scoped to the caller.
@@ -325,25 +352,17 @@ pub async fn decks_manage_handler(
         .filter(|d| d.owner.as_deref() == owner.as_deref())
         .cloned()
         .collect();
-    let collections: Vec<ResolvedCollection> = state
-        .config
-        .collections
-        .iter()
-        .filter(|c| c.owner.as_deref() == owner.as_deref())
-        .cloned()
-        .collect();
-    let hedgedoc: Vec<ResolvedCollection> = state
-        .hedgedoc_sources
-        .lock()
-        .iter()
-        .filter(|s| s.collection.owner.as_deref() == owner.as_deref())
-        .map(|s| s.collection.clone())
-        .collect();
-    let all: Vec<ResolvedCollection> = collections.into_iter().chain(hedgedoc).collect();
     let config_available = state.config.data_dir.is_some();
-    // Reading every collection off disk is blocking work; keep it off the
-    // async executor (BUG-44).
-    let choices = match tokio::task::spawn_blocking(move || deck_choices(&all)).await {
+    // Reading every collection off disk is blocking work, and so is
+    // discovering the local ones; keep both off the async executor
+    // (BUG-44).
+    let state2 = state.clone();
+    let owner2 = owner.clone();
+    let choices = match tokio::task::spawn_blocking(move || {
+        deck_choices(&owned_collections(&state2, owner2.as_deref()))
+    })
+    .await
+    {
         Ok(choices) => choices,
         Err(e) => {
             log::error!("failed to list decks: {e}");
@@ -413,20 +432,26 @@ pub async fn deck_add_handler(
     }
 
     // Every member must name a collection the caller actually owns, or a
-    // deck could be used to read another user's cards.
+    // deck could be used to read another user's cards. Listed once, off the
+    // executor: discovering local collections reads the user's tree.
+    let state2 = state.clone();
+    let owner2 = owner.clone();
+    let owned =
+        match tokio::task::spawn_blocking(move || owned_collections(&state2, owner2.as_deref()))
+            .await
+        {
+            Ok(owned) => owned,
+            Err(e) => {
+                log::error!("failed to list collections: {e}");
+                return Flash::error("Decks could not be listed. Try again.").redirect("/decks");
+            }
+        };
     let mut members = Vec::new();
     for raw in &form.members {
         let Some(member) = DeckMember::parse(raw) else {
             return Flash::error(format!("Malformed deck selection: {raw}")).redirect("/decks");
         };
-        let owned =
-            state.config.collections.iter().any(|c| {
-                c.slug == member.collection_slug && c.owner.as_deref() == owner.as_deref()
-            }) || state.hedgedoc_sources.lock().iter().any(|s| {
-                s.collection.slug == member.collection_slug
-                    && s.collection.owner.as_deref() == owner.as_deref()
-            });
-        if !owned {
+        if !owned.iter().any(|c| c.slug == member.collection_slug) {
             return Flash::error("That selection includes a collection you don't own.")
                 .redirect("/decks");
         }
@@ -536,6 +561,28 @@ mod tests {
             owner: owner.map(|o| o.to_string()),
             members: members.iter().map(|m| m.to_string()).collect(),
         }
+    }
+
+    /// A local card folder is a collection like any other: it must be
+    /// offered in the deck picker, and the ownership check has to accept it
+    /// — otherwise choosing one is refused with "a collection you don't
+    /// own", for a folder the caller made themselves.
+    #[test]
+    fn local_collections_can_be_put_in_a_custom_deck() -> Fallible<()> {
+        let dir = crate::helper::create_tmp_directory()?;
+        let state =
+            crate::cmd::serve::state::test_support::state_with_data_dir(dir.clone(), Vec::new());
+        let root = crate::cmd::serve::files::user_root(&state, None)?;
+        std::fs::create_dir_all(root.path().join("Spanish"))?;
+        std::fs::write(root.path().join("Spanish").join("verbs.md"), "Q: a\nA: b\n")?;
+
+        let owned = owned_collections(&state, None);
+        assert!(
+            owned.iter().any(|c| c.slug == "Spanish"),
+            "local collections: {:?}",
+            owned.iter().map(|c| &c.slug).collect::<Vec<_>>()
+        );
+        Ok(())
     }
 
     #[test]

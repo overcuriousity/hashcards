@@ -235,17 +235,29 @@ document.querySelectorAll('.editor-toolbar button[data-snippet]').forEach(functi
   if (!textarea || !pane || !form) return;
 
   var timer = null;
+  // Only the newest request may paint. Without this an earlier, slower
+  // preview can land after a later one and leave the pane showing a buffer
+  // the user has already moved on from, until the next keystroke.
+  var inFlight = null;
   function refresh() {
     var body = new URLSearchParams();
     body.set('path', form.getAttribute('data-path'));
     body.set('content', textarea.value);
+    if (inFlight) inFlight.abort();
+    var controller = new AbortController();
+    inFlight = controller;
     fetch('/files/preview', {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: body.toString(),
+      signal: controller.signal,
     })
       .then(function (r) { return r.text(); })
-      .then(function (html) { pane.innerHTML = html; })
+      .then(function (html) {
+        if (inFlight !== controller) return;
+        inFlight = null;
+        pane.innerHTML = html;
+      })
       .catch(function () { /* leave the last good preview in place */ });
   }
 

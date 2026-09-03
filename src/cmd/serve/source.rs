@@ -93,8 +93,13 @@ fn git_raw_url(parsed: &Url) -> Option<Url> {
         return Some(raw);
     }
 
-    // Any other URL that names a markdown file is already raw.
-    if segments.last().is_some_and(|s| s.ends_with(".md")) {
+    // Any other URL that names a markdown file is already raw — except a
+    // HedgeDoc published note, whose alias is free-form and may well end in
+    // `.md`. `/s/{alias}` is HedgeDoc's own shape and nothing else's, so it
+    // is read as a note rather than fetched verbatim (which would return
+    // the HTML note page and fail as a missing repository file).
+    let published_note = segments.len() == 2 && segments[0] == "s";
+    if !published_note && segments.last().is_some_and(|s| s.ends_with(".md")) {
         return Some(parsed.clone());
     }
 
@@ -149,6 +154,18 @@ mod tests {
         assert_eq!(kind, SourceKind::Hedgedoc);
         let (kind, _) = raw_url("https://notes.example.com/s/abc123").unwrap();
         assert_eq!(kind, SourceKind::Hedgedoc);
+    }
+
+    /// A HedgeDoc alias is free-form, so a published note can end in `.md`.
+    /// Fetched verbatim it returns the note's HTML page, and the user is
+    /// told their repository may be private — for a URL that worked before
+    /// git sources existed.
+    #[test]
+    fn a_published_note_whose_alias_ends_in_md_is_still_hedgedoc() {
+        let (kind, url) = raw_url("https://notes.example.com/s/my-cards.md").unwrap();
+        assert_eq!(kind, SourceKind::Hedgedoc);
+        assert_eq!(url.as_str(), "https://notes.example.com/s/my-cards.md");
+        assert_eq!(detect_kind("https://notes.example.com/s/my-cards.md"), kind);
     }
 
     #[test]

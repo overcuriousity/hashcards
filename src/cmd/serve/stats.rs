@@ -7,6 +7,7 @@ use maud::html;
 use crate::cmd::drill::template::page_template;
 use crate::cmd::run_blocking;
 use crate::cmd::serve::auth::CurrentUser;
+use crate::cmd::serve::handlers::collection_exists;
 use crate::cmd::serve::handlers::find_collection;
 use crate::cmd::serve::state::AppState;
 use crate::cmd::stats_page::gather_stats;
@@ -23,7 +24,6 @@ pub async fn collection_stats_handler(
     current_user: Option<CurrentUser>,
 ) -> (StatusCode, Html<String>) {
     let owner = current_user.map(|u| u.email);
-    let known = find_collection(&state, &slug, owner.as_deref()).is_some();
     let state2 = state.clone();
     let slug2 = slug.clone();
     let owner2 = owner.clone();
@@ -31,6 +31,10 @@ pub async fn collection_stats_handler(
     match run_blocking(move || stats_inner(&state2, &slug2, owner2.as_deref())).await {
         Ok(html) => (StatusCode::OK, Html(html)),
         Err(e) => {
+            // Only now, and off the executor: the lookup reads the caller's
+            // local card folder, and it is needed only to tell "no such
+            // collection" apart from "it broke".
+            let known = collection_exists(&state, &slug, owner).await;
             let status = if known {
                 StatusCode::INTERNAL_SERVER_ERROR
             } else {

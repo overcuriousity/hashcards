@@ -60,6 +60,17 @@ impl LocalRoot {
             return fail("No file path was given.");
         }
         let rel_path = PathBuf::from(trimmed);
+        // `.` and `./` name the root itself. Nothing addresses the root by
+        // path — every caller wants a file or folder inside it — and one
+        // that did would let the file manager delete the whole tree.
+        if !rel_path
+            .components()
+            .any(|c| matches!(c, Component::Normal(_)))
+        {
+            return fail(format!(
+                "Path must name something inside your card folder: `{trimmed}`"
+            ));
+        }
         if rel_path.components().any(|c| c == Component::ParentDir) {
             return fail(format!(
                 "Path must not contain `..` components: `{trimmed}`"
@@ -279,6 +290,20 @@ mod tests {
         let (_dir, root) = fixture()?;
         assert!(root.resolve("../escape.md").is_err());
         assert!(root.resolve("Spanish/../../escape.md").is_err());
+        Ok(())
+    }
+
+    /// The root is not addressable. `delete_entry` resolves the path it is
+    /// given and removes it: `.` would have named the whole card folder,
+    /// and a `media` collection at the top level does not even count
+    /// towards "is it empty", so the tree would be judged empty and wiped.
+    #[test]
+    fn rejects_the_root_itself() -> Fallible<()> {
+        let (_dir, root) = fixture()?;
+        assert!(root.resolve(".").is_err());
+        assert!(root.resolve("./").is_err());
+        assert!(root.resolve("/").is_err());
+        assert!(root.resolve("  ").is_err());
         Ok(())
     }
 

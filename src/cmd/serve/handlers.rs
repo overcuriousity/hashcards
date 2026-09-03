@@ -311,9 +311,41 @@ pub(super) fn find_collection(
         .map(|s| s.collection.clone())
 }
 
+/// `find_collection`, off the async executor.
+///
+/// The lookup is not free any more: local collections are discovered by
+/// reading the caller's card folder and each folder's `.hashcards.toml`, so
+/// calling it directly in an async handler blocks the executor — once per
+/// request, and `collection_file_handler` serves one request per image on a
+/// card.
+pub(super) async fn find_collection_blocking(
+    state: &AppState,
+    slug: &str,
+    owner: Option<String>,
+) -> Option<ResolvedCollection> {
+    let state = state.clone();
+    let slug = slug.to_string();
+    match tokio::task::spawn_blocking(move || find_collection(&state, &slug, owner.as_deref()))
+        .await
+    {
+        Ok(found) => found,
+        Err(e) => {
+            log::error!("Collection lookup failed: {e}");
+            None
+        }
+    }
+}
+
+/// Whether `slug` names a collection the caller can see. Used to tell "no
+/// such collection" apart from "loading it failed", which is the only thing
+/// the answer is needed for.
+pub(super) async fn collection_exists(state: &AppState, slug: &str, owner: Option<String>) -> bool {
+    find_collection_blocking(state, slug, owner).await.is_some()
+}
+
 /// `local_collections_for` keys the tree off a `CurrentUser`; callers here
 /// already reduced that to an owner email.
-fn current_user_for(owner: Option<&str>) -> Option<CurrentUser> {
+pub(super) fn current_user_for(owner: Option<&str>) -> Option<CurrentUser> {
     owner.map(|email| CurrentUser {
         email: email.to_string(),
     })
@@ -853,13 +885,34 @@ fn collection_post_inner(
     }
 }
 
+/// The content type a media file is served as, from its extension.
+///
+/// Every format `upload::sniff_image` will store must have an arm here: a
+/// file served as `application/octet-stream` is offered as a download
+/// rather than drawn in the card that references it.
+fn content_type_for(extension: &str) -> &'static str {
+    match extension {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        "mp3" => "audio/mpeg",
+        "wav" => "audio/wav",
+        "ogg" => "audio/ogg",
+        "mp4" => "video/mp4",
+        "webm" => "video/webm",
+        _ => "application/octet-stream",
+    }
+}
+
 pub async fn collection_file_handler(
     State(state): State<AppState>,
     Path((slug, path)): Path<(String, String)>,
     current_user: Option<CurrentUser>,
 ) -> (StatusCode, [(HeaderName, &'static str); 1], Vec<u8>) {
     let owner = current_user.map(|u| u.email);
-    let coll_dir = match find_collection(&state, &slug, owner.as_deref()) {
+    let coll_dir = match find_collection_blocking(&state, &slug, owner).await {
         Some(rc) => rc.coll_dir.clone(),
         None => {
             return (
@@ -896,18 +949,7 @@ pub async fn collection_file_handler(
         .and_then(|ext| ext.to_str())
         .unwrap_or("")
         .to_lowercase();
-    let content_type: &str = match extension.as_str() {
-        "png" => "image/png",
-        "jpg" | "jpeg" => "image/jpeg",
-        "gif" => "image/gif",
-        "svg" => "image/svg+xml",
-        "mp3" => "audio/mpeg",
-        "wav" => "audio/wav",
-        "ogg" => "audio/ogg",
-        "mp4" => "video/mp4",
-        "webm" => "video/webm",
-        _ => "application/octet-stream",
-    };
+    let content_type: &str = content_type_for(&extension);
     let content = tokio::fs::read(validated_path).await;
     match content {
         Ok(bytes) => (StatusCode::OK, [(CONTENT_TYPE, content_type)], bytes),
@@ -1301,6 +1343,28 @@ mod tests {
     use crate::rng::TinyRng;
     use crate::types::performance::Jitter;
     use crate::types::timestamp::Timestamp;
+
+    /// Every image format the paste path will store has to be served as
+    /// an image: `sniff_image` accepts WebP, and a WebP served as
+    /// `application/octet-stream` renders as a broken image in every card
+    /// that references it.
+    #[test]
+    fn every_stored_image_format_is_served_as_an_image() {
+        for bytes in [
+            [0x89u8, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A].to_vec(),
+            vec![0xFF, 0xD8, 0xFF, 0xE0],
+            b"GIF89a".to_vec(),
+            b"RIFF\0\0\0\0WEBPVP8 ".to_vec(),
+        ] {
+            let extension =
+                crate::cmd::serve::upload::sniff_image(&bytes).expect("a supported format");
+            let served = super::content_type_for(extension);
+            assert!(
+                served.starts_with("image/"),
+                "`.{extension}` is served as `{served}`"
+            );
+        }
+    }
 
     /// Cross-user isolation: `find_collection` only matches a collection
     /// whose `owner` equals the caller's, and unauthenticated (`None`)
