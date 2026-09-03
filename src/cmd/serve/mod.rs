@@ -5,12 +5,15 @@ pub mod config;
 mod decks;
 mod edit;
 pub mod export;
+mod files;
+mod files_ui;
 mod git;
 mod handlers;
 mod hedgedoc;
 mod hedgedoc_ui;
 mod href;
 mod landing;
+mod local;
 pub mod server;
 mod source;
 mod state;
@@ -56,6 +59,7 @@ mod tests {
             data_dir: None,
             config_path: None,
             hedgedoc_entries: Vec::new(),
+            local_collections: Vec::new(),
             custom_decks: Vec::new(),
             session_timeout_minutes: 1440,
             oidc: None,
@@ -230,6 +234,7 @@ mod tests {
             data_dir: None,
             config_path: None,
             hedgedoc_entries: Vec::new(),
+            local_collections: Vec::new(),
             custom_decks: Vec::new(),
             session_timeout_minutes: 1440,
             oidc: None,
@@ -353,6 +358,7 @@ mod tests {
             data_dir: Some(data_dir.clone()),
             config_path: Some(config_path.clone()),
             hedgedoc_entries: Vec::new(),
+            local_collections: Vec::new(),
             custom_decks: Vec::new(),
             session_timeout_minutes: 1440,
             oidc: None,
@@ -408,6 +414,7 @@ mod tests {
             data_dir: None,
             config_path: None,
             hedgedoc_entries: Vec::new(),
+            local_collections: Vec::new(),
             custom_decks: Vec::new(),
             session_timeout_minutes: 1440,
             oidc: None,
@@ -487,6 +494,7 @@ mod tests {
             data_dir: None,
             config_path: None,
             hedgedoc_entries: Vec::new(),
+            local_collections: Vec::new(),
             custom_decks: Vec::new(),
             session_timeout_minutes: 1440,
             oidc: None,
@@ -563,6 +571,7 @@ mod tests {
             data_dir: None,
             config_path: None,
             hedgedoc_entries: Vec::new(),
+            local_collections: Vec::new(),
             custom_decks: Vec::new(),
             session_timeout_minutes: 1440,
             oidc: None,
@@ -621,6 +630,7 @@ mod tests {
             data_dir: None,
             config_path: None,
             hedgedoc_entries: Vec::new(),
+            local_collections: Vec::new(),
             custom_decks: Vec::new(),
             session_timeout_minutes: 1440,
             oidc: None,

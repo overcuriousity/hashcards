@@ -47,6 +47,11 @@ use crate::cmd::serve::decks::resolve_custom_decks;
 use crate::cmd::serve::edit::edit_get_handler;
 use crate::cmd::serve::edit::edit_post_handler;
 use crate::cmd::serve::export::collection_export_handler;
+use crate::cmd::serve::files::files_delete_handler;
+use crate::cmd::serve::files::files_file_handler;
+use crate::cmd::serve::files::files_folder_handler;
+use crate::cmd::serve::files::files_get_handler;
+use crate::cmd::serve::files::files_rename_handler;
 use crate::cmd::serve::git::clone_or_pull;
 use crate::cmd::serve::git::spawn_sync_task;
 use crate::cmd::serve::handlers::collection_file_handler;
@@ -360,6 +365,11 @@ pub async fn start_serve(config: ResolvedServeConfig) -> Fallible<()> {
     let app = Router::new()
         .route("/", get(landing_handler))
         .route("/sync", post(sync_handler))
+        .route("/files", get(files_get_handler))
+        .route("/files/folder", post(files_folder_handler))
+        .route("/files/file", post(files_file_handler))
+        .route("/files/rename", post(files_rename_handler))
+        .route("/files/delete", post(files_delete_handler))
         .route("/hedgedoc", get(hedgedoc_manage_handler))
         .route("/hedgedoc/add", post(hedgedoc_add_handler))
         .route("/hedgedoc/delete", post(hedgedoc_delete_handler))

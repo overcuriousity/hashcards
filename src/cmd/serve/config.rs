@@ -9,6 +9,8 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use crate::cmd::drill::render::AnswerControls;
+use crate::cmd::serve::local::LocalRoot;
+use crate::cmd::serve::local::discover_local_collections;
 use crate::error::Fallible;
 use crate::error::fail;
 use crate::types::performance::Jitter;
@@ -45,9 +47,6 @@ pub struct SourceEntry {
     #[serde(default)]
     pub owner: Option<String>,
 }
-
-/// Former name of [`SourceEntry`], kept so existing call sites compile.
-pub type HedgedocEntry = SourceEntry;
 
 impl ServeConfig {
     /// Every configured remote source, from both the current `[[source]]`
@@ -305,8 +304,13 @@ pub struct ResolvedServeConfig {
     pub data_dir: Option<PathBuf>,
     /// Config file path; needed to persist UI changes back to disk.
     pub config_path: Option<PathBuf>,
-    /// HedgeDoc source URLs loaded from the config file.
-    pub hedgedoc_entries: Vec<HedgedocEntry>,
+    /// Remote source URLs loaded from the config file.
+    pub hedgedoc_entries: Vec<SourceEntry>,
+    /// Collections discovered under `{data_dir}/local/{user}`. Only the
+    /// anonymous `default` tree is resolved here; under `[oidc]` each
+    /// user's tree is discovered per request, since it depends on who is
+    /// logged in.
+    pub local_collections: Vec<ResolvedCollection>,
     /// User-assembled cross-collection decks loaded from the config file.
     pub custom_decks: Vec<CustomDeckEntry>,
     /// Idle drill sessions are evicted after this many minutes (0 = never).
@@ -320,7 +324,7 @@ pub struct ResolvedServeConfig {
 ///
 /// `slugify` collapses every non-alphanumeric character to `-`, so distinct
 /// paths like `a/b` and `a-b` collide and would silently share one database.
-fn check_slug_collisions(collections: &[ResolvedCollection]) -> Fallible<()> {
+pub(crate) fn check_slug_collisions(collections: &[ResolvedCollection]) -> Fallible<()> {
     let mut seen: HashMap<&str, &ResolvedCollection> = HashMap::new();
     for rc in collections {
         if let Some(first) = seen.get(rc.slug.as_str()) {
@@ -389,7 +393,19 @@ impl ResolvedServeConfig {
             })
             .collect::<Fallible<Vec<ResolvedCollection>>>()?;
 
-        check_slug_collisions(&collections)?;
+        // Local collections share the slug namespace with configured ones,
+        // so a folder must not be able to shadow a configured collection.
+        // Only the anonymous tree exists at startup; under `[oidc]` a user's
+        // tree is discovered once they are logged in.
+        let local_collections = if config.oidc.is_none() {
+            let local_root = LocalRoot::for_user(&data_dir, None)?;
+            discover_local_collections(&local_root, &db_dir, None)?
+        } else {
+            Vec::new()
+        };
+        let mut all_collections = collections.clone();
+        all_collections.extend(local_collections.iter().cloned());
+        check_slug_collisions(&all_collections)?;
 
         let oidc = match config.oidc {
             None => None,
@@ -547,6 +563,7 @@ impl ResolvedServeConfig {
             data_dir: Some(data_dir),
             config_path: None,
             hedgedoc_entries,
+            local_collections,
             custom_decks,
             session_timeout_minutes: config.server.session_timeout_minutes,
             oidc,
@@ -604,6 +621,7 @@ impl ResolvedServeConfig {
             data_dir: None,
             config_path: None,
             hedgedoc_entries: Vec::new(),
+            local_collections: Vec::new(),
             custom_decks: Vec::new(),
             session_timeout_minutes: default_session_timeout_minutes(),
             oidc: None,
