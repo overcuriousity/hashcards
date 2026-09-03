@@ -447,7 +447,7 @@ fn save_file(
         Ok(parsed) => parsed.cards,
         Err(e) => {
             revert_file(&path, &original)?;
-            return fail(format!("Not saved — {e}"));
+            return fail(format!("Not saved — {}", e.message()));
         }
     };
 

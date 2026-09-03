@@ -388,7 +388,10 @@ mod tests {
             .send()
             .await?;
         let body = response.text().await?;
-        assert!(body.contains("Enter a HedgeDoc URL"), "body: {body}");
+        assert!(
+            body.contains("Enter a HedgeDoc note or git file URL"),
+            "body: {body}"
+        );
         assert!(body.contains("flash-error"));
         Ok(())
     }

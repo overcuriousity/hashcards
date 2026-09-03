@@ -117,7 +117,7 @@ pub fn render_preview(root: &LocalRoot, rel_path: &str, content: &str) -> Markup
             return html! {
                 div.preview-error {
                     p { "This file does not parse yet." }
-                    p.error-detail { (e.to_string()) }
+                    p.error-detail { (e.message()) }
                 }
             };
         }

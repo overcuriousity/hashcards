@@ -1027,7 +1027,7 @@ pub async fn hedgedoc_add_handler(
     // anything that is not a well-formed HTTPS URL so no raw string is
     // ever persisted or rendered into an href.
     if form.url.trim().is_empty() {
-        return Flash::error("Enter a HedgeDoc URL.").redirect("/sources");
+        return Flash::error("Enter a HedgeDoc note or git file URL.").redirect("/sources");
     }
     let url = match normalize_hedgedoc_url(&form.url) {
         Ok(url) => url,
@@ -1144,7 +1144,7 @@ pub async fn hedgedoc_add_handler(
         *state.hedgedoc_last_synced.lock() = Some(Timestamp::now());
     }
 
-    Flash::success("HedgeDoc source added.").redirect("/sources")
+    Flash::success("Source added.").redirect("/sources")
 }
 
 #[derive(serde::Deserialize)]
@@ -1269,7 +1269,7 @@ pub async fn hedgedoc_sync_now_handler(
     }
 
     if any_success || entries.is_empty() {
-        Flash::success("HedgeDoc sync finished.").redirect("/sources")
+        Flash::success("Source sync finished.").redirect("/sources")
     } else {
         Flash::error("HedgeDoc sync failed for all notes; see the statuses below.")
             .redirect("/sources")
