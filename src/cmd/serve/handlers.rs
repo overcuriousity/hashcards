@@ -42,7 +42,7 @@ use crate::cmd::serve::browse::render_browse_page;
 use crate::cmd::serve::config::ResolvedCollection;
 use crate::cmd::serve::decks::ResolvedCustomDeck;
 use crate::cmd::serve::decks::find_custom_deck;
-use crate::cmd::serve::files::local_collections_for;
+use crate::cmd::serve::files::existing_local_collections_for;
 use crate::cmd::serve::git::clone_or_pull;
 use crate::cmd::serve::hedgedoc::apply_sync_result;
 use crate::cmd::serve::hedgedoc::build_combined_infos;
@@ -298,7 +298,7 @@ pub(super) fn find_collection(
     {
         return Some(rc.clone());
     }
-    if let Some(rc) = local_collections_for(state, current_user_for(owner).as_ref())
+    if let Some(rc) = existing_local_collections_for(state, current_user_for(owner).as_ref())
         .into_iter()
         .find(|c| c.slug == slug && c.owner.as_deref() == owner)
     {
@@ -1338,7 +1338,6 @@ mod tests {
             data_dir: None,
             config_path: None,
             hedgedoc_entries: Vec::new(),
-            local_collections: Vec::new(),
             custom_decks: Vec::new(),
             session_timeout_minutes: 1440,
             oidc: None,
@@ -1631,6 +1630,35 @@ mod tests {
             1,
             "the shared card must appear once, not twice"
         );
+        Ok(())
+    }
+
+    /// Serving a page must not write into the user's card folder: read
+    /// paths open the tree without creating it and skip folders that have
+    /// no id yet. Otherwise every collection page, stats page and media
+    /// file would create directories — and fail outright on a read-only
+    /// data directory.
+    #[test]
+    fn find_collection_does_not_write_into_the_local_tree() -> Fallible<()> {
+        use crate::cmd::serve::handlers::find_collection;
+        use crate::cmd::serve::local::collection_id;
+        use crate::cmd::serve::state::test_support::state_with_data_dir;
+
+        let dir = tempfile::tempdir()?;
+        let data_dir = dir.path().to_path_buf();
+        let state = state_with_data_dir(data_dir.clone(), Vec::new());
+
+        assert!(find_collection(&state, "Spanish", None).is_none());
+        assert!(
+            !data_dir.join("local").exists(),
+            "a lookup created the local tree"
+        );
+
+        // A folder that already has an id is still found.
+        let folder = data_dir.join("local").join("default").join("Spanish");
+        std::fs::create_dir_all(&folder)?;
+        collection_id(&folder)?;
+        assert!(find_collection(&state, "Spanish", None).is_some());
         Ok(())
     }
 }

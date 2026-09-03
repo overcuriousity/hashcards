@@ -15,6 +15,7 @@ use serde::Deserialize;
 
 use crate::cmd::serve::auth::CurrentUser;
 use crate::cmd::serve::config::ResolvedCollection;
+use crate::cmd::serve::config::slugify;
 use crate::cmd::serve::edit::file_mtime_ms;
 use crate::cmd::serve::edit::plan_hash_migration;
 use crate::cmd::serve::edit::revert_file;
@@ -22,10 +23,13 @@ use crate::cmd::serve::edit::write_atomic;
 use crate::cmd::serve::files_ui::render_editor_page;
 use crate::cmd::serve::files_ui::render_preview;
 use crate::cmd::serve::files_ui::render_tree_page;
+use crate::cmd::serve::href::encoded_path;
+use crate::cmd::serve::local::IdPolicy;
 use crate::cmd::serve::local::LOCAL_META_FILE;
 use crate::cmd::serve::local::LocalRoot;
 use crate::cmd::serve::local::collection_id;
 use crate::cmd::serve::local::discover_local_collections;
+use crate::cmd::serve::local::existing_collection_id;
 use crate::cmd::serve::state::AppState;
 use crate::db::Database;
 use crate::error::Fallible;
@@ -37,6 +41,7 @@ use crate::parser::strip_frontmatter_with_offset;
 use crate::types::card::Card;
 use crate::types::performance::Performance;
 use crate::types::timestamp::Timestamp;
+use crate::utils::ensure_dir;
 
 /// Seed content for a new card file, also offered for copying on the
 /// Sources page. Frontmatter is TOML, matching `parse_deck`.
@@ -157,17 +162,27 @@ fn non_empty_children(dir: &Path) -> Fallible<Vec<String>> {
     Ok(kept)
 }
 
-/// The local tree belonging to the caller.
+/// The local tree belonging to the caller, created if it is not there yet.
 pub fn user_root(state: &AppState, user: Option<&CurrentUser>) -> Fallible<LocalRoot> {
-    let data_dir = match &state.config.data_dir {
-        Some(d) => d,
-        None => {
-            return fail(
-                "Local card folders need a data directory. Start hashcards-web with a config file.",
-            );
-        }
-    };
-    LocalRoot::for_user(data_dir, user.map(|u| u.email.as_str()))
+    let data_dir = data_dir(state)?;
+    LocalRoot::for_user(&data_dir, user.map(|u| u.email.as_str()))
+}
+
+/// The same tree, without creating anything. Read paths use this: serving a
+/// page must not write into the user's card folder, and must not fail on a
+/// read-only data directory.
+pub fn user_root_readonly(state: &AppState, user: Option<&CurrentUser>) -> Fallible<LocalRoot> {
+    let data_dir = data_dir(state)?;
+    LocalRoot::open(&data_dir, user.map(|u| u.email.as_str()))
+}
+
+fn data_dir(state: &AppState) -> Fallible<PathBuf> {
+    match &state.config.data_dir {
+        Some(d) => Ok(d.clone()),
+        None => fail(
+            "Local card folders need a data directory. Start hashcards-web with a config file.",
+        ),
+    }
 }
 
 #[derive(Deserialize)]
@@ -241,6 +256,71 @@ fn flash_for(outcome: Fallible<String>) -> Redirect {
     }
 }
 
+/// Slugs a local folder must not take: configured collections and HedgeDoc
+/// notes belonging to the same user. `find_collection` prefers those, so a
+/// folder that matches one is unreachable however it came to exist.
+fn reserved_slugs(state: &AppState, owner: Option<&str>) -> Vec<(String, String)> {
+    let mut taken: Vec<(String, String)> = state
+        .config
+        .collections
+        .iter()
+        .filter(|c| c.owner.as_deref() == owner)
+        .map(|c| (c.slug.clone(), c.name.clone()))
+        .collect();
+    taken.extend(
+        state
+            .hedgedoc_sources
+            .lock()
+            .iter()
+            .filter(|s| s.collection.owner.as_deref() == owner)
+            .map(|s| (s.collection.slug.clone(), s.collection.name.clone())),
+    );
+    taken
+}
+
+/// The caller's owner key, as stored on a `ResolvedCollection`.
+fn owner_key(user: Option<&CurrentUser>) -> Option<String> {
+    user.map(|u| u.email.to_lowercase())
+}
+
+/// Refuse a top-level folder name that would collide with an existing
+/// collection's URL slug.
+///
+/// Only top-level folders are collections, so only they share the slug
+/// namespace. `except` is the folder being renamed, which does not collide
+/// with itself.
+fn check_collection_slug(
+    state: &AppState,
+    user: Option<&CurrentUser>,
+    root: &LocalRoot,
+    name: &str,
+    except: Option<&Path>,
+) -> Fallible<()> {
+    let slug = slugify(name);
+    let owner = owner_key(user);
+    let mut taken = reserved_slugs(state, owner.as_deref());
+    let db_dir = match &state.config.data_dir {
+        Some(d) => d.join("db"),
+        None => return fail("No data directory is configured."),
+    };
+    // `CreateMissing`, not `ExistingOnly`: a folder dropped in by hand has
+    // no id yet, and it still owns its slug.
+    let siblings =
+        discover_local_collections(root, &db_dir, owner.as_deref(), IdPolicy::CreateMissing)?;
+    taken.extend(
+        siblings
+            .into_iter()
+            .filter(|c| Some(c.coll_dir.as_path()) != except)
+            .map(|c| (c.slug.clone(), c.name)),
+    );
+    if let Some((_, other)) = taken.iter().find(|(s, _)| *s == slug) {
+        return fail(format!(
+            "`{name}` maps to the URL slug `{slug}`, which the collection `{other}` already uses. Pick a different name."
+        ));
+    }
+    Ok(())
+}
+
 fn create_entry(
     state: &AppState,
     user: Option<&CurrentUser>,
@@ -252,10 +332,14 @@ fn create_entry(
     if !is_dir && !name.ends_with(".md") {
         name.push_str(".md");
     }
-    let rel = join_rel(form.parent.trim().trim_matches('/'), &name);
+    let parent = form.parent.trim().trim_matches('/');
+    let rel = join_rel(parent, &name);
     let target = root.resolve(&rel)?;
     if target.exists() {
         return fail(format!("`{rel}` already exists."));
+    }
+    if is_dir && parent.is_empty() {
+        check_collection_slug(state, user, &root, &name, None)?;
     }
     if is_dir {
         std::fs::create_dir_all(&target)?;
@@ -297,6 +381,9 @@ fn rename_entry(
     if to.exists() {
         return fail(format!("`{to_rel}` already exists."));
     }
+    if from.is_dir() && parent_rel.is_empty() {
+        check_collection_slug(state, user, &root, &name, Some(from.as_path()))?;
+    }
     std::fs::rename(&from, &to)?;
     Ok(format!("Renamed to `{to_rel}`."))
 }
@@ -322,11 +409,40 @@ fn delete_entry(
                 kept.join(", ")
             ));
         }
+        // A top-level folder is a collection: its `.hashcards.toml` goes
+        // with it, so leaving `{id}.db` behind would orphan a database that
+        // nothing can ever address again — and a folder recreated under the
+        // same name would silently start its history over.
+        if !form.path.trim_matches('/').contains('/') {
+            remove_collection_database(state, &target)?;
+        }
         std::fs::remove_dir_all(&target)?;
     } else {
         std::fs::remove_file(&target)?;
     }
     Ok(format!("Deleted `{}`.", form.path))
+}
+
+/// Delete the review database of the collection folder `target`, if it has
+/// one. A folder with no id never had a database to begin with.
+fn remove_collection_database(state: &AppState, target: &Path) -> Fallible<()> {
+    let db_dir = match &state.config.data_dir {
+        Some(d) => d.join("db"),
+        None => return Ok(()),
+    };
+    let id = match existing_collection_id(target)? {
+        Some(id) => id,
+        None => return Ok(()),
+    };
+    // SQLite leaves the write-ahead log and shared-memory files beside the
+    // database; removing only the database would strand them.
+    for suffix in ["", "-wal", "-shm"] {
+        let path = db_dir.join(format!("{id}.db{suffix}"));
+        if path.exists() {
+            std::fs::remove_file(&path)?;
+        }
+    }
+    Ok(())
 }
 
 /// The review database of the collection a local file belongs to.
@@ -412,7 +528,7 @@ pub async fn editor_post_handler(
     current_user: Option<CurrentUser>,
     Form(form): Form<SaveForm>,
 ) -> Redirect {
-    let target = format!("/files/edit/{rel}");
+    let target = format!("/files/edit/{}", encoded_path(&rel));
     match save_file(&state, current_user.as_ref(), &rel, &form) {
         Ok(msg) => Flash::success(msg).redirect(&target),
         Err(e) => Flash::error(e.to_string()).redirect(&target),
@@ -440,7 +556,41 @@ fn save_file(
     }
 
     let original = std::fs::read_to_string(&path)?;
-    let old_cards = parse_buffer(rel, &original)?.cards;
+    // A file that does not parse any more — edited outside the UI, or
+    // restored from elsewhere — has no cards to carry history forward from,
+    // but it must still be repairable here rather than rejecting every save
+    // with the old content's error.
+    let old_cards = match parse_buffer(rel, &original) {
+        Ok(parsed) => parsed.cards,
+        Err(e) => {
+            log::warn!(
+                "`{rel}` did not parse before this edit, so no review history is carried over: {e}"
+            );
+            Vec::new()
+        }
+    };
+
+    // Everything that can fail without looking at the new content happens
+    // before the file is touched: a save that reports an error must never
+    // leave the rewritten file behind.
+    let db_dir = match &state.config.data_dir {
+        Some(d) => d.join("db"),
+        None => return fail("No data directory is configured."),
+    };
+    ensure_dir(&db_dir, "review database directory")?;
+    let db_path = db_path_for(&root, &db_dir, rel)?;
+    // `Database::new` takes a &str; a non-UTF-8 data directory cannot be
+    // named to SQLite at all, so say so rather than lossily converting.
+    let db_path_str = match db_path.to_str() {
+        Some(p) => p,
+        None => {
+            return fail(format!(
+                "Not saved — the database path is not valid UTF-8: {}",
+                db_path.display()
+            ));
+        }
+    };
+    let mut db = Database::new(db_path_str)?;
 
     write_atomic(&path, &form.content)?;
     let new_cards = match parse_buffer(rel, &form.content) {
@@ -450,29 +600,9 @@ fn save_file(
             return fail(format!("Not saved — {}", e.message()));
         }
     };
-
-    let db_dir = match &state.config.data_dir {
-        Some(d) => d.join("db"),
-        None => return fail("No data directory is configured."),
-    };
-    let db_path = db_path_for(&root, &db_dir, rel)?;
     let old_refs: Vec<&Card> = old_cards.iter().collect();
     let new_refs: Vec<&Card> = new_cards.iter().collect();
     let plan = plan_hash_migration(&old_refs, &new_refs);
-
-    // `Database::new` takes a &str; a non-UTF-8 data directory cannot be
-    // named to SQLite at all, so say so rather than lossily converting.
-    let db_path_str = match db_path.to_str() {
-        Some(p) => p,
-        None => {
-            revert_file(&path, &original)?;
-            return fail(format!(
-                "Not saved — the database path is not valid UTF-8: {}",
-                db_path.display()
-            ));
-        }
-    };
-    let mut db = Database::new(db_path_str)?;
     // One transaction. If it fails, put the file back rather than leaving a
     // rewritten file behind a half-migrated database.
     let counts = match db.apply_edit_migration(&plan.renames, &plan.fresh, Timestamp::now()) {
@@ -551,11 +681,35 @@ pub fn local_collections_for(
     state: &AppState,
     user: Option<&CurrentUser>,
 ) -> Vec<ResolvedCollection> {
+    collections_for(state, user, IdPolicy::CreateMissing)
+}
+
+/// The caller's local collections as they already stand.
+///
+/// Read paths use this: a folder that has no id yet is skipped rather than
+/// given one, so looking a collection up never writes into the user's tree
+/// (and never blocks the async executor on creating it).
+pub fn existing_local_collections_for(
+    state: &AppState,
+    user: Option<&CurrentUser>,
+) -> Vec<ResolvedCollection> {
+    collections_for(state, user, IdPolicy::ExistingOnly)
+}
+
+fn collections_for(
+    state: &AppState,
+    user: Option<&CurrentUser>,
+    policy: IdPolicy,
+) -> Vec<ResolvedCollection> {
     let data_dir = match &state.config.data_dir {
-        Some(d) => d,
+        Some(d) => d.clone(),
         None => return Vec::new(),
     };
-    let root = match user_root(state, user) {
+    let root = match policy {
+        IdPolicy::CreateMissing => user_root(state, user),
+        IdPolicy::ExistingOnly => user_root_readonly(state, user),
+    };
+    let root = match root {
         Ok(r) => r,
         Err(e) => {
             log::error!("Cannot open the local card folder: {e}");
@@ -563,13 +717,29 @@ pub fn local_collections_for(
         }
     };
     let owner = user.map(|u| u.email.as_str());
-    match discover_local_collections(&root, &data_dir.join("db"), owner) {
+    let mut found = match discover_local_collections(&root, &data_dir.join("db"), owner, policy) {
         Ok(found) => found,
         Err(e) => {
             log::error!("Cannot list local collections: {e}");
-            Vec::new()
+            return Vec::new();
         }
-    }
+    };
+    // A folder can come to shadow a configured collection or a HedgeDoc note
+    // — the collection may be added later, or the folder dropped in by hand.
+    // Routing prefers those, so serving the folder anyway would list a row
+    // that leads somewhere else. Drop it with a warning instead.
+    let reserved = reserved_slugs(state, owner_key(user).as_deref());
+    found.retain(|c| match reserved.iter().find(|(slug, _)| *slug == c.slug) {
+        Some((slug, other)) => {
+            log::warn!(
+                "Local card folder `{}` is not served: `{other}` already uses the URL slug `{slug}`.",
+                c.name
+            );
+            false
+        }
+        None => true,
+    });
+    found
 }
 
 #[cfg(test)]
@@ -766,6 +936,209 @@ mod tests {
         )?;
         drop(db);
         assert!(any_card_has_history(db_str, &old)?);
+        Ok(())
+    }
+
+    /// An `AppState` whose local trees live under `data_dir` and which
+    /// serves `collections` as configured ones.
+    fn state_for(data_dir: &Path, collections: Vec<ResolvedCollection>) -> AppState {
+        crate::cmd::serve::state::test_support::state_with_data_dir(
+            data_dir.to_path_buf(),
+            collections,
+        )
+    }
+
+    fn configured(name: &str, slug: &str) -> ResolvedCollection {
+        ResolvedCollection {
+            name: name.to_string(),
+            slug: slug.to_string(),
+            coll_dir: PathBuf::from("/nonexistent"),
+            db_path: PathBuf::from("/nonexistent/x.db"),
+            owner: None,
+        }
+    }
+
+    #[test]
+    fn a_new_folder_may_not_shadow_a_configured_collection() -> Fallible<()> {
+        // Routing prefers configured collections, so a folder named after
+        // one would be undrillable while still showing up as its own row.
+        let dir = create_tmp_directory()?;
+        let state = state_for(&dir, vec![configured("Spanish", "Spanish")]);
+        let form = NewEntryForm {
+            parent: String::new(),
+            name: "Spanish".to_string(),
+        };
+
+        let error = match create_entry(&state, None, &form, true) {
+            Ok(_) => return fail("expected a slug collision error"),
+            Err(e) => e.to_string(),
+        };
+        assert!(error.contains("Spanish"), "got: {error}");
+        assert!(
+            !user_root(&state, None)?.path().join("Spanish").exists(),
+            "the folder must not be created"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_new_folder_may_not_shadow_another_local_folder_slug() -> Fallible<()> {
+        let dir = create_tmp_directory()?;
+        let state = state_for(&dir, Vec::new());
+        let first = NewEntryForm {
+            parent: String::new(),
+            name: "Verbs 1".to_string(),
+        };
+        create_entry(&state, None, &first, true)?;
+
+        let second = NewEntryForm {
+            parent: String::new(),
+            name: "Verbs-1".to_string(),
+        };
+        assert!(create_entry(&state, None, &second, true).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn a_subfolder_may_be_named_after_a_collection() -> Fallible<()> {
+        // Only top-level folders are collections, so nothing below the root
+        // shares the slug namespace.
+        let dir = create_tmp_directory()?;
+        let state = state_for(&dir, vec![configured("Spanish", "Spanish")]);
+        create_entry(
+            &state,
+            None,
+            &NewEntryForm {
+                parent: String::new(),
+                name: "Languages".to_string(),
+            },
+            true,
+        )?;
+        create_entry(
+            &state,
+            None,
+            &NewEntryForm {
+                parent: "Languages".to_string(),
+                name: "Spanish".to_string(),
+            },
+            true,
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn renaming_a_folder_onto_a_taken_slug_is_refused() -> Fallible<()> {
+        let dir = create_tmp_directory()?;
+        let state = state_for(&dir, vec![configured("Spanish", "Spanish")]);
+        create_entry(
+            &state,
+            None,
+            &NewEntryForm {
+                parent: String::new(),
+                name: "Espanol".to_string(),
+            },
+            true,
+        )?;
+
+        let form = RenameForm {
+            path: "Espanol".to_string(),
+            name: "Spanish".to_string(),
+        };
+        assert!(rename_entry(&state, None, &form).is_err());
+        // Renaming a folder to its own name is not a collision with itself.
+        let same = RenameForm {
+            path: "Espanol".to_string(),
+            name: "Espanol".to_string(),
+        };
+        assert!(rename_entry(&state, None, &same).is_err(), "already exists");
+        Ok(())
+    }
+
+    #[test]
+    fn a_local_folder_shadowing_a_configured_slug_is_not_listed() -> Fallible<()> {
+        // The folder can predate the collection, or be dropped in by hand.
+        let dir = create_tmp_directory()?;
+        let state = state_for(&dir, vec![configured("Spanish", "Spanish")]);
+        let root = user_root(&state, None)?;
+        std::fs::create_dir_all(root.path().join("Spanish"))?;
+        std::fs::create_dir_all(root.path().join("Medicine"))?;
+
+        let found = local_collections_for(&state, None);
+        let names: Vec<&str> = found.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["Medicine"]);
+        Ok(())
+    }
+
+    /// A save that cannot be completed must leave the file as it was: the
+    /// flash says "not saved", and the disk has to agree.
+    #[test]
+    fn a_save_outside_any_collection_folder_leaves_the_file_alone() -> Fallible<()> {
+        let dir = create_tmp_directory()?;
+        let state = state_for(&dir, Vec::new());
+        let root = user_root(&state, None)?;
+        let path = root.path().join("loose.md");
+        std::fs::write(&path, "Q: a\nA: b\n")?;
+
+        let form = SaveForm {
+            content: "Q: replaced\nA: replaced\n".to_string(),
+            mtime: file_mtime_ms(&path)?,
+        };
+        assert!(save_file(&state, None, "loose.md", &form).is_err());
+        assert_eq!(std::fs::read_to_string(&path)?, "Q: a\nA: b\n");
+        Ok(())
+    }
+
+    /// A file that does not parse any more — edited outside the UI, or
+    /// restored from elsewhere — must still be repairable in the editor.
+    #[test]
+    fn a_file_whose_content_does_not_parse_can_still_be_repaired() -> Fallible<()> {
+        let dir = create_tmp_directory()?;
+        let state = state_for(&dir, Vec::new());
+        let root = user_root(&state, None)?;
+        std::fs::create_dir_all(root.path().join("Spanish"))?;
+        let path = root.path().join("Spanish").join("verbs.md");
+        std::fs::write(&path, "Q: a question with no answer\n")?;
+
+        let fixed = "Q: the cat\nA: el gato\n";
+        let form = SaveForm {
+            content: fixed.to_string(),
+            mtime: file_mtime_ms(&path)?,
+        };
+        save_file(&state, None, "Spanish/verbs.md", &form)?;
+        assert_eq!(std::fs::read_to_string(&path)?, fixed);
+        Ok(())
+    }
+
+    #[test]
+    fn deleting_a_collection_folder_removes_its_review_database() -> Fallible<()> {
+        // Otherwise `{id}.db` is orphaned in `db/` while a folder recreated
+        // under the same name silently starts its history over.
+        let dir = create_tmp_directory()?;
+        let state = state_for(&dir, Vec::new());
+        create_entry(
+            &state,
+            None,
+            &NewEntryForm {
+                parent: String::new(),
+                name: "Spanish".to_string(),
+            },
+            true,
+        )?;
+        let root = user_root(&state, None)?;
+        let id = collection_id(&root.path().join("Spanish"))?;
+        let db_path = dir.join("db").join(format!("{id}.db"));
+        std::fs::create_dir_all(dir.join("db"))?;
+        std::fs::write(&db_path, "")?;
+
+        delete_entry(
+            &state,
+            None,
+            &DeleteForm {
+                path: "Spanish".to_string(),
+            },
+        )?;
+        assert!(!root.path().join("Spanish").exists());
+        assert!(!db_path.exists(), "the review database is orphaned");
         Ok(())
     }
 }

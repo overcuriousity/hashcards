@@ -9,8 +9,6 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use crate::cmd::drill::render::AnswerControls;
-use crate::cmd::serve::local::LocalRoot;
-use crate::cmd::serve::local::discover_local_collections;
 use crate::error::Fallible;
 use crate::error::fail;
 use crate::types::performance::Jitter;
@@ -306,11 +304,6 @@ pub struct ResolvedServeConfig {
     pub config_path: Option<PathBuf>,
     /// Remote source URLs loaded from the config file.
     pub hedgedoc_entries: Vec<SourceEntry>,
-    /// Collections discovered under `{data_dir}/local/{user}`. Only the
-    /// anonymous `default` tree is resolved here; under `[oidc]` each
-    /// user's tree is discovered per request, since it depends on who is
-    /// logged in.
-    pub local_collections: Vec<ResolvedCollection>,
     /// User-assembled cross-collection decks loaded from the config file.
     pub custom_decks: Vec<CustomDeckEntry>,
     /// Idle drill sessions are evicted after this many minutes (0 = never).
@@ -393,19 +386,12 @@ impl ResolvedServeConfig {
             })
             .collect::<Fallible<Vec<ResolvedCollection>>>()?;
 
-        // Local collections share the slug namespace with configured ones,
-        // so a folder must not be able to shadow a configured collection.
-        // Only the anonymous tree exists at startup; under `[oidc]` a user's
-        // tree is discovered once they are logged in.
-        let local_collections = if config.oidc.is_none() {
-            let local_root = LocalRoot::for_user(&data_dir, None)?;
-            discover_local_collections(&local_root, &db_dir, None)?
-        } else {
-            Vec::new()
-        };
-        let mut all_collections = collections.clone();
-        all_collections.extend(local_collections.iter().cloned());
-        check_slug_collisions(&all_collections)?;
+        // Local card folders share the slug namespace with configured
+        // collections, but they are the user's own writing: one that
+        // shadows a configured collection is dropped from discovery at
+        // runtime with a warning (see `local_collections_for`), rather than
+        // stopping the server from booting.
+        check_slug_collisions(&collections)?;
 
         let oidc = match config.oidc {
             None => None,
@@ -563,7 +549,6 @@ impl ResolvedServeConfig {
             data_dir: Some(data_dir),
             config_path: None,
             hedgedoc_entries,
-            local_collections,
             custom_decks,
             session_timeout_minutes: config.server.session_timeout_minutes,
             oidc,
@@ -621,7 +606,6 @@ impl ResolvedServeConfig {
             data_dir: None,
             config_path: None,
             hedgedoc_entries: Vec::new(),
-            local_collections: Vec::new(),
             custom_decks: Vec::new(),
             session_timeout_minutes: default_session_timeout_minutes(),
             oidc: None,
@@ -1079,6 +1063,28 @@ path = "beta"
             ResolvedServeConfig::from_toml(config).is_err(),
             "an `owner` without [oidc] must be rejected for decks too"
         );
+        Ok(())
+    }
+
+    /// A local card folder is the user's own writing, created through the
+    /// web UI or dropped in by hand. It must never be able to stop the
+    /// server from booting: a folder shadowing a configured collection is
+    /// dropped from discovery at runtime, with a warning.
+    #[test]
+    fn a_local_folder_shadowing_a_configured_collection_does_not_stop_startup() -> Fallible<()> {
+        let data_dir = crate::helper::create_tmp_directory()?;
+        let shadow = data_dir.join("local").join("default").join("japanese");
+        std::fs::create_dir_all(&shadow)?;
+        crate::cmd::serve::local::collection_id(&shadow)?;
+
+        let toml = format!(
+            "[server]\ndata_dir = {:?}\n\n\
+             [[collection]]\nname = \"Japanese\"\npath = \"japanese\"\n",
+            data_dir
+        );
+        let config: ServeConfig = toml::from_str(&toml)?;
+        let resolved = ResolvedServeConfig::from_toml(config)?;
+        assert_eq!(resolved.collections.len(), 1);
         Ok(())
     }
 }

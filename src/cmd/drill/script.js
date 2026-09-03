@@ -168,7 +168,7 @@ document.querySelectorAll('.editor-toolbar button[data-snippet]').forEach(functi
   var timer = null;
   function refresh() {
     var body = new URLSearchParams();
-    body.set('path', form.getAttribute('action').replace('/files/edit/', ''));
+    body.set('path', form.getAttribute('data-path'));
     body.set('content', textarea.value);
     fetch('/files/preview', {
       method: 'POST',

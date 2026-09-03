@@ -31,16 +31,17 @@ impl LocalRoot {
     /// The tree belonging to `owner`, creating it if absent. `None` is the
     /// shared `default` tree used when `[oidc]` is not configured.
     pub fn for_user(data_dir: &Path, owner: Option<&str>) -> Fallible<Self> {
-        let who = match owner {
-            Some(email) => slugify(&email.to_lowercase()),
-            None => "default".to_string(),
-        };
-        if who.is_empty() {
-            return fail("Cannot open a local card folder: the owner name is empty.");
-        }
-        let root = data_dir.join("local").join(who);
+        let root = root_path(data_dir, owner)?;
         ensure_dir(&root, "local card directory")?;
         Ok(Self { root })
+    }
+
+    /// The tree belonging to `owner`, without creating it. Read paths use
+    /// this: serving a page must not materialize directories.
+    pub fn open(data_dir: &Path, owner: Option<&str>) -> Fallible<Self> {
+        Ok(Self {
+            root: root_path(data_dir, owner)?,
+        })
     }
 
     pub fn path(&self) -> &Path {
@@ -92,6 +93,18 @@ impl LocalRoot {
     }
 }
 
+/// Where `owner`'s tree lives, whether or not it exists yet.
+fn root_path(data_dir: &Path, owner: Option<&str>) -> Fallible<PathBuf> {
+    let who = match owner {
+        Some(email) => slugify(&email.to_lowercase()),
+        None => "default".to_string(),
+    };
+    if who.is_empty() {
+        return fail("Cannot open a local card folder: the owner name is empty.");
+    }
+    Ok(data_dir.join("local").join(who))
+}
+
 /// Per-collection metadata file. Skipped by the parser (it is not `.md`)
 /// and hidden from the file manager.
 pub const LOCAL_META_FILE: &str = ".hashcards.toml";
@@ -108,14 +121,10 @@ struct LocalMeta {
 /// the clock and the process id rather than from the name, precisely so that
 /// a rename cannot change them.
 pub fn collection_id(folder: &Path) -> Fallible<String> {
-    let meta_path = folder.join(LOCAL_META_FILE);
-    if meta_path.exists() {
-        let text = read_to_string(&meta_path)?;
-        let meta: LocalMeta = toml::from_str(&text)?;
-        if !meta.id.is_empty() {
-            return Ok(meta.id);
-        }
+    if let Some(id) = existing_collection_id(folder)? {
+        return Ok(id);
     }
+    let meta_path = folder.join(LOCAL_META_FILE);
     let id = fresh_id(folder)?;
     let meta = LocalMeta { id: id.clone() };
     write(&meta_path, toml::to_string(&meta)?)?;
@@ -133,35 +142,85 @@ fn fresh_id(folder: &Path) -> Fallible<String> {
     Ok(blake3::hash(seed.as_bytes()).to_hex()[..8].to_string())
 }
 
+/// Whether discovery may give a folder that has none a stable id.
+///
+/// Read paths pass `ExistingOnly`: serving a page must not write into the
+/// user's tree. Pages that exist to show the tree (`/files`, the landing
+/// page) pass `CreateMissing`, off the async executor.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum IdPolicy {
+    CreateMissing,
+    ExistingOnly,
+}
+
+/// The id already recorded for `folder`, if any. Never writes.
+pub fn existing_collection_id(folder: &Path) -> Fallible<Option<String>> {
+    let meta_path = folder.join(LOCAL_META_FILE);
+    if !meta_path.exists() {
+        return Ok(None);
+    }
+    let text = read_to_string(&meta_path)?;
+    let meta: LocalMeta = toml::from_str(&text)?;
+    if meta.id.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(meta.id))
+}
+
 /// Every top-level folder in `root`, as a collection.
 ///
 /// Loose files directly under the root are ignored: a collection is a
 /// folder, so that a file always belongs to exactly one.
+///
+/// A folder hashcards cannot make sense of is skipped with a warning rather
+/// than failing the whole listing: one malformed `.hashcards.toml` must not
+/// make every other collection disappear from the landing page. Folders are
+/// visited in name order, so which of two names that slugify alike wins does
+/// not depend on the order the filesystem happened to list them in.
 pub fn discover_local_collections(
     root: &LocalRoot,
     db_dir: &Path,
     owner: Option<&str>,
+    policy: IdPolicy,
 ) -> Fallible<Vec<ResolvedCollection>> {
-    let mut collections = Vec::new();
+    let mut collections: Vec<ResolvedCollection> = Vec::new();
     if !root.path().exists() {
         return Ok(collections);
     }
+    let mut names = Vec::new();
     for entry in read_dir(root.path())? {
         let entry = entry?;
         let path = entry.path();
         if !path.is_dir() || path.is_symlink() {
             continue;
         }
-        let name = match path.file_name().and_then(|n| n.to_str()) {
-            Some(n) => n.to_string(),
-            None => continue,
+        match path.file_name().and_then(|n| n.to_str()) {
+            Some(n) if !n.starts_with('.') => names.push(n.to_string()),
+            _ => continue,
+        }
+    }
+    names.sort();
+
+    for name in names {
+        let path = root.path().join(&name);
+        let id = match folder_id(&path, policy) {
+            Ok(Some(id)) => id,
+            Ok(None) => continue,
+            Err(e) => {
+                log::warn!("Skipping local collection `{name}`: {e}");
+                continue;
+            }
         };
-        if name.starts_with('.') {
+        let slug = slugify(&name);
+        if let Some(first) = collections.iter().find(|c| c.slug == slug) {
+            log::warn!(
+                "Skipping local collection `{name}`: it maps to the same URL slug `{slug}` as `{}`.",
+                first.name
+            );
             continue;
         }
-        let id = collection_id(&path)?;
         collections.push(ResolvedCollection {
-            slug: slugify(&name),
+            slug,
             name,
             coll_dir: path,
             db_path: db_dir.join(format!("{id}.db")),
@@ -169,6 +228,15 @@ pub fn discover_local_collections(
         });
     }
     Ok(collections)
+}
+
+/// The id of one folder under `policy`. `None` means "no id yet, and this
+/// caller may not create one".
+fn folder_id(path: &Path, policy: IdPolicy) -> Fallible<Option<String>> {
+    match policy {
+        IdPolicy::CreateMissing => Ok(Some(collection_id(path)?)),
+        IdPolicy::ExistingOnly => existing_collection_id(path),
+    }
 }
 
 #[cfg(test)]
@@ -287,7 +355,12 @@ mod tests {
         std::fs::write(root.path().join("loose.md"), "Q: a\nA: b\n")?;
 
         let db_dir = dir.join("db");
-        let mut found = discover_local_collections(&root, &db_dir, Some("me@example.com"))?;
+        let mut found = discover_local_collections(
+            &root,
+            &db_dir,
+            Some("me@example.com"),
+            IdPolicy::CreateMissing,
+        )?;
         found.sort_by(|a, b| a.name.cmp(&b.name));
 
         assert_eq!(found.len(), 2);
@@ -305,27 +378,64 @@ mod tests {
         let id = collection_id(&folder)?;
 
         let db_dir = dir.join("db");
-        let found = discover_local_collections(&root, &db_dir, None)?;
+        let found = discover_local_collections(&root, &db_dir, None, IdPolicy::CreateMissing)?;
         assert_eq!(found[0].db_path, db_dir.join(format!("{id}.db")));
         Ok(())
     }
 
     #[test]
-    fn local_slugs_are_checked_against_configured_collections() -> Fallible<()> {
+    fn discovery_skips_a_folder_whose_metadata_is_broken() -> Fallible<()> {
+        // One unreadable `.hashcards.toml` must not take every other local
+        // collection down with it.
         let (dir, root) = fixture()?;
-        std::fs::create_dir_all(root.path().join("Spanish"))?;
-        let db_dir = dir.join("db");
+        let broken = root.path().join("Spanish");
+        std::fs::create_dir_all(&broken)?;
+        std::fs::write(broken.join(LOCAL_META_FILE), "this is not toml {{{")?;
+        std::fs::create_dir_all(root.path().join("Medicine"))?;
 
-        let mut all = vec![ResolvedCollection {
-            name: "Spanish".to_string(),
-            slug: "Spanish".to_string(),
-            coll_dir: dir.join("repo").join("es"),
-            db_path: db_dir.join("Spanish.db"),
-            owner: None,
-        }];
-        all.extend(discover_local_collections(&root, &db_dir, None)?);
+        let found =
+            discover_local_collections(&root, &dir.join("db"), None, IdPolicy::CreateMissing)?;
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].name, "Medicine");
+        Ok(())
+    }
 
-        assert!(crate::cmd::serve::config::check_slug_collisions(&all).is_err());
+    #[test]
+    fn read_only_discovery_writes_no_metadata_file() -> Fallible<()> {
+        let (dir, root) = fixture()?;
+        let folder = root.path().join("Spanish");
+        std::fs::create_dir_all(&folder)?;
+
+        let found =
+            discover_local_collections(&root, &dir.join("db"), None, IdPolicy::ExistingOnly)?;
+        assert!(found.is_empty(), "a folder with no id yet must be skipped");
+        assert!(!folder.join(LOCAL_META_FILE).exists(), "read path wrote");
+        Ok(())
+    }
+
+    #[test]
+    fn discovery_keeps_one_of_two_folders_that_slugify_alike() -> Fallible<()> {
+        // `slugify` maps both names to `Verbs-1`; serving both would make
+        // `/collection/Verbs-1` mean whichever `read_dir` yielded first.
+        let (dir, root) = fixture()?;
+        std::fs::create_dir_all(root.path().join("Verbs 1"))?;
+        std::fs::create_dir_all(root.path().join("Verbs-1"))?;
+
+        let found =
+            discover_local_collections(&root, &dir.join("db"), None, IdPolicy::CreateMissing)?;
+        assert_eq!(found.len(), 1);
+        assert_eq!(
+            found[0].name, "Verbs 1",
+            "the first name by sort order wins"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn opening_a_tree_does_not_create_it() -> Fallible<()> {
+        let dir = create_tmp_directory()?;
+        let root = LocalRoot::open(&dir, Some("me@example.com"))?;
+        assert!(!root.path().exists());
         Ok(())
     }
 }

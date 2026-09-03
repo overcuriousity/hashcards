@@ -212,6 +212,16 @@ Renaming a folder is safe. Each one keeps a `.hashcards.toml` holding a stable
 id, and review databases are named from that id rather than from the folder
 name, so your history follows the rename.
 
+A collection folder cannot take the URL slug of a collection or source that
+already exists — routing prefers those, so the folder would be unreachable.
+Names are rejected when you create or rename a folder; a folder that comes to
+collide later (a `[[collection]]` added afterwards, or a folder copied in by
+hand) is left out of the collection list with a warning in the log rather than
+stopping the server.
+
+Deleting a collection folder deletes its review database with it. Folders that
+still hold files are refused, so this only happens once you have emptied one.
+
 Rewording a card keeps its schedule: on save, hashcards matches the new cards
 against the old ones by content and carries the review history across.
 

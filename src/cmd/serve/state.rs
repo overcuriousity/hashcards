@@ -212,7 +212,27 @@ pub mod test_support {
             data_dir: None,
             config_path: None,
             hedgedoc_entries: Vec::new(),
-            local_collections: Vec::new(),
+            custom_decks: Vec::new(),
+            session_timeout_minutes: 1440,
+            oidc: None,
+        })
+    }
+
+    /// An `AppState` whose local card trees live under `data_dir`, serving
+    /// `collections` as configured ones.
+    pub fn state_with_data_dir(
+        data_dir: PathBuf,
+        collections: Vec<ResolvedCollection>,
+    ) -> AppState {
+        state_with_config(ResolvedServeConfig {
+            host: "127.0.0.1".to_string(),
+            port: 0,
+            git: None,
+            defaults: DefaultsSection::default(),
+            collections,
+            data_dir: Some(data_dir),
+            config_path: None,
+            hedgedoc_entries: Vec::new(),
             custom_decks: Vec::new(),
             session_timeout_minutes: 1440,
             oidc: None,

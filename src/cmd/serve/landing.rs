@@ -68,8 +68,13 @@ pub async fn landing_handler(
     // cached list: a folder created a moment ago must appear at once, and it
     // is the user's own writing, not a remote that syncs on a timer.
     let local_infos = {
-        let local = local_collections_for(&state, current_user.as_ref());
-        match tokio::task::spawn_blocking(move || refresh_collection_info(&local)).await {
+        let state = state.clone();
+        let user = current_user.clone();
+        match tokio::task::spawn_blocking(move || {
+            refresh_collection_info(&local_collections_for(&state, user.as_ref()))
+        })
+        .await
+        {
             Ok(infos) => infos,
             Err(e) => {
                 log::error!("Failed to count local collections: {e}");

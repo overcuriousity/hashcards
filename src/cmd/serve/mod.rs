@@ -59,7 +59,6 @@ mod tests {
             data_dir: None,
             config_path: None,
             hedgedoc_entries: Vec::new(),
-            local_collections: Vec::new(),
             custom_decks: Vec::new(),
             session_timeout_minutes: 1440,
             oidc: None,
@@ -223,7 +222,6 @@ mod tests {
             data_dir: Some(data_dir.clone()),
             config_path: None,
             hedgedoc_entries: Vec::new(),
-            local_collections: Vec::new(),
             custom_decks: Vec::new(),
             session_timeout_minutes: 1440,
             oidc: None,
@@ -292,7 +290,6 @@ mod tests {
             data_dir: None,
             config_path: None,
             hedgedoc_entries: Vec::new(),
-            local_collections: Vec::new(),
             custom_decks: Vec::new(),
             session_timeout_minutes: 1440,
             oidc: None,
@@ -419,7 +416,6 @@ mod tests {
             data_dir: Some(data_dir.clone()),
             config_path: Some(config_path.clone()),
             hedgedoc_entries: Vec::new(),
-            local_collections: Vec::new(),
             custom_decks: Vec::new(),
             session_timeout_minutes: 1440,
             oidc: None,
@@ -475,7 +471,6 @@ mod tests {
             data_dir: None,
             config_path: None,
             hedgedoc_entries: Vec::new(),
-            local_collections: Vec::new(),
             custom_decks: Vec::new(),
             session_timeout_minutes: 1440,
             oidc: None,
@@ -555,7 +550,6 @@ mod tests {
             data_dir: None,
             config_path: None,
             hedgedoc_entries: Vec::new(),
-            local_collections: Vec::new(),
             custom_decks: Vec::new(),
             session_timeout_minutes: 1440,
             oidc: None,
@@ -632,7 +626,6 @@ mod tests {
             data_dir: None,
             config_path: None,
             hedgedoc_entries: Vec::new(),
-            local_collections: Vec::new(),
             custom_decks: Vec::new(),
             session_timeout_minutes: 1440,
             oidc: None,
@@ -691,7 +684,6 @@ mod tests {
             data_dir: None,
             config_path: None,
             hedgedoc_entries: Vec::new(),
-            local_collections: Vec::new(),
             custom_decks: Vec::new(),
             session_timeout_minutes: 1440,
             oidc: None,
@@ -744,6 +736,54 @@ mod tests {
             !body.contains("deck-tree"),
             "deck browser rendered instead of the surviving session"
         );
+        Ok(())
+    }
+
+    /// A file name may hold `#` or `?`, which end a URL's path. The tree
+    /// links to it and the editor posts back to it percent-encoded, and axum
+    /// decodes the path parameter, so the round trip has to land on the file
+    /// the user actually clicked.
+    #[tokio::test]
+    async fn test_a_file_named_with_a_url_delimiter_opens_in_the_editor() -> Fallible<()> {
+        let dir = tempdir()?;
+        let data_dir = dir.path().to_path_buf();
+        let port = pick_unused_port().unwrap();
+        let config = ResolvedServeConfig {
+            host: TEST_HOST.to_string(),
+            port,
+            git: None,
+            defaults: DefaultsSection::default(),
+            collections: Vec::new(),
+            data_dir: Some(data_dir.clone()),
+            config_path: None,
+            hedgedoc_entries: Vec::new(),
+            custom_decks: Vec::new(),
+            session_timeout_minutes: 1440,
+            oidc: None,
+        };
+        spawn(async move { start_serve(config).await });
+        wait_for_server(TEST_HOST, port).await?;
+
+        let folder = data_dir.join("local").join("default").join("Spanish");
+        std::fs::create_dir_all(&folder)?;
+        write(folder.join("a#b.md"), "Q: the cat\nA: el gato\n")?;
+
+        let tree = reqwest::get(format!("http://{TEST_HOST}:{port}/files"))
+            .await?
+            .text()
+            .await?;
+        assert!(
+            tree.contains("/files/edit/Spanish/a%23b.md"),
+            "tree: {tree}"
+        );
+
+        let page = reqwest::get(format!(
+            "http://{TEST_HOST}:{port}/files/edit/Spanish/a%23b.md"
+        ))
+        .await?
+        .text()
+        .await?;
+        assert!(page.contains("el gato"), "page: {page}");
         Ok(())
     }
 }
