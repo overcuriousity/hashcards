@@ -47,6 +47,8 @@ use crate::cmd::serve::decks::resolve_custom_decks;
 use crate::cmd::serve::edit::edit_get_handler;
 use crate::cmd::serve::edit::edit_post_handler;
 use crate::cmd::serve::export::collection_export_handler;
+use crate::cmd::serve::files::editor_get_handler;
+use crate::cmd::serve::files::editor_post_handler;
 use crate::cmd::serve::files::files_delete_handler;
 use crate::cmd::serve::files::files_file_handler;
 use crate::cmd::serve::files::files_folder_handler;
@@ -370,6 +372,8 @@ pub async fn start_serve(config: ResolvedServeConfig) -> Fallible<()> {
         .route("/files/file", post(files_file_handler))
         .route("/files/rename", post(files_rename_handler))
         .route("/files/delete", post(files_delete_handler))
+        .route("/files/edit/{*path}", get(editor_get_handler))
+        .route("/files/edit/{*path}", post(editor_post_handler))
         .route("/hedgedoc", get(hedgedoc_manage_handler))
         .route("/hedgedoc/add", post(hedgedoc_add_handler))
         .route("/hedgedoc/delete", post(hedgedoc_delete_handler))

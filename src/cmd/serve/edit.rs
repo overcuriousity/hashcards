@@ -403,7 +403,7 @@ fn tmp_path_for(file_path: &Path) -> PathBuf {
 }
 
 /// Write `content` to `file_path` atomically (tmp file + rename).
-fn write_atomic(file_path: &Path, content: &str) -> Fallible<()> {
+pub(crate) fn write_atomic(file_path: &Path, content: &str) -> Fallible<()> {
     let tmp = tmp_path_for(file_path);
     std::fs::write(&tmp, content)?;
     std::fs::rename(&tmp, file_path)?;
@@ -414,7 +414,7 @@ fn write_atomic(file_path: &Path, content: &str) -> Fallible<()> {
 ///
 /// A failure here means the rejected edit is still on disk, so the error
 /// says so explicitly instead of being swallowed.
-fn revert_file(file_path: &Path, original: &str) -> Fallible<()> {
+pub(crate) fn revert_file(file_path: &Path, original: &str) -> Fallible<()> {
     write_atomic(file_path, original).map_err(|e| {
         ErrorReport::new(format!(
             "Failed to revert {} after a rejected edit: {e}. The file may be inconsistent — check it by hand before editing again.",
@@ -454,7 +454,7 @@ fn migration_key(card: &Card) -> Option<String> {
 /// changed new card share the same key. Everything else is inserted fresh;
 /// if old history went unmatched in the process, the fresh cards are counted
 /// as skipped so the user can be told.
-fn plan_hash_migration(old_cards: &[&Card], new_cards: &[&Card]) -> MigrationPlan {
+pub(crate) fn plan_hash_migration(old_cards: &[&Card], new_cards: &[&Card]) -> MigrationPlan {
     // Hashes present on both sides are unchanged cards: no work needed.
     let old_set: BTreeSet<CardHash> = old_cards.iter().map(|c| c.hash()).collect();
     let new_set: BTreeSet<CardHash> = new_cards.iter().map(|c| c.hash()).collect();
@@ -518,7 +518,7 @@ fn find_card_by_hash(cards: &[Card], hash: CardHash) -> Fallible<&Card> {
     })
 }
 
-fn file_mtime_ms(path: &Path) -> Fallible<u64> {
+pub(crate) fn file_mtime_ms(path: &Path) -> Fallible<u64> {
     let meta = std::fs::metadata(path)?;
     let mtime = meta.modified()?;
     let ms = mtime

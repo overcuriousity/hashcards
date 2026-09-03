@@ -61,3 +61,40 @@ pub fn render_tree_page(tree: &[TreeEntry], flash: Option<Flash>) -> Markup {
         }
     })
 }
+
+/// The document editor: raw markdown on the left with insert buttons, a
+/// live parse preview on the right.
+pub fn render_editor_page(
+    rel_path: &str,
+    content: &str,
+    mtime: u64,
+    flash: Option<Flash>,
+) -> Markup {
+    page_template(html! {
+        div.editor {
+            @if let Some(f) = &flash { (f.render()) }
+            h1 { (rel_path) }
+            p { a.back-link href="/files" { "← Back to my cards" } }
+
+            div.editor-toolbar {
+                button type="button" data-snippet="Q: \nA: " { "Q/A" }
+                button type="button" data-snippet="C: The [answer] goes here." { "Cloze" }
+                button type="button" data-snippet="T: \nD: " { "Term" }
+                button type="button" data-snippet="\n---\n" { "Separator" }
+                button type="button" data-snippet="$$\n\n$$" { "LaTeX" }
+                button type="button" data-snippet="![](image.png)" { "Image" }
+            }
+
+            div.editor-panes {
+                form #editor-form action=(format!("/files/edit/{rel_path}")) method="post" {
+                    input type="hidden" name="mtime" value=(mtime);
+                    textarea #editor-text name="content" spellcheck="false" { (content) }
+                    input type="submit" value="Save";
+                }
+                div #preview .preview-pane {
+                    p.hint { "Start typing to see your cards." }
+                }
+            }
+        }
+    })
+}

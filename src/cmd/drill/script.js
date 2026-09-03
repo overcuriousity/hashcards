@@ -142,3 +142,18 @@ document.addEventListener("DOMContentLoaded", function () {
   paint();
   btn.hidden = false;
 });
+
+// Markdown editor: insert a card skeleton at the caret.
+document.querySelectorAll('.editor-toolbar button[data-snippet]').forEach(function (button) {
+  button.addEventListener('click', function () {
+    var textarea = document.getElementById('editor-text');
+    if (!textarea) return;
+    var snippet = button.getAttribute('data-snippet');
+    var start = textarea.selectionStart;
+    var end = textarea.selectionEnd;
+    textarea.value = textarea.value.slice(0, start) + snippet + textarea.value.slice(end);
+    textarea.selectionStart = textarea.selectionEnd = start + snippet.length;
+    textarea.focus();
+    textarea.dispatchEvent(new Event('input'));
+  });
+});

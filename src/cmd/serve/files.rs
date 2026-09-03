@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::collections::HashMap;
 
 use axum::Form;
+use axum::extract::Path as AxumPath;
 use axum::extract::Query;
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -13,14 +14,25 @@ use axum::response::Redirect;
 use serde::Deserialize;
 
 use crate::cmd::serve::auth::CurrentUser;
+use crate::cmd::serve::edit::file_mtime_ms;
+use crate::cmd::serve::edit::plan_hash_migration;
+use crate::cmd::serve::edit::revert_file;
+use crate::cmd::serve::edit::write_atomic;
+use crate::cmd::serve::files_ui::render_editor_page;
 use crate::cmd::serve::files_ui::render_tree_page;
 use crate::cmd::serve::local::LOCAL_META_FILE;
 use crate::cmd::serve::local::LocalRoot;
 use crate::cmd::serve::local::collection_id;
 use crate::cmd::serve::state::AppState;
+use crate::db::Database;
 use crate::error::Fallible;
 use crate::error::fail;
 use crate::flash::Flash;
+use crate::parser::ParsedFile;
+use crate::parser::Parser;
+use crate::parser::strip_frontmatter_with_offset;
+use crate::types::card::Card;
+use crate::types::timestamp::Timestamp;
 
 /// Seed content for a new card file, also offered for copying on the
 /// Sources page. Frontmatter is TOML, matching `parse_deck`.
@@ -313,6 +325,173 @@ fn delete_entry(
     Ok(format!("Deleted `{}`.", form.path))
 }
 
+/// The review database of the collection a local file belongs to.
+///
+/// A collection is a top-level folder, so a file directly under the root
+/// belongs to none and cannot be reviewed — the editor refuses it rather
+/// than inventing a database for it.
+pub fn db_path_for(root: &LocalRoot, db_dir: &Path, rel: &str) -> Fallible<PathBuf> {
+    let trimmed = rel.trim_matches('/');
+    let top = match trimmed.split('/').next() {
+        Some(t) if !t.is_empty() => t.to_string(),
+        _ => return fail(format!("`{rel}` is not inside a collection folder.")),
+    };
+    if !trimmed.contains('/') {
+        return fail(format!(
+            "`{rel}` sits directly in your card folder. Move it into a collection folder so its reviews have somewhere to go."
+        ));
+    }
+    let folder = root.resolve(&top)?;
+    if !folder.is_dir() {
+        return fail(format!("`{top}` is not a collection folder."));
+    }
+    let id = collection_id(&folder)?;
+    Ok(db_dir.join(format!("{id}.db")))
+}
+
+/// Parse an unsaved buffer as the file at `rel` would be parsed on disk.
+///
+/// The deck name comes from the filename, the line offset from the TOML
+/// frontmatter, so reported error lines match what is in the textarea.
+pub fn parse_buffer(rel: &str, content: &str) -> Fallible<ParsedFile> {
+    let (body, offset) = strip_frontmatter_with_offset(content)?;
+    let deck_name = rel
+        .rsplit('/')
+        .next()
+        .unwrap_or(rel)
+        .trim_end_matches(".md")
+        .to_string();
+    let parser = Parser::new(deck_name, PathBuf::from(rel), offset);
+    Ok(parser.parse_with_duplicates(body)?)
+}
+
+#[derive(Deserialize)]
+pub struct SaveForm {
+    pub content: String,
+    /// The mtime the browser loaded, so a save cannot silently overwrite a
+    /// change made elsewhere. Same guard the card editor uses.
+    pub mtime: u64,
+}
+
+pub async fn editor_get_handler(
+    State(state): State<AppState>,
+    AxumPath(rel): AxumPath<String>,
+    Query(query): Query<HashMap<String, String>>,
+    current_user: Option<CurrentUser>,
+) -> (StatusCode, Html<String>) {
+    let flash = Flash::from_query(&query);
+    let markup = match load_for_edit(&state, current_user.as_ref(), &rel) {
+        Ok((content, mtime)) => render_editor_page(&rel, &content, mtime, flash),
+        Err(e) => render_editor_page(&rel, "", 0, Some(Flash::error(e.to_string()))),
+    };
+    (StatusCode::OK, Html(markup.into_string()))
+}
+
+fn load_for_edit(
+    state: &AppState,
+    user: Option<&CurrentUser>,
+    rel: &str,
+) -> Fallible<(String, u64)> {
+    let root = user_root(state, user)?;
+    let path = root.resolve(rel)?;
+    if !path.is_file() {
+        return fail(format!("`{rel}` is not a file."));
+    }
+    let content = std::fs::read_to_string(&path)?;
+    let mtime = file_mtime_ms(&path)?;
+    Ok((content, mtime))
+}
+
+pub async fn editor_post_handler(
+    State(state): State<AppState>,
+    AxumPath(rel): AxumPath<String>,
+    current_user: Option<CurrentUser>,
+    Form(form): Form<SaveForm>,
+) -> Redirect {
+    let target = format!("/files/edit/{rel}");
+    match save_file(&state, current_user.as_ref(), &rel, &form) {
+        Ok(msg) => Flash::success(msg).redirect(&target),
+        Err(e) => Flash::error(e.to_string()).redirect(&target),
+    }
+}
+
+/// Write the buffer, reparse it, and migrate card hashes so a reworded card
+/// keeps its schedule. A buffer that does not parse never stays on disk.
+fn save_file(
+    state: &AppState,
+    user: Option<&CurrentUser>,
+    rel: &str,
+    form: &SaveForm,
+) -> Fallible<String> {
+    let root = user_root(state, user)?;
+    let path = root.resolve(rel)?;
+    if !path.is_file() {
+        return fail(format!("`{rel}` is not a file."));
+    }
+
+    if file_mtime_ms(&path)? != form.mtime {
+        return fail(
+            "This file changed since you opened it. Reload the page and reapply your edit.",
+        );
+    }
+
+    let original = std::fs::read_to_string(&path)?;
+    let old_cards = parse_buffer(rel, &original)?.cards;
+
+    write_atomic(&path, &form.content)?;
+    let new_cards = match parse_buffer(rel, &form.content) {
+        Ok(parsed) => parsed.cards,
+        Err(e) => {
+            revert_file(&path, &original)?;
+            return fail(format!("Not saved — {e}"));
+        }
+    };
+
+    let db_dir = match &state.config.data_dir {
+        Some(d) => d.join("db"),
+        None => return fail("No data directory is configured."),
+    };
+    let db_path = db_path_for(&root, &db_dir, rel)?;
+    let old_refs: Vec<&Card> = old_cards.iter().collect();
+    let new_refs: Vec<&Card> = new_cards.iter().collect();
+    let plan = plan_hash_migration(&old_refs, &new_refs);
+
+    // `Database::new` takes a &str; a non-UTF-8 data directory cannot be
+    // named to SQLite at all, so say so rather than lossily converting.
+    let db_path_str = match db_path.to_str() {
+        Some(p) => p,
+        None => {
+            revert_file(&path, &original)?;
+            return fail(format!(
+                "Not saved — the database path is not valid UTF-8: {}",
+                db_path.display()
+            ));
+        }
+    };
+    let mut db = Database::new(db_path_str)?;
+    // One transaction. If it fails, put the file back rather than leaving a
+    // rewritten file behind a half-migrated database.
+    let counts = match db.apply_edit_migration(&plan.renames, &plan.fresh, Timestamp::now()) {
+        Ok(counts) => counts,
+        Err(e) => {
+            revert_file(&path, &original)?;
+            return fail(format!(
+                "Not saved — the review history could not be updated: {e}"
+            ));
+        }
+    };
+
+    let skipped = plan.skipped + counts.collided;
+    if skipped > 0 {
+        Ok(format!(
+            "Saved {} cards. {skipped} could not be matched to their old review history and start fresh.",
+            new_cards.len()
+        ))
+    } else {
+        Ok(format!("Saved {} cards.", new_cards.len()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -395,6 +574,46 @@ mod tests {
         let dir = create_tmp_directory()?;
         let root = LocalRoot::for_user(&dir, None)?;
         assert!(!root.path().starts_with(dir.join("repo")));
+        Ok(())
+    }
+
+    #[test]
+    fn db_path_comes_from_the_top_level_folder_id() -> Fallible<()> {
+        let dir = create_tmp_directory()?;
+        let root = LocalRoot::for_user(&dir, None)?;
+        let folder = root.path().join("Spanish");
+        std::fs::create_dir_all(&folder)?;
+        std::fs::write(folder.join("verbs.md"), "Q: a\nA: b\n")?;
+        let id = crate::cmd::serve::local::collection_id(&folder)?;
+
+        let db_dir = dir.join("db");
+        let path = db_path_for(&root, &db_dir, "Spanish/verbs.md")?;
+        assert_eq!(path, db_dir.join(format!("{id}.db")));
+        Ok(())
+    }
+
+    #[test]
+    fn a_file_outside_any_collection_folder_is_rejected() -> Fallible<()> {
+        let dir = create_tmp_directory()?;
+        let root = LocalRoot::for_user(&dir, None)?;
+        std::fs::write(root.path().join("loose.md"), "Q: a\nA: b\n")?;
+        assert!(db_path_for(&root, &dir.join("db"), "loose.md").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn parse_buffer_names_the_deck_after_the_file() -> Fallible<()> {
+        let parsed = parse_buffer("Spanish/verbs.md", "Q: the cat\nA: el gato\n")?;
+        assert_eq!(parsed.cards.len(), 1);
+        assert_eq!(parsed.cards[0].deck_name(), "verbs");
+        Ok(())
+    }
+
+    #[test]
+    fn parse_buffer_honours_toml_frontmatter_offset() -> Fallible<()> {
+        let text = "---\nname = \"Custom\"\n---\n\nQ: a\nA: b\n";
+        let parsed = parse_buffer("Spanish/verbs.md", text)?;
+        assert_eq!(parsed.cards.len(), 1);
         Ok(())
     }
 }
