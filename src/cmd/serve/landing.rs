@@ -11,6 +11,8 @@ use chrono::Duration;
 
 use crate::cmd::drill::template::page_template;
 use crate::cmd::serve::auth::CurrentUser;
+use crate::cmd::serve::files::local_collections_for;
+use crate::cmd::serve::git::refresh_collection_info;
 use crate::cmd::serve::hedgedoc::build_combined_infos;
 use crate::cmd::serve::state::AppState;
 use crate::cmd::serve::state::CollectionInfo;
@@ -33,7 +35,7 @@ pub async fn landing_handler(
     current_user: Option<CurrentUser>,
 ) -> (StatusCode, Html<String>) {
     let flash = Flash::from_query(&query);
-    let owner = current_user.map(|u| u.email);
+    let owner = current_user.as_ref().map(|u| u.email.clone());
 
     // BUG-45: recompute counts when they are older than the poll interval.
     let interval_minutes = state
@@ -62,9 +64,24 @@ pub async fn landing_handler(
         }
     }
 
+    // Local collections are discovered per request rather than read from the
+    // cached list: a folder created a moment ago must appear at once, and it
+    // is the user's own writing, not a remote that syncs on a timer.
+    let local_infos = {
+        let local = local_collections_for(&state, current_user.as_ref());
+        match tokio::task::spawn_blocking(move || refresh_collection_info(&local)).await {
+            Ok(infos) => infos,
+            Err(e) => {
+                log::error!("Failed to count local collections: {e}");
+                Vec::new()
+            }
+        }
+    };
+
     let all_collections = state.collections.read().await;
     let collections: Vec<&CollectionInfo> = all_collections
         .iter()
+        .chain(local_infos.iter())
         .filter(|c| c.owner.as_deref() == owner.as_deref())
         .collect();
     let last_synced = *state.last_synced.lock();

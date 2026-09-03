@@ -14,6 +14,7 @@ use axum::response::Redirect;
 use serde::Deserialize;
 
 use crate::cmd::serve::auth::CurrentUser;
+use crate::cmd::serve::config::ResolvedCollection;
 use crate::cmd::serve::edit::file_mtime_ms;
 use crate::cmd::serve::edit::plan_hash_migration;
 use crate::cmd::serve::edit::revert_file;
@@ -24,6 +25,7 @@ use crate::cmd::serve::files_ui::render_tree_page;
 use crate::cmd::serve::local::LOCAL_META_FILE;
 use crate::cmd::serve::local::LocalRoot;
 use crate::cmd::serve::local::collection_id;
+use crate::cmd::serve::local::discover_local_collections;
 use crate::cmd::serve::state::AppState;
 use crate::db::Database;
 use crate::error::Fallible;
@@ -33,6 +35,7 @@ use crate::parser::ParsedFile;
 use crate::parser::Parser;
 use crate::parser::strip_frontmatter_with_offset;
 use crate::types::card::Card;
+use crate::types::performance::Performance;
 use crate::types::timestamp::Timestamp;
 
 /// Seed content for a new card file, also offered for copying on the
@@ -482,8 +485,11 @@ fn save_file(
         }
     };
 
+    // Only mention unmatched cards when there was history to lose: on a file
+    // nobody has drilled, every card is "unmatched" and saying so is noise.
     let skipped = plan.skipped + counts.collided;
-    if skipped > 0 {
+    let worth_reporting = skipped > 0 && any_card_has_history(db_path_str, &old_cards)?;
+    if worth_reporting {
         Ok(format!(
             "Saved {} cards. {skipped} could not be matched to their old review history and start fresh.",
             new_cards.len()
@@ -514,6 +520,56 @@ pub async fn preview_handler(
         Err(e) => maud::html! { div.preview-error { p { (e.to_string()) } } },
     };
     Html(markup.into_string())
+}
+
+/// Whether any of these cards has actually been reviewed.
+///
+/// Used to decide whether a save is worth warning about: replacing cards in
+/// a file nobody has drilled loses nothing, and saying otherwise makes every
+/// first edit of a freshly created file look alarming.
+///
+/// Note the predicate is `Reviewed`, not "a row exists": loading a
+/// collection inserts a row per card, so `get_card_performance_opt` returns
+/// `Some(Performance::New)` for cards nobody has ever seen.
+fn any_card_has_history(db_path: &str, cards: &[Card]) -> Fallible<bool> {
+    let db = Database::new(db_path)?;
+    for card in cards {
+        if let Some(Performance::Reviewed(_)) = db.get_card_performance_opt(card.hash())? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// The caller's local collections, discovered fresh.
+///
+/// Not cached: a folder created a moment ago must show up immediately, and
+/// a directory listing is cheap next to the count refresh that follows it.
+/// Discovery failures are logged and treated as "no local collections"
+/// rather than taken down the whole page.
+pub fn local_collections_for(
+    state: &AppState,
+    user: Option<&CurrentUser>,
+) -> Vec<ResolvedCollection> {
+    let data_dir = match &state.config.data_dir {
+        Some(d) => d,
+        None => return Vec::new(),
+    };
+    let root = match user_root(state, user) {
+        Ok(r) => r,
+        Err(e) => {
+            log::error!("Cannot open the local card folder: {e}");
+            return Vec::new();
+        }
+    };
+    let owner = user.map(|u| u.email.as_str());
+    match discover_local_collections(&root, &data_dir.join("db"), owner) {
+        Ok(found) => found,
+        Err(e) => {
+            log::error!("Cannot list local collections: {e}");
+            Vec::new()
+        }
+    }
 }
 
 #[cfg(test)]
@@ -669,6 +725,47 @@ mod tests {
         )
         .into_string();
         assert!(html.contains("does not parse"), "got: {html}");
+        Ok(())
+    }
+
+    #[test]
+    fn lost_history_is_reported_only_when_cards_were_actually_reviewed() -> Fallible<()> {
+        // Replacing the seeded template's cards on a file nobody has drilled
+        // must not warn about review history: there was none to lose.
+        let dir = create_tmp_directory()?;
+        let db_path = dir.join("empty.db");
+        let db_str = db_path.to_str().expect("temp path is UTF-8");
+        let db = crate::db::Database::new(db_str)?;
+        drop(db);
+
+        let old = parse_buffer("Spanish/verbs.md", CARD_TEMPLATE)?.cards;
+
+        // A row exists per card once a collection is loaded, but nobody has
+        // reviewed them, so there is no history to lose.
+        let db = crate::db::Database::new(db_str)?;
+        let now = crate::types::timestamp::Timestamp::now();
+        for card in &old {
+            db.insert_card(card.hash(), now)?;
+        }
+        drop(db);
+        assert!(!any_card_has_history(db_str, &old)?);
+
+        // Once one is actually reviewed, the warning must fire again.
+        let db = crate::db::Database::new(db_str)?;
+        db.update_card_performance(
+            old[0].hash(),
+            Performance::Reviewed(crate::types::performance::ReviewedPerformance {
+                last_reviewed_at: now,
+                stability: 1.0,
+                difficulty: 3.0,
+                interval_raw: 1.0,
+                interval_days: 1,
+                due_date: now.date(),
+                review_count: 1,
+            }),
+        )?;
+        drop(db);
+        assert!(any_card_has_history(db_str, &old)?);
         Ok(())
     }
 }

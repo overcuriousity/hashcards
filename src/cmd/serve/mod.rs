@@ -206,6 +206,64 @@ mod tests {
         Ok(())
     }
 
+    /// A collection created through the web interface must be drillable:
+    /// discovered, listed on the landing page, and reachable by slug.
+    #[tokio::test]
+    async fn test_a_locally_created_collection_can_be_drilled() -> Fallible<()> {
+        let port = pick_unused_port().unwrap();
+        let dir = tempdir()?;
+        let data_dir = dir.path().to_path_buf();
+
+        let config = ResolvedServeConfig {
+            host: TEST_HOST.to_string(),
+            port,
+            git: None,
+            defaults: DefaultsSection::default(),
+            collections: Vec::new(),
+            data_dir: Some(data_dir.clone()),
+            config_path: None,
+            hedgedoc_entries: Vec::new(),
+            local_collections: Vec::new(),
+            custom_decks: Vec::new(),
+            session_timeout_minutes: 1440,
+            oidc: None,
+        };
+        spawn(async move { start_serve(config).await });
+        wait_for_server(TEST_HOST, port).await?;
+
+        let client = reqwest::Client::new();
+        let base = format!("http://{TEST_HOST}:{port}");
+
+        client
+            .post(format!("{base}/files/folder"))
+            .form(&[("parent", ""), ("name", "Spanish")])
+            .send()
+            .await?;
+        client
+            .post(format!("{base}/files/file"))
+            .form(&[("parent", "Spanish"), ("name", "verbs")])
+            .send()
+            .await?;
+
+        // The landing page must offer it, or nothing can be drilled.
+        let landing = client.get(&base).send().await?.text().await?;
+        assert!(
+            landing.contains("/collection/Spanish"),
+            "landing page did not list the local collection, got: {landing}"
+        );
+
+        // And it must be reachable by slug.
+        let page = client
+            .get(format!("{base}/collection/Spanish"))
+            .send()
+            .await?;
+        assert!(
+            page.status().is_success(),
+            "collection page returned {}",
+            page.status()
+        );
+        Ok(())
+    }
     /// Regression test: POSTing multiple `decks` values to /collection/{slug}/start
     /// must not fail with "duplicate field `decks`".
     #[tokio::test]

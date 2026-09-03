@@ -42,6 +42,7 @@ use crate::cmd::serve::browse::render_browse_page;
 use crate::cmd::serve::config::ResolvedCollection;
 use crate::cmd::serve::decks::ResolvedCustomDeck;
 use crate::cmd::serve::decks::find_custom_deck;
+use crate::cmd::serve::files::local_collections_for;
 use crate::cmd::serve::git::clone_or_pull;
 use crate::cmd::serve::hedgedoc::apply_sync_result;
 use crate::cmd::serve::hedgedoc::build_combined_infos;
@@ -297,11 +298,25 @@ pub(super) fn find_collection(
     {
         return Some(rc.clone());
     }
+    if let Some(rc) = local_collections_for(state, current_user_for(owner).as_ref())
+        .into_iter()
+        .find(|c| c.slug == slug && c.owner.as_deref() == owner)
+    {
+        return Some(rc);
+    }
     let sources = state.hedgedoc_sources.lock();
     sources
         .iter()
         .find(|s| s.collection.slug == slug && s.collection.owner.as_deref() == owner)
         .map(|s| s.collection.clone())
+}
+
+/// `local_collections_for` keys the tree off a `CurrentUser`; callers here
+/// already reduced that to an owner email.
+fn current_user_for(owner: Option<&str>) -> Option<CurrentUser> {
+    owner.map(|email| CurrentUser {
+        email: email.to_string(),
+    })
 }
 
 /// Form data for the start-drill endpoint.
