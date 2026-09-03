@@ -2,8 +2,14 @@ use maud::Markup;
 use maud::html;
 
 use crate::cmd::drill::template::page_template;
+use crate::cmd::serve::config::slugify;
 use crate::cmd::serve::files::TreeEntry;
+use crate::cmd::serve::files::parse_buffer;
+use crate::cmd::serve::local::LocalRoot;
+use crate::error::Fallible;
 use crate::flash::Flash;
+use crate::markdown::MarkdownRenderConfig;
+use crate::media::resolve::MediaResolverBuilder;
 
 /// The file manager: the whole tree, with per-row rename and delete, and a
 /// create form for each folder.
@@ -96,5 +102,78 @@ pub fn render_editor_page(
                 }
             }
         }
+    })
+}
+
+/// Render an unsaved buffer's parse result.
+///
+/// Returns a fragment, not a page: the editor swaps it into the preview
+/// pane. Errors carry their line number so the user can find them in the
+/// textarea.
+pub fn render_preview(root: &LocalRoot, rel_path: &str, content: &str) -> Markup {
+    let parsed = match parse_buffer(rel_path, content) {
+        Ok(p) => p,
+        Err(e) => {
+            return html! {
+                div.preview-error {
+                    p { "This file does not parse yet." }
+                    p.error-detail { (e.to_string()) }
+                }
+            };
+        }
+    };
+
+    let config = match preview_render_config(root, rel_path) {
+        Ok(c) => c,
+        Err(e) => {
+            return html! { div.preview-error { p { (e.to_string()) } } };
+        }
+    };
+
+    html! {
+        p.preview-count { (format!("{} cards", parsed.cards.len())) }
+        @if !parsed.duplicates.is_empty() {
+            p.preview-warning {
+                (format!("{} duplicate cards will be skipped.", parsed.duplicates.len()))
+            }
+        }
+        @for card in &parsed.cards {
+            div.preview-card {
+                div.preview-front {
+                    @match card.html_front(&config) {
+                        Ok(m) => (m),
+                        Err(e) => p.error-detail { (e.to_string()) },
+                    }
+                }
+                div.preview-back {
+                    @match card.html_back(&config) {
+                        Ok(m) => (m),
+                        Err(e) => p.error-detail { (e.to_string()) },
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Resolve media the way the collection itself will: relative to the
+/// top-level folder, which is the collection root. A file sitting loose in
+/// the user's root has no collection, so the root stands in for one.
+fn preview_render_config(root: &LocalRoot, rel_path: &str) -> Fallible<MarkdownRenderConfig> {
+    let trimmed = rel_path.trim_matches('/');
+    let (coll_dir, deck_rel, slug) = match trimmed.split_once('/') {
+        Some((top, rest)) => (root.path().join(top), rest.to_string(), slugify(top)),
+        None => (
+            root.path().to_path_buf(),
+            trimmed.to_string(),
+            String::new(),
+        ),
+    };
+    Ok(MarkdownRenderConfig {
+        resolver: MediaResolverBuilder::new()
+            .with_collection_path(coll_dir)?
+            .with_deck_path(std::path::PathBuf::from(deck_rel))?
+            .build()?,
+        file_url_prefix: format!("/collection/{slug}/file"),
     })
 }

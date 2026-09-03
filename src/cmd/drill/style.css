@@ -1053,3 +1053,14 @@ fieldset label {
     transition-duration: 0.01ms !important;
   }
 }
+
+/* Markdown editor: source on the left, live parse preview on the right. */
+.editor-panes { display: flex; gap: 1rem; align-items: flex-start; }
+.editor-panes form { flex: 1 1 50%; display: flex; flex-direction: column; }
+#editor-text { width: 100%; min-height: 60vh; font-family: monospace; }
+.preview-pane { flex: 1 1 50%; min-height: 60vh; overflow-y: auto; }
+.preview-card { border: 1px solid currentColor; border-radius: 4px; margin-bottom: .75rem; padding: .5rem; }
+.preview-back { opacity: .8; }
+.preview-error { border-left: 3px solid #c00; padding-left: .75rem; }
+.editor-toolbar button { margin-right: .25rem; }
+.file-tree { list-style: none; padding-left: 0; }

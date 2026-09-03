@@ -54,6 +54,7 @@ use crate::cmd::serve::files::files_file_handler;
 use crate::cmd::serve::files::files_folder_handler;
 use crate::cmd::serve::files::files_get_handler;
 use crate::cmd::serve::files::files_rename_handler;
+use crate::cmd::serve::files::preview_handler;
 use crate::cmd::serve::git::clone_or_pull;
 use crate::cmd::serve::git::spawn_sync_task;
 use crate::cmd::serve::handlers::collection_file_handler;
@@ -374,6 +375,7 @@ pub async fn start_serve(config: ResolvedServeConfig) -> Fallible<()> {
         .route("/files/delete", post(files_delete_handler))
         .route("/files/edit/{*path}", get(editor_get_handler))
         .route("/files/edit/{*path}", post(editor_post_handler))
+        .route("/files/preview", post(preview_handler))
         .route("/hedgedoc", get(hedgedoc_manage_handler))
         .route("/hedgedoc/add", post(hedgedoc_add_handler))
         .route("/hedgedoc/delete", post(hedgedoc_delete_handler))

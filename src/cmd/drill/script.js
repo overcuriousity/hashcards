@@ -157,3 +157,32 @@ document.querySelectorAll('.editor-toolbar button[data-snippet]').forEach(functi
     textarea.dispatchEvent(new Event('input'));
   });
 });
+
+// Markdown editor: debounced live parse preview.
+(function () {
+  var textarea = document.getElementById('editor-text');
+  var pane = document.getElementById('preview');
+  var form = document.getElementById('editor-form');
+  if (!textarea || !pane || !form) return;
+
+  var timer = null;
+  function refresh() {
+    var body = new URLSearchParams();
+    body.set('path', form.getAttribute('action').replace('/files/edit/', ''));
+    body.set('content', textarea.value);
+    fetch('/files/preview', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: body.toString(),
+    })
+      .then(function (r) { return r.text(); })
+      .then(function (html) { pane.innerHTML = html; })
+      .catch(function () { /* leave the last good preview in place */ });
+  }
+
+  textarea.addEventListener('input', function () {
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(refresh, 300);
+  });
+  refresh();
+})();

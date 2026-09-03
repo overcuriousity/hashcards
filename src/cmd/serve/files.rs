@@ -19,6 +19,7 @@ use crate::cmd::serve::edit::plan_hash_migration;
 use crate::cmd::serve::edit::revert_file;
 use crate::cmd::serve::edit::write_atomic;
 use crate::cmd::serve::files_ui::render_editor_page;
+use crate::cmd::serve::files_ui::render_preview;
 use crate::cmd::serve::files_ui::render_tree_page;
 use crate::cmd::serve::local::LOCAL_META_FILE;
 use crate::cmd::serve::local::LocalRoot;
@@ -492,6 +493,29 @@ fn save_file(
     }
 }
 
+#[derive(Deserialize)]
+pub struct PreviewForm {
+    pub path: String,
+    pub content: String,
+}
+
+/// Parse and render an unsaved buffer for the editor's preview pane.
+///
+/// Runs the production parser deliberately: a JavaScript approximation
+/// could render a card hashcards cannot actually read, which would be worse
+/// than no preview at all. Never writes to disk.
+pub async fn preview_handler(
+    State(state): State<AppState>,
+    current_user: Option<CurrentUser>,
+    Form(form): Form<PreviewForm>,
+) -> Html<String> {
+    let markup = match user_root(&state, current_user.as_ref()) {
+        Ok(root) => render_preview(&root, &form.path, &form.content),
+        Err(e) => maud::html! { div.preview-error { p { (e.to_string()) } } },
+    };
+    Html(markup.into_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -614,6 +638,37 @@ mod tests {
         let text = "---\nname = \"Custom\"\n---\n\nQ: a\nA: b\n";
         let parsed = parse_buffer("Spanish/verbs.md", text)?;
         assert_eq!(parsed.cards.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn preview_of_valid_markdown_lists_every_card() -> Fallible<()> {
+        let dir = create_tmp_directory()?;
+        let root = LocalRoot::for_user(&dir, None)?;
+        std::fs::create_dir_all(root.path().join("Spanish"))?;
+        let html = crate::cmd::serve::files_ui::render_preview(
+            &root,
+            "Spanish/verbs.md",
+            "Q: the cat\nA: el gato\n\nC: A [dog] barks.",
+        )
+        .into_string();
+        assert!(html.contains("2 cards"), "got: {html}");
+        assert!(html.contains("el gato"), "got: {html}");
+        Ok(())
+    }
+
+    #[test]
+    fn preview_of_broken_markdown_reports_the_parse_error() -> Fallible<()> {
+        let dir = create_tmp_directory()?;
+        let root = LocalRoot::for_user(&dir, None)?;
+        std::fs::create_dir_all(root.path().join("Spanish"))?;
+        let html = crate::cmd::serve::files_ui::render_preview(
+            &root,
+            "Spanish/verbs.md",
+            "Q: dangling question with no answer\n",
+        )
+        .into_string();
+        assert!(html.contains("does not parse"), "got: {html}");
         Ok(())
     }
 }
