@@ -143,20 +143,89 @@ document.addEventListener("DOMContentLoaded", function () {
   btn.hidden = false;
 });
 
+// Markdown editor: put text in at the caret and let the preview know.
+function insertAtCaret(textarea, text) {
+  var start = textarea.selectionStart;
+  var end = textarea.selectionEnd;
+  textarea.value = textarea.value.slice(0, start) + text + textarea.value.slice(end);
+  textarea.selectionStart = textarea.selectionEnd = start + text.length;
+  textarea.focus();
+  textarea.dispatchEvent(new Event('input'));
+}
+
 // Markdown editor: insert a card skeleton at the caret.
 document.querySelectorAll('.editor-toolbar button[data-snippet]').forEach(function (button) {
   button.addEventListener('click', function () {
     var textarea = document.getElementById('editor-text');
     if (!textarea) return;
-    var snippet = button.getAttribute('data-snippet');
-    var start = textarea.selectionStart;
-    var end = textarea.selectionEnd;
-    textarea.value = textarea.value.slice(0, start) + snippet + textarea.value.slice(end);
-    textarea.selectionStart = textarea.selectionEnd = start + snippet.length;
-    textarea.focus();
-    textarea.dispatchEvent(new Event('input'));
+    insertAtCaret(textarea, button.getAttribute('data-snippet'));
   });
 });
+
+// Markdown editor: paste an image straight into the card.
+//
+// The upload is what makes the reference valid: a card pointing at a file
+// that is not in the collection fails media validation and takes the whole
+// collection page down, which is why the Image button no longer inserts a
+// placeholder and says this instead.
+(function () {
+  var textarea = document.getElementById('editor-text');
+  var form = document.getElementById('editor-form');
+  var status = document.getElementById('editor-status');
+  if (!textarea || !form || !status) return;
+
+  var idle = status.textContent;
+  function say(message, kind) {
+    status.textContent = message || idle;
+    status.className = 'editor-hint' + (kind ? ' editor-status-' + kind : '');
+  }
+
+  var help = document.getElementById('image-help');
+  if (help) {
+    help.addEventListener('click', function () {
+      say('Copy an image, then paste it here with Ctrl+V — it is stored with the collection and referenced for you.', null);
+      textarea.focus();
+    });
+  }
+
+  // The path travels raw in `data-path`; the URL needs each component
+  // encoded, and `/` kept as the separator.
+  function mediaUrl() {
+    var parts = form.getAttribute('data-path').split('/').map(encodeURIComponent);
+    return '/files/media/' + parts.join('/');
+  }
+
+  textarea.addEventListener('paste', function (event) {
+    var files = event.clipboardData && event.clipboardData.files;
+    if (!files || !files.length) return;
+    var file = files[0];
+    if (file.type.indexOf('image/') !== 0) return;
+    event.preventDefault();
+
+    say('Uploading the image…', null);
+    fetch(mediaUrl(), {
+      method: 'POST',
+      headers: { 'Content-Type': file.type },
+      body: file,
+    })
+      .then(function (response) {
+        return response.text().then(function (body) {
+          return { ok: response.ok, body: body };
+        });
+      })
+      .then(function (result) {
+        if (!result.ok) {
+          say(result.body, 'error');
+          return;
+        }
+        insertAtCaret(textarea, '![](' + result.body + ')');
+        say('Image added. Save to keep it.', 'ok');
+      })
+      .catch(function () {
+        say('The image could not be uploaded.', 'error');
+      });
+  });
+})();
 
 // Markdown editor: debounced live parse preview.
 (function () {

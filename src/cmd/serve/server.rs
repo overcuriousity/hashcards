@@ -5,6 +5,7 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 
 use axum::Router;
+use axum::extract::DefaultBodyLimit;
 use axum::routing::get;
 use axum::routing::post;
 use axum_extra::extract::cookie::Key;
@@ -79,6 +80,8 @@ use crate::cmd::serve::state::HedgedocSource;
 use crate::cmd::serve::state::SharedSession;
 use crate::cmd::serve::state::evict_idle_sessions;
 use crate::cmd::serve::stats::collection_stats_handler;
+use crate::cmd::serve::upload::MAX_UPLOAD_BYTES;
+use crate::cmd::serve::upload::media_upload_handler;
 use crate::cmd::signals::terminate_signal;
 use crate::db::Database;
 use crate::error::ErrorReport;
@@ -378,6 +381,13 @@ pub async fn start_serve(config: ResolvedServeConfig) -> Fallible<()> {
         .route("/files/edit/{*path}", get(editor_get_handler))
         .route("/files/edit/{*path}", post(editor_post_handler))
         .route("/files/preview", post(preview_handler))
+        // The body is the image itself, so this one route needs a limit
+        // wider than axum's 2 MB default — and no wider than the one the
+        // editor promises.
+        .route(
+            "/files/media/{*path}",
+            post(media_upload_handler).layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES)),
+        )
         .route("/sources", get(hedgedoc_manage_handler))
         .route("/sources/add", post(hedgedoc_add_handler))
         .route("/sources/delete", post(hedgedoc_delete_handler))

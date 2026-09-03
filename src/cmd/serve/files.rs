@@ -31,6 +31,7 @@ use crate::cmd::serve::local::collection_id;
 use crate::cmd::serve::local::discover_local_collections;
 use crate::cmd::serve::local::existing_collection_id;
 use crate::cmd::serve::state::AppState;
+use crate::cmd::serve::upload::MEDIA_DIR;
 use crate::db::Database;
 use crate::error::Fallible;
 use crate::error::fail;
@@ -64,8 +65,9 @@ pub struct TreeEntry {
 }
 
 /// The whole tree under `root`, folders before files at each level, each
-/// level sorted by name. Dotfiles and the per-collection metadata file are
-/// hidden: they are hashcards' bookkeeping, not the user's content.
+/// level sorted by name. Dotfiles, the per-collection metadata file and a
+/// collection's `media` folder are hidden: they are hashcards' bookkeeping,
+/// not the user's content.
 pub fn read_tree(root: &LocalRoot) -> Fallible<Vec<TreeEntry>> {
     let mut out = Vec::new();
     walk(root.path(), "", 0, &mut out)?;
@@ -82,6 +84,13 @@ fn walk(dir: &Path, prefix: &str, depth: usize, out: &mut Vec<TreeEntry>) -> Fal
             Err(_) => continue,
         };
         if name.starts_with('.') || name == LOCAL_META_FILE {
+            continue;
+        }
+        // `media` directly inside a collection is where pasted images are
+        // stored, addressed only through the cards that reference them. A
+        // top-level folder of that name is the user's own collection, so
+        // only the depth makes it bookkeeping.
+        if depth == 1 && name == MEDIA_DIR {
             continue;
         }
         let path = entry.path();
@@ -150,13 +159,21 @@ fn validate_name(name: &str) -> Fallible<String> {
 
 /// Names in `dir` that belong to the user, ignoring hashcards' own
 /// bookkeeping. A folder holding only bookkeeping counts as empty.
-fn non_empty_children(dir: &Path) -> Fallible<Vec<String>> {
+///
+/// `is_collection_root` says whether a `media` folder here is ours: the
+/// images belong to the cards, so a collection whose decks are all gone is
+/// empty even while their pictures are still on disk.
+fn non_empty_children(dir: &Path, is_collection_root: bool) -> Fallible<Vec<String>> {
     let mut kept = Vec::new();
     for entry in read_dir(dir)? {
         let name = entry?.file_name().into_string().unwrap_or_default();
-        if name != LOCAL_META_FILE && !name.starts_with('.') {
-            kept.push(name);
+        if name.starts_with('.') || name == LOCAL_META_FILE {
+            continue;
         }
+        if is_collection_root && name == MEDIA_DIR {
+            continue;
+        }
+        kept.push(name);
     }
     kept.sort();
     Ok(kept)
@@ -399,9 +416,10 @@ fn delete_entry(
         return fail(format!("`{}` does not exist.", form.path));
     }
     if target.is_dir() {
+        let is_collection_root = !form.path.trim_matches('/').contains('/');
         // Refuse a non-empty folder: deleting a whole collection on a
         // misclick would take its review history with it.
-        let kept = non_empty_children(&target)?;
+        let kept = non_empty_children(&target, is_collection_root)?;
         if !kept.is_empty() {
             return fail(format!(
                 "`{}` is not empty — it still holds {}. Delete those first.",
@@ -413,7 +431,7 @@ fn delete_entry(
         // with it, so leaving `{id}.db` behind would orphan a database that
         // nothing can ever address again — and a folder recreated under the
         // same name would silently start its history over.
-        if !form.path.trim_matches('/').contains('/') {
+        if is_collection_root {
             remove_collection_database(state, &target)?;
         }
         std::fs::remove_dir_all(&target)?;
@@ -445,12 +463,12 @@ fn remove_collection_database(state: &AppState, target: &Path) -> Fallible<()> {
     Ok(())
 }
 
-/// The review database of the collection a local file belongs to.
+/// The collection folder a local file belongs to.
 ///
 /// A collection is a top-level folder, so a file directly under the root
-/// belongs to none and cannot be reviewed — the editor refuses it rather
-/// than inventing a database for it.
-pub fn db_path_for(root: &LocalRoot, db_dir: &Path, rel: &str) -> Fallible<PathBuf> {
+/// belongs to none: it can be neither reviewed nor given a place to keep
+/// its images, and both callers refuse it rather than inventing one.
+pub fn collection_folder(root: &LocalRoot, rel: &str) -> Fallible<PathBuf> {
     let trimmed = rel.trim_matches('/');
     let top = match trimmed.split('/').next() {
         Some(t) if !t.is_empty() => t.to_string(),
@@ -458,14 +476,19 @@ pub fn db_path_for(root: &LocalRoot, db_dir: &Path, rel: &str) -> Fallible<PathB
     };
     if !trimmed.contains('/') {
         return fail(format!(
-            "`{rel}` sits directly in your card folder. Move it into a collection folder so its reviews have somewhere to go."
+            "`{rel}` sits directly in your card folder. Move it into a collection folder first."
         ));
     }
     let folder = root.resolve(&top)?;
     if !folder.is_dir() {
         return fail(format!("`{top}` is not a collection folder."));
     }
-    let id = collection_id(&folder)?;
+    Ok(folder)
+}
+
+/// The review database of the collection a local file belongs to.
+pub fn db_path_for(root: &LocalRoot, db_dir: &Path, rel: &str) -> Fallible<PathBuf> {
+    let id = collection_id(&collection_folder(root, rel)?)?;
     Ok(db_dir.join(format!("{id}.db")))
 }
 
@@ -810,10 +833,13 @@ mod tests {
         // The metadata file alone must not count as "non-empty".
         std::fs::write(folder.join(LOCAL_META_FILE), "id = \"x\"\n")?;
 
-        assert_eq!(non_empty_children(&folder)?, vec!["verbs.md".to_string()]);
+        assert_eq!(
+            non_empty_children(&folder, true)?,
+            vec!["verbs.md".to_string()]
+        );
 
         std::fs::remove_file(folder.join("verbs.md"))?;
-        assert!(non_empty_children(&folder)?.is_empty());
+        assert!(non_empty_children(&folder, true)?.is_empty());
         Ok(())
     }
 
@@ -1139,6 +1165,53 @@ mod tests {
         )?;
         assert!(!root.path().join("Spanish").exists());
         assert!(!db_path.exists(), "the review database is orphaned");
+        Ok(())
+    }
+
+    /// The media folder is hashcards' storage for pasted images, addressed
+    /// only through the cards that reference it — listing it would invite a
+    /// rename that breaks every one of them.
+    #[test]
+    fn the_media_folder_is_hidden_inside_a_collection() -> Fallible<()> {
+        let dir = create_tmp_directory()?;
+        let root = LocalRoot::for_user(&dir, None)?;
+        std::fs::create_dir_all(root.path().join("Spanish").join("media"))?;
+        std::fs::write(root.path().join("Spanish").join("media").join("a.png"), "x")?;
+        std::fs::write(root.path().join("Spanish").join("verbs.md"), "Q: a\nA: b\n")?;
+        // A collection the user chose to call `media` is their own folder,
+        // not ours: only the one inside a collection is bookkeeping.
+        std::fs::create_dir_all(root.path().join("media"))?;
+
+        let paths: Vec<String> = read_tree(&root)?.into_iter().map(|e| e.rel_path).collect();
+        assert_eq!(paths, vec!["Spanish", "Spanish/verbs.md", "media"]);
+        Ok(())
+    }
+
+    #[test]
+    fn a_collection_holding_only_pasted_images_can_still_be_deleted() -> Fallible<()> {
+        let dir = create_tmp_directory()?;
+        let state = state_for(&dir, Vec::new());
+        create_entry(
+            &state,
+            None,
+            &NewEntryForm {
+                parent: String::new(),
+                name: "Spanish".to_string(),
+            },
+            true,
+        )?;
+        let folder = user_root(&state, None)?.path().join("Spanish");
+        std::fs::create_dir_all(folder.join("media"))?;
+        std::fs::write(folder.join("media").join("a.png"), "x")?;
+
+        delete_entry(
+            &state,
+            None,
+            &DeleteForm {
+                path: "Spanish".to_string(),
+            },
+        )?;
+        assert!(!folder.exists());
         Ok(())
     }
 }

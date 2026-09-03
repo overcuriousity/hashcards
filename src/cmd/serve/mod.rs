@@ -17,6 +17,8 @@ mod local;
 pub mod server;
 mod source;
 mod state;
+mod upload;
+
 pub mod stats;
 
 #[cfg(test)]
@@ -784,6 +786,113 @@ mod tests {
         .text()
         .await?;
         assert!(page.contains("el gato"), "page: {page}");
+        Ok(())
+    }
+
+    /// The whole paste path, end to end: the bytes go up, the markdown path
+    /// comes back, a card that references it saves, the collection still
+    /// loads, and the image itself is served back through the collection's
+    /// file endpoint. Any one of those links breaking leaves the user with a
+    /// card that shows a broken picture — or a collection that will not open.
+    #[tokio::test]
+    async fn test_a_pasted_image_is_stored_referenced_and_served() -> Fallible<()> {
+        let dir = tempdir()?;
+        let data_dir = dir.path().to_path_buf();
+        let port = pick_unused_port().unwrap();
+        let config = ResolvedServeConfig {
+            host: TEST_HOST.to_string(),
+            port,
+            git: None,
+            defaults: DefaultsSection::default(),
+            collections: Vec::new(),
+            data_dir: Some(data_dir.clone()),
+            config_path: None,
+            hedgedoc_entries: Vec::new(),
+            custom_decks: Vec::new(),
+            session_timeout_minutes: 1440,
+            oidc: None,
+        };
+        spawn(async move { start_serve(config).await });
+        wait_for_server(TEST_HOST, port).await?;
+
+        let deck_dir = data_dir.join("local").join("default").join("Spanish");
+        std::fs::create_dir_all(&deck_dir)?;
+        write(deck_dir.join("verbs.md"), "Q: a\nA: b\n")?;
+
+        // A one-pixel PNG, header and all: the endpoint reads the magic
+        // number, so a fake body would be refused.
+        let png: Vec<u8> = {
+            let mut v = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+            v.extend_from_slice(b"the rest of a very small picture");
+            v
+        };
+        let client = reqwest::Client::new();
+        let base = format!("http://{TEST_HOST}:{port}");
+
+        let response = client
+            .post(format!("{base}/files/media/Spanish/verbs.md"))
+            .header("content-type", "image/png")
+            .body(png.clone())
+            .send()
+            .await?;
+        assert_eq!(response.status(), 200);
+        let inserted = response.text().await?;
+        assert!(inserted.starts_with("@/media/"), "got: {inserted}");
+
+        // Anything that is not an image is refused, and says why.
+        let refused = client
+            .post(format!("{base}/files/media/Spanish/verbs.md"))
+            .body(b"%PDF-1.7\n".to_vec())
+            .send()
+            .await?;
+        assert_eq!(refused.status(), 400);
+        assert!(refused.text().await?.contains("PNG"), "no reason given");
+
+        // A card referencing it saves, and the collection still loads: a
+        // reference to a missing file fails `validate_media_files` and takes
+        // the whole collection page down with it.
+        let page = reqwest::get(format!("{base}/files/edit/Spanish/verbs.md"))
+            .await?
+            .text()
+            .await?;
+        let mtime = page
+            .split("name=\"mtime\" value=\"")
+            .nth(1)
+            .and_then(|rest| rest.split('"').next())
+            .unwrap_or_default()
+            .to_string();
+        let saved = client
+            .post(format!("{base}/files/edit/Spanish/verbs.md"))
+            .form(&[
+                ("mtime", mtime.as_str()),
+                ("content", &format!("Q: what is this\nA: ![]({inserted})\n")),
+            ])
+            .send()
+            .await?;
+        assert_eq!(saved.status(), 200, "the save redirect must land");
+
+        let collection = reqwest::get(format!("{base}/collection/Spanish"))
+            .await?
+            .text()
+            .await?;
+        assert!(
+            !collection.contains("Missing media"),
+            "collection: {collection}"
+        );
+
+        // And the image comes back through the collection's own endpoint,
+        // which is what the rendered card asks for.
+        let name = inserted.trim_start_matches("@/");
+        let served = reqwest::get(format!("{base}/collection/Spanish/file/{name}")).await?;
+        assert_eq!(served.status(), 200);
+        assert_eq!(
+            served
+                .headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok()),
+            Some("image/png")
+        );
+        assert_eq!(served.bytes().await?.to_vec(), png);
         Ok(())
     }
 }

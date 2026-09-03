@@ -12,55 +12,81 @@ use crate::flash::Flash;
 use crate::markdown::MarkdownRenderConfig;
 use crate::media::resolve::MediaResolverBuilder;
 
+/// What the editor's status line says when it has nothing else to report.
+/// The limit is stated before it is hit rather than only on refusal.
+const PASTE_HINT: &str = "Paste an image to add it — PNG, JPEG, GIF or WebP, up to 10 MB.";
+
+/// One step of tree indentation per level, on the row rather than on the
+/// list: the rows draw their own separators edge to edge, so the depth has
+/// to move the label inside the row instead of moving the row.
+fn indent(depth: usize) -> String {
+    format!("padding-left: {}rem", 1.0 + depth as f32 * 1.25)
+}
+
 /// The file manager: the whole tree, with per-row rename and delete, and a
 /// create form for each folder.
 pub fn render_tree_page(tree: &[TreeEntry], flash: Option<Flash>) -> Markup {
     page_template(html! {
         div.landing {
             @if let Some(f) = &flash { (f.render()) }
-            h1 { "My Cards" }
-            p { a.back-link href="/" { "← Back to collections" } }
+            div.browse-header {
+                a.back-link href="/" { "← Collections" }
+                h1 { "My Cards" }
+            }
 
             p.hint {
                 "Each top-level folder is a collection. Files inside it are decks."
             }
 
-            form.inline-form action="/files/folder" method="post" {
+            form.add-source-form action="/files/folder" method="post" {
                 input type="hidden" name="parent" value="";
-                input type="text" name="name" placeholder="New collection name" required;
-                input type="submit" value="Add collection";
+                div.add-source-row {
+                    input.input.add-source-url type="text" name="name"
+                        placeholder="New collection name" required;
+                    input.btn.btn-primary type="submit" value="Add collection";
+                }
             }
 
             @if tree.is_empty() {
                 p.notice { "No cards yet. Create a collection to start." }
             }
 
-            ul.file-tree {
-                @for entry in tree {
-                    li style=(format!("margin-left: {}rem", entry.depth)) {
-                        @if entry.is_dir {
-                            span.folder { (entry.name) }
-                            form.inline-form action="/files/file" method="post" {
-                                input type="hidden" name="parent" value=(entry.rel_path);
-                                input type="text" name="name" placeholder="new-file.md" required;
-                                input type="submit" value="Add file";
+            @if !tree.is_empty() {
+                ul.file-tree {
+                    @for entry in tree {
+                        li.file-row style=(indent(entry.depth)) {
+                            @if entry.is_dir {
+                                span.file-name.folder { (entry.name) }
+                            } @else {
+                                a.file-name href=(format!("/files/edit/{}", encoded_path(&entry.rel_path))) {
+                                    (entry.name)
+                                }
                             }
-                            form.inline-form action="/files/folder" method="post" {
-                                input type="hidden" name="parent" value=(entry.rel_path);
-                                input type="text" name="name" placeholder="subfolder" required;
-                                input type="submit" value="Add folder";
+                            div.file-actions {
+                                @if entry.is_dir {
+                                    // One name, two destinations: the same
+                                    // field makes a file or a folder,
+                                    // depending on which button posts it.
+                                    form.file-form action="/files/file" method="post" {
+                                        input type="hidden" name="parent" value=(entry.rel_path);
+                                        input.input.input-sm type="text" name="name"
+                                            placeholder="new name" required;
+                                        input.btn.btn-sm type="submit" value="Add file";
+                                        input.btn.btn-sm type="submit" value="Add folder"
+                                            formaction="/files/folder";
+                                    }
+                                }
+                                form.file-form action="/files/rename" method="post" {
+                                    input type="hidden" name="path" value=(entry.rel_path);
+                                    input.input.input-sm type="text" name="name"
+                                        placeholder="rename to" required;
+                                    input.btn.btn-sm type="submit" value="Rename";
+                                }
+                                form.file-form action="/files/delete" method="post" {
+                                    input type="hidden" name="path" value=(entry.rel_path);
+                                    input.btn.btn-sm.btn-danger type="submit" value="Delete";
+                                }
                             }
-                        } @else {
-                            a href=(format!("/files/edit/{}", encoded_path(&entry.rel_path))) { (entry.name) }
-                        }
-                        form.inline-form action="/files/rename" method="post" {
-                            input type="hidden" name="path" value=(entry.rel_path);
-                            input type="text" name="name" placeholder="rename to" required;
-                            input type="submit" value="Rename";
-                        }
-                        form.inline-form action="/files/delete" method="post" {
-                            input type="hidden" name="path" value=(entry.rel_path);
-                            input type="submit" value="Delete";
                         }
                     }
                 }
@@ -80,16 +106,22 @@ pub fn render_editor_page(
     page_template(html! {
         div.editor {
             @if let Some(f) = &flash { (f.render()) }
-            h1 { (rel_path) }
-            p { a.back-link href="/files" { "← Back to my cards" } }
+            div.browse-header {
+                a.back-link href="/files" { "← My Cards" }
+                h1 { (rel_path) }
+            }
 
             div.editor-toolbar {
-                button type="button" data-snippet="Q: \nA: " { "Q/A" }
-                button type="button" data-snippet="C: The [answer] goes here." { "Cloze" }
-                button type="button" data-snippet="T: \nD: " { "Term" }
-                button type="button" data-snippet="\n---\n" { "Separator" }
-                button type="button" data-snippet="$$\n\n$$" { "LaTeX" }
-                button type="button" data-snippet="![](image.png)" { "Image" }
+                button.btn.btn-sm type="button" data-snippet="Q: \nA: " { "Q/A" }
+                button.btn.btn-sm type="button" data-snippet="C: The [answer] goes here." { "Cloze" }
+                button.btn.btn-sm type="button" data-snippet="T: \nD: " { "Term" }
+                button.btn.btn-sm type="button" data-snippet="\n---\n" { "Separator" }
+                button.btn.btn-sm type="button" data-snippet="$$\n\n$$" { "LaTeX" }
+                // No snippet: an image reference to a file that is not
+                // there fails the collection's media validation and takes
+                // the whole collection page down. The button says how to
+                // add one for real instead.
+                button.btn.btn-sm #image-help type="button" { "Image" }
             }
 
             div.editor-panes {
@@ -98,9 +130,12 @@ pub fn render_editor_page(
                 // it travels beside it.
                 form #editor-form data-path=(rel_path)
                     action=(format!("/files/edit/{}", encoded_path(rel_path))) method="post" {
-                    input type="hidden" name="mtime" value=(mtime);
-                    textarea #editor-text name="content" spellcheck="false" { (content) }
-                    input type="submit" value="Save";
+                    textarea.textarea #editor-text name="content" spellcheck="false" { (content) }
+                    div.editor-actions {
+                        input type="hidden" name="mtime" value=(mtime);
+                        input.btn.btn-primary type="submit" value="Save";
+                        span.editor-hint #editor-status { (PASTE_HINT) }
+                    }
                 }
                 div #preview .preview-pane {
                     p.hint { "Start typing to see your cards." }
@@ -231,5 +266,18 @@ mod tests {
             html.contains(r#"data-path="Spanish/a#b.md""#),
             "got: {html}"
         );
+    }
+
+    /// Regression guard: the Image button used to insert `![](image.png)`,
+    /// a reference to a file that is never there — which fails the
+    /// collection's media validation and takes its whole page down. It must
+    /// stay a pointer to the paste path, and the hint must name the limit
+    /// before the user hits it.
+    #[test]
+    fn the_image_button_inserts_no_dead_reference() {
+        let html = render_editor_page("Spanish/verbs.md", "", 0, None).into_string();
+        assert!(html.contains(r#"id="image-help""#), "got: {html}");
+        assert!(!html.contains("image.png"), "got: {html}");
+        assert!(html.contains("up to 10 MB"), "got: {html}");
     }
 }

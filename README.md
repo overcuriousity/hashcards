@@ -222,6 +222,22 @@ stopping the server.
 Deleting a collection folder deletes its review database with it. Folders that
 still hold files are refused, so this only happens once you have emptied one.
 
+### Images
+
+Copy an image and paste it into the editor with Ctrl+V. It is stored under
+`{Collection}/media/`, named after a hash of its own bytes — so the same
+screenshot pasted twice is stored once, and whatever your screenshot tool
+called the file never reaches the disk — and the reference written into the
+card is collection-relative (`![](@/media/a1b2c3d4e5f6a7b8.png)`), which
+resolves the same from a deck at the top of a collection or one three folders
+down. PNG, JPEG, GIF and WebP, up to 10 MB per image; the format is read from
+the file's own bytes, not its name. SVG is not accepted: it is script-bearing
+markup, and media is served inline from the same origin as the app.
+
+The `media` folder is hashcards' storage rather than part of your tree, so the
+file manager does not list it, and a collection whose decks are all deleted
+counts as empty even while their images are still on disk.
+
 Rewording a card keeps its schedule: on save, hashcards matches the new cards
 against the old ones by content and carries the review history across.
 
