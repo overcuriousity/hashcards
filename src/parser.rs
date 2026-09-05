@@ -478,6 +478,23 @@ fn trim(line: &str) -> String {
     line[2..].trim().to_string()
 }
 
+/// Join a term-definition card's prompt to its body.
+///
+/// A one-line body reads well on the prompt's own line, and staying there
+/// keeps the hash identical to the hand-written `Q: Define: ...` form. A
+/// body spanning several lines cannot: markdown folds its first line into
+/// the prompt and renders the rest as a sibling block, so the card reads as
+/// a copy of its twin with the answer stranded underneath. Give the prompt
+/// its own line and the body stays a block — which is also what `Q:`
+/// followed by those lines parses to, so the two forms still share a hash.
+fn prompt(label: &str, body: &str) -> String {
+    if body.contains('\n') {
+        format!("{label}\n\n{body}")
+    } else {
+        format!("{label} {body}")
+    }
+}
+
 /// Returns true if the unescaped `[` at byte position `open_pos` in `text`
 /// opens a markdown link: its bracket group closes with `](`. Nested `[`
 /// before the close means this is not a simple link.
@@ -910,13 +927,13 @@ impl Parser {
             self.deck_name.clone(),
             self.file_path.clone(),
             (start_line, end_line),
-            CardContent::new_basic(format!("Define: {term}"), definition),
+            CardContent::new_basic(prompt("Define:", term), definition),
         ));
         cards.push(Card::new(
             self.deck_name.clone(),
             self.file_path.clone(),
             (start_line, end_line),
-            CardContent::new_basic(format!("Term for: {definition}"), term),
+            CardContent::new_basic(prompt("Term for:", definition), term),
         ));
     }
 
@@ -2222,8 +2239,52 @@ A: Genetic material."#,
         assert!(matches!(
             &cards[0].content(),
             CardContent::Basic { question, .. }
-                if question == "Define: Monoid\nhomomorphism"
+                if question == "Define:\n\nMonoid\nhomomorphism"
         ));
+        Ok(())
+    }
+
+    /// Regression: a multi-line term has the same defect the reciprocal
+    /// card had — markdown folds its first line into the `Define:` prompt
+    /// and renders the rest as a sibling block.
+    #[test]
+    fn test_multiline_term_stays_a_block_on_the_forward_card() -> Result<(), ParserError> {
+        let input = "T:\n- Algorithmus\n- Rechenvorschrift\nD: Eine endliche Vorschrift.";
+        let parser = make_test_parser();
+        let cards = parser.parse(input)?;
+        assert_eq!(cards.len(), 2);
+        assert!(
+            matches!(
+                &cards[0].content(),
+                CardContent::Basic { question, answer }
+                    if question == "Define:\n\n- Algorithmus\n- Rechenvorschrift"
+                    && answer == "Eine endliche Vorschrift."
+            ),
+            "the forward card's question keeps the term inline"
+        );
+        Ok(())
+    }
+
+    /// Regression: a multi-line definition must not be interpolated into
+    /// the reciprocal card's question line. Markdown folds the definition's
+    /// first line into the `Term for:` prompt and renders the rest as a
+    /// sibling block, so the card reads as a copy of its twin with the
+    /// answer stranded underneath. The prompt keeps its own line instead.
+    #[test]
+    fn test_multiline_definition_stays_a_block_on_the_reverse_card() -> Result<(), ParserError> {
+        let input = "T: Algorithmus\nD:\n- präzise Vorschrift\n- endliche Schritte";
+        let parser = make_test_parser();
+        let cards = parser.parse(input)?;
+        assert_eq!(cards.len(), 2);
+        assert!(
+            matches!(
+                &cards[1].content(),
+                CardContent::Basic { question, answer }
+                    if question == "Term for:\n\n- präzise Vorschrift\n- endliche Schritte"
+                    && answer == "Algorithmus"
+            ),
+            "the reverse card's question keeps the definition inline"
+        );
         Ok(())
     }
 

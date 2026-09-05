@@ -177,21 +177,24 @@ pub fn render_preview(root: &LocalRoot, rel_path: &str, content: &str) -> Markup
     };
 
     html! {
-        p.preview-count { (format!("{} cards", parsed.cards.len())) }
+        p.preview-count { (count_of(parsed.cards.len(), "card")) }
         @if !parsed.duplicates.is_empty() {
             p.preview-warning {
-                (format!("{} duplicate cards will be skipped.", parsed.duplicates.len()))
+                (format!(
+                    "{} will be skipped.",
+                    count_of(parsed.duplicates.len(), "duplicate card")
+                ))
             }
         }
         @for card in &parsed.cards {
             div.preview-card {
-                div.preview-front {
+                div.preview-front.rich-text {
                     @match card.html_front(&config) {
                         Ok(m) => (m),
                         Err(e) => p.error-detail { (e.to_string()) },
                     }
                 }
-                div.preview-back {
+                div.preview-back.rich-text {
                     @match card.html_back(&config) {
                         Ok(m) => (m),
                         Err(e) => p.error-detail { (e.to_string()) },
@@ -199,6 +202,15 @@ pub fn render_preview(root: &LocalRoot, rel_path: &str, content: &str) -> Markup
                 }
             }
         }
+    }
+}
+
+/// A count and the noun it counts, agreeing in number: "1 card", "2 cards".
+fn count_of(n: usize, noun: &str) -> String {
+    if n == 1 {
+        format!("{n} {noun}")
+    } else {
+        format!("{n} {noun}s")
     }
 }
 
@@ -277,6 +289,55 @@ mod tests {
             html.contains(r#"data-path="Spanish/a#b.md""#),
             "got: {html}"
         );
+    }
+
+    /// A count of one used to read "1 cards".
+    #[test]
+    fn preview_counts_agree_with_their_nouns() -> Fallible<()> {
+        let dir = create_tmp_directory()?;
+        let root = LocalRoot::for_user(&dir, None)?;
+        std::fs::create_dir(root.path().join("Spanish"))?;
+
+        let one = render_preview(&root, "Spanish/verbs.md", "Q: One\nA: Card").into_string();
+        assert!(one.contains("1 card<"), "got: {one}");
+
+        let two = render_preview(
+            &root,
+            "Spanish/verbs.md",
+            "Q: One\nA: Card\nQ: Two\nA: Cards",
+        )
+        .into_string();
+        assert!(two.contains("2 cards<"), "got: {two}");
+
+        // One dropped copy is one duplicate card, not "1 duplicate cards".
+        let dup = render_preview(
+            &root,
+            "Spanish/verbs.md",
+            "Q: One\nA: Card\n---\nQ: One\nA: Card",
+        )
+        .into_string();
+        assert!(dup.contains("1 duplicate card "), "got: {dup}");
+        Ok(())
+    }
+
+    /// Regression: cloze rendering — the grey blank on the front, the
+    /// highlighted reveal on the back — is scoped to `.rich-text` in the
+    /// stylesheet. Without that class the preview shows bare dots and an
+    /// answer that looks like an unchanged copy of the prompt.
+    #[test]
+    fn preview_cards_carry_the_rich_text_class() -> Fallible<()> {
+        let dir = create_tmp_directory()?;
+        let root = LocalRoot::for_user(&dir, None)?;
+        std::fs::create_dir(root.path().join("Spanish"))?;
+        let html = render_preview(
+            &root,
+            "Spanish/verbs.md",
+            "C: An [agonist] activates a receptor.",
+        )
+        .into_string();
+        assert!(html.contains("preview-front rich-text"), "got: {html}");
+        assert!(html.contains("preview-back rich-text"), "got: {html}");
+        Ok(())
     }
 
     /// Regression guard: the Image button used to insert `![](image.png)`,

@@ -426,6 +426,30 @@ The generated cards are indistinguishable from hand-written ones — same
 content, same hashes — so converting between the shorthand and the explicit
 form preserves review history.
 
+A term or a definition may span several lines; a definition runs until the
+next `Q:`, `C:`, `T:`, separator or end of file. When one does, its card
+puts the prompt on a line of its own so the body stays a block rather than
+being folded into the prompt:
+
+```
+T: Algorithmus
+D:
+- präzise, endliche Vorschrift
+- endet nach endlich vielen Schritten
+```
+
+```
+Q: Term for:
+
+- präzise, endliche Vorschrift
+- endet nach endlich vielen Schritten
+A: Algorithmus
+```
+
+Bear in mind that recalling a term from a long, multi-part definition is a
+harder exercise than the shorthand's short-definition case, and the prompt
+carries the whole definition either way.
+
 Lines starting with `T:` or `D:` are card tags everywhere, exactly like `Q:`
 and `A:`. To use such text literally inside a card, don't start a line with it.
 
