@@ -1,18 +1,20 @@
 <changelog>
     <unreleased>
-        <fixed>
-            <change author="claude">
-            A term-definition pair whose `T:` or `D:` spans several lines no longer produces a card that reads as a copy of its twin. The body used to be interpolated into the `Define:` or `Term for:` prompt, where markdown folded its first line into the prompt and rendered the rest as a sibling block, stranding the answer underneath and leaving nothing to recall. The prompt now keeps its own line and the body stays a block — which is what `Q:` followed by those lines parses to, so the shorthand and the explicit form still share a hash. A one-line term or definition is unchanged and stays inline, so existing cards keep their history.
-            </change>
-            <change author="claude">
-            The editor preview no longer says "1 cards". The count and the noun it counts now agree in number, as they already did in the collection browser's duplicates notice.
-            </change>
-            <change author="claude">
-            Cloze cards render in the editor preview the way they do in a drill. The preview drew its cards without the `rich-text` class every rule in the stylesheet is scoped to, so the blank came out as literal dots instead of a grey box and the revealed word carried no highlight, making the back look like an unchanged copy of the front. Images, tables, code blocks, blockquotes and list indentation were unstyled there for the same reason.
-            </change>
-        </fixed>
         </unreleased>
     <releases>
+        <release version="0.4.9" date="2026-09-05">
+            <fixed>
+                <change author="claude">
+            A term-definition pair whose `T:` or `D:` spans several lines no longer produces a card that reads as a copy of its twin. The body used to be interpolated into the `Define:` or `Term for:` prompt, where markdown folded its first line into the prompt and rendered the rest as a sibling block, stranding the answer underneath and leaving nothing to recall. The prompt now keeps its own line and the body stays a block — which is what `Q:` followed by those lines parses to, so the shorthand and the explicit form still share a hash. A one-line term or definition is unchanged and stays inline, so existing cards keep their history.
+            </change>
+                <change author="claude">
+            The editor preview no longer says "1 cards". The count and the noun it counts now agree in number, as they already did in the collection browser's duplicates notice.
+            </change>
+                <change author="claude">
+            Cloze cards render in the editor preview the way they do in a drill. The preview drew its cards without the `rich-text` class every rule in the stylesheet is scoped to, so the blank came out as literal dots instead of a grey box and the revealed word carried no highlight, making the back look like an unchanged copy of the front. Images, tables, code blocks, blockquotes and list indentation were unstyled there for the same reason.
+            </change>
+            </fixed>
+        </release>
         <release version="0.4.8" date="2026-09-03">
             <added>
                 <change author="claude">
