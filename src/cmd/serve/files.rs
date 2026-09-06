@@ -1757,6 +1757,12 @@ mod tests {
     /// The database is removed only once the folder actually is. Removing
     /// it first threw the review history away whenever `remove_dir_all`
     /// failed — leaving the collection on disk, silently starting over.
+    ///
+    /// Unix only: the failure is staged by making the parent directory
+    /// read-only, which Windows permissions do not express — the mode bits
+    /// this needs are not in `std` there, so the test would not even
+    /// compile.
+    #[cfg(unix)]
     #[test]
     fn a_failed_folder_removal_keeps_the_review_database() -> Fallible<()> {
         use std::os::unix::fs::PermissionsExt;
