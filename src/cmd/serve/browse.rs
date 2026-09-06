@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::collections::hash_map::Entry;
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -7,6 +8,7 @@ use maud::Markup;
 use maud::html;
 
 use crate::cmd::drill::template::page_template;
+use crate::cmd::serve::href::encoded_path;
 use crate::collection::Collection;
 use crate::error::Fallible;
 use crate::flash::Flash;
@@ -67,6 +69,14 @@ pub struct BrowseData {
     /// The directory the collection was loaded from, stripped from duplicate
     /// locations before they are shown.
     pub coll_dir: PathBuf,
+    /// Topic name to the file its cards came from, relative to the
+    /// collection folder — the target of the topic's edit link.
+    ///
+    /// Not derived from the topic *name*: that defaults to the file's path,
+    /// but a file's frontmatter `name:` overrides it, so the name is not a
+    /// path. A topic whose cards come from more than one file gets no
+    /// entry, since there is no one file to open.
+    pub edit_paths: HashMap<String, PathBuf>,
 }
 
 /// Build a deck tree from a collection, computing per-deck due/total counts.
@@ -87,6 +97,8 @@ pub fn build_deck_tree(coll_dir: &Path, db_path: &Path) -> Fallible<BrowseData> 
 
     // Count per deck
     let mut counts: HashMap<String, DeckCounts> = HashMap::new();
+    // `None` marks a topic seen in more than one file.
+    let mut sources: HashMap<String, Option<PathBuf>> = HashMap::new();
     for card in &collection.cards {
         let entry = counts
             .entry(card.deck_name().clone())
@@ -95,12 +107,28 @@ pub fn build_deck_tree(coll_dir: &Path, db_path: &Path) -> Fallible<BrowseData> 
         if due_hashes.contains(&card.hash()) {
             entry.due += 1;
         }
+        let rel = card.relative_file_path(&collection.directory).ok();
+        match sources.entry(card.deck_name().clone()) {
+            Entry::Occupied(mut slot) => {
+                if slot.get().as_ref() != rel.as_ref() {
+                    slot.insert(None);
+                }
+            }
+            Entry::Vacant(slot) => {
+                slot.insert(rel);
+            }
+        }
     }
+    let edit_paths: HashMap<String, PathBuf> = sources
+        .into_iter()
+        .filter_map(|(name, path)| path.map(|p| (name, p)))
+        .collect();
 
     Ok(BrowseData {
         tree: build_tree_from_counts(counts),
         duplicates: collection.duplicates,
         coll_dir: coll_dir.to_path_buf(),
+        edit_paths,
     })
 }
 
@@ -203,6 +231,7 @@ pub fn render_browse_page(
         tree,
         duplicates,
         coll_dir,
+        edit_paths,
     } = browse;
     let total_due = tree.due_today_recursive();
     page_template(html! {
@@ -236,7 +265,7 @@ pub fn render_browse_page(
                 form action=(format!("/collection/{slug}/start")) method="post" {
                     div.deck-tree {
                         @for child in &tree.children {
-                            (render_deck_node(child, 0))
+                            (render_deck_node(child, 0, collection_name, edit_paths))
                         }
                     }
                     div.browse-controls {
@@ -284,10 +313,36 @@ pub fn render_browse_page(
     })
 }
 
-fn render_deck_node(node: &DeckNode, depth: usize) -> Markup {
+/// A leaf topic links to the file it lives in, opened in the in-app editor.
+/// This replaces the outbound link to a HedgeDoc note: the target is a path
+/// we construct, on every collection rather than only remote-backed ones,
+/// and in the same tab.
+fn render_deck_node(
+    node: &DeckNode,
+    depth: usize,
+    collection_name: &str,
+    edit_paths: &HashMap<String, PathBuf>,
+) -> Markup {
     let total = node.total_cards_recursive();
     let due = node.due_today_recursive();
     let has_children = !node.children.is_empty();
+    // A parent aggregates several files; there is no one file to open.
+    let edit_url = if has_children {
+        None
+    } else {
+        edit_paths.get(&node.path).map(|rel| {
+            // `/`-separated, like every other path the file manager takes.
+            let rel = rel
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+                .join("/");
+            format!(
+                "/files/edit/{}",
+                encoded_path(&format!("{collection_name}/{rel}"))
+            )
+        })
+    };
     html! {
         div.deck-node {
             div.deck-row style=(format!("padding-left: {}px", depth * 24)) {
@@ -321,11 +376,14 @@ fn render_deck_node(node: &DeckNode, depth: usize) -> Markup {
                     " / "
                     span.deck-total { (total) }
                 }
+                @if let Some(url) = edit_url {
+                    a.edit-link href=(url) { "Edit" }
+                }
             }
             @if has_children {
                 div.deck-children {
                     @for child in &node.children {
-                        (render_deck_node(child, depth + 1))
+                        (render_deck_node(child, depth + 1, collection_name, edit_paths))
                     }
                 }
             }
@@ -405,6 +463,26 @@ mod tests {
     use super::*;
     use crate::helper::create_tmp_directory;
 
+    /// The link points at the file the topic's cards actually live in, not
+    /// at its name: a file's frontmatter `name:` renames the topic without
+    /// moving the file, and a link built from the name would 404.
+    #[test]
+    fn a_topic_links_to_the_file_its_cards_live_in() -> Fallible<()> {
+        let dir = create_tmp_directory()?;
+        std::fs::create_dir_all(dir.join("grammar"))?;
+        std::fs::write(
+            dir.join("grammar").join("particles.md"),
+            "---\nname = \"Little words\"\n---\n\nQ: wa\nA: topic marker\n",
+        )?;
+        let browse = build_deck_tree(&dir, &dir.join("test.db"))?;
+        let html = render_browse_page("My Cards", "My-Cards", &browse, 0, 0, None).into_string();
+        assert!(
+            html.contains("/files/edit/My%20Cards/grammar/particles.md"),
+            "got: {html}"
+        );
+        Ok(())
+    }
+
     /// Byte-identical cards are silently deduplicated at load time, so one
     /// copy's review history is the one that counts. The drill CLI warned
     /// about that on stderr; with the CLI gone the browse page is the only
@@ -465,6 +543,7 @@ mod tests {
             tree,
             duplicates: Vec::new(),
             coll_dir: PathBuf::new(),
+            edit_paths: HashMap::new(),
         };
         let html = render_browse_page("Coll", "coll", &browse, 0, 0, None).into_string();
         assert!(
@@ -506,6 +585,7 @@ mod tests {
             tree,
             duplicates: Vec::new(),
             coll_dir: PathBuf::new(),
+            edit_paths: HashMap::new(),
         };
         let html = render_browse_page("Coll", "coll", &browse, 0, 0, None).into_string();
         assert!(!html.contains("duplicate"), "html: {html}");

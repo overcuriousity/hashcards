@@ -8,6 +8,7 @@ use std::time::UNIX_EPOCH;
 
 use axum::Form;
 use axum::extract::Path as AxumPath;
+use axum::extract::Query;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::Html;
@@ -37,18 +38,61 @@ use crate::types::card::CardContent;
 use crate::types::card_hash::CardHash;
 use crate::types::timestamp::Timestamp;
 
+/// Where a card edit returns to when it is saved.
+///
+/// Two values, not a caller-supplied path: a redirect target taken from a
+/// query string or a form field is an open redirect, and these cover every
+/// entry point the editor has. `/collection/{slug}` renders the drill when
+/// a session is live and the topic browser when it is not, so the pencil in
+/// a session and the edit link on the topic tree can share one value.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ReturnTo {
+    Bookmarks,
+    Collection,
+}
+
+impl ReturnTo {
+    /// Anything unrecognized is the bookmarks page. A bad value in a URL is
+    /// not worth an error page: the user still gets somewhere sensible.
+    pub fn parse(raw: Option<&str>) -> Self {
+        match raw {
+            Some("collection") => ReturnTo::Collection,
+            _ => ReturnTo::Bookmarks,
+        }
+    }
+
+    pub fn target(self, slug: &str) -> String {
+        match self {
+            ReturnTo::Collection => format!("/collection/{slug}"),
+            ReturnTo::Bookmarks => format!("/collection/{slug}/bookmarks"),
+        }
+    }
+
+    /// The spelling that round-trips through the form's hidden field.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ReturnTo::Collection => "collection",
+            ReturnTo::Bookmarks => "bookmarks",
+        }
+    }
+}
+
 // ── GET handler ───────────────────────────────────────────────────────────────
 
 pub async fn edit_get_handler(
     State(state): State<AppState>,
     AxumPath((slug, hash_hex)): AxumPath<(String, String)>,
+    Query(query): Query<HashMap<String, String>>,
     current_user: Option<CurrentUser>,
 ) -> (StatusCode, Html<String>) {
     let owner = current_user.map(|u| u.email);
+    let return_to = ReturnTo::parse(query.get("return_to").map(String::as_str));
     let state2 = state.clone();
     let slug2 = slug.clone();
     let hash2 = hash_hex.clone();
-    match run_blocking(move || edit_get_inner(&state2, &slug2, &hash2, owner.as_deref())).await {
+    match run_blocking(move || edit_get_inner(&state2, &slug2, &hash2, owner.as_deref(), return_to))
+        .await
+    {
         Ok(html) => (StatusCode::OK, Html(html)),
         Err(e) => error_page(&slug, &hash_hex, &e.to_string()),
     }
@@ -59,6 +103,7 @@ fn edit_get_inner(
     slug: &str,
     hash_hex: &str,
     owner: Option<&str>,
+    return_to: ReturnTo,
 ) -> Fallible<String> {
     let rc = find_collection(state, slug, owner)
         .ok_or_else(|| ErrorReport::new(format!("Unknown collection: {slug}")))?;
@@ -78,7 +123,9 @@ fn edit_get_inner(
         .display()
         .to_string();
 
-    let html = render_edit_form(&rc.name, slug, hash_hex, &rel_path, &block, mtime_ms);
+    let html = render_edit_form(
+        &rc.name, slug, hash_hex, &rel_path, &block, mtime_ms, return_to,
+    );
     Ok(html.into_string())
 }
 
@@ -89,18 +136,23 @@ fn render_edit_form(
     rel_path: &str,
     block: &str,
     mtime_ms: u64,
+    return_to: ReturnTo,
 ) -> Markup {
     page_template(html! {
         div.edit-page {
             div.browse-header {
-                a.back-link href=(format!("/collection/{slug}/bookmarks")) {
-                    "\u{2190} " (collection_name) " Bookmarks"
+                a.back-link href=(return_to.target(slug)) {
+                    @match return_to {
+                        ReturnTo::Collection => { "\u{2190} " (collection_name) }
+                        ReturnTo::Bookmarks => { "\u{2190} " (collection_name) " Bookmarks" }
+                    }
                 }
                 h1 { "Edit Card" }
             }
             p.edit-path { code { (rel_path) } }
             form action=(format!("/collection/{slug}/edit/{hash_hex}")) method="post" {
                 input type="hidden" name="mtime_ms" value=(mtime_ms);
+                input type="hidden" name="return_to" value=(return_to.as_str());
                 textarea
                     name="new_text"
                     class="edit-textarea"
@@ -114,9 +166,7 @@ fn render_edit_form(
                 div.edit-controls {
                     button type="submit" class="btn btn-primary" { "Save" }
                     " "
-                    a.btn.btn-secondary
-                        href=(format!("/collection/{slug}/bookmarks"))
-                    { "Cancel" }
+                    a.btn.btn-secondary href=(return_to.target(slug)) { "Cancel" }
                 }
             }
         }
@@ -129,6 +179,8 @@ fn render_edit_form(
 pub struct EditForm {
     pub new_text: String,
     pub mtime_ms: String,
+    #[serde(default)]
+    pub return_to: Option<String>,
 }
 
 /// What a successful edit did, for user-facing reporting.
@@ -151,6 +203,7 @@ pub async fn edit_post_handler(
     let slug2 = slug.clone();
     let hash2 = hash_hex.clone();
     let owner = current_user.map(|u| u.email);
+    let return_to = ReturnTo::parse(form.return_to.as_deref());
     match run_blocking(move || edit_post_inner(&state2, &slug2, &hash2, form, owner.as_deref()))
         .await
     {
@@ -162,7 +215,7 @@ pub async fn edit_post_handler(
                 outcome.session.renamed,
                 outcome.session.dropped
             );
-            let target = format!("/collection/{slug}/bookmarks");
+            let target = return_to.target(&slug);
             let mut msg = String::from("Card saved.");
             if outcome.session.renamed > 0 || outcome.session.dropped > 0 {
                 msg.push_str(" Your running session was updated.");
@@ -560,6 +613,33 @@ mod tests {
     use crate::types::card::CardContent;
     use crate::types::timestamp::Timestamp;
 
+    /// A closed set, not a caller-supplied path: a redirect target taken
+    /// from a form field is an open redirect for no benefit.
+    #[test]
+    fn return_to_is_a_closed_set() {
+        assert_eq!(
+            ReturnTo::parse(Some("collection")).target("Spanish"),
+            "/collection/Spanish"
+        );
+        assert_eq!(
+            ReturnTo::parse(Some("bookmarks")).target("Spanish"),
+            "/collection/Spanish/bookmarks"
+        );
+        // Anything else is the bookmarks page, not a 400 and not the value.
+        for raw in [
+            None,
+            Some(""),
+            Some("https://evil.example.com"),
+            Some("//x"),
+        ] {
+            assert_eq!(
+                ReturnTo::parse(raw).target("Spanish"),
+                "/collection/Spanish/bookmarks",
+                "for {raw:?}"
+            );
+        }
+    }
+
     /// A state whose card tree holds one collection named `Deck`, with
     /// `files` written into it and a stable id stamped so the read paths can
     /// find it. Returns the state, the collection, and its folder.
@@ -627,6 +707,7 @@ mod tests {
             EditForm {
                 new_text: "Q: Two\nA: 2".to_string(),
                 mtime_ms: mtime.to_string(),
+                return_to: None,
             },
             None,
         )?;
@@ -680,6 +761,7 @@ mod tests {
             EditForm {
                 new_text: "## Geography\nQ: Capital of France?\nA: Paris, France".to_string(),
                 mtime_ms: mtime.to_string(),
+                return_to: None,
             },
             None,
         )?;
@@ -735,6 +817,7 @@ mod tests {
             EditForm {
                 new_text: "C: A [y] B [x]".to_string(),
                 mtime_ms: mtime.to_string(),
+                return_to: None,
             },
             None,
         )?;

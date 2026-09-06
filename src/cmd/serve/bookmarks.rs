@@ -139,7 +139,7 @@ fn render_bookmark_row(slug: &str, coll_dir: &Path, bm: &Bookmark, card: &Card) 
             }
             div.bookmark-actions {
                 a.edit-link.btn.btn-secondary
-                    href=(format!("/collection/{slug}/edit/{hash_hex}"))
+                    href=(format!("/collection/{slug}/edit/{hash_hex}?return_to=bookmarks"))
                 { "Edit" }
                 form.inline-form
                     action=(format!("/collection/{slug}/bookmarks/{hash_hex}/delete"))

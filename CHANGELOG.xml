@@ -1,5 +1,10 @@
 <changelog>
     <unreleased>
+        <added>
+            <change author="claude">
+            **A card can be edited while you are drilling it.** A pencil sits beside the bookmark star once the answer is revealed, and saving lands back on the card, re-rendered. It was refused before, and had to be: a live session keys card identity in four places — the queue, where a card requeued by Forgot or Hard appears twice; the undo stack, which holds the performance to restore; the performance cache; and the per-card database routes that send a custom deck's grades to the collection the card actually belongs to — and an edit renames the hash all four are keyed by. The session now follows the card, so the grade after an edit lands on the card in front of you and the old card's schedule comes with it. The pencil appears only after the answer is shown: opening the editor earlier would put the answer in a textarea in front of a user still trying to recall it. A card the edit deleted leaves the queue and the undo stack — undoing back to a card that is in no file would offer something you could not edit, re-drill or reach again — and an edit that empties the queue finishes the session rather than leaving a live one with nothing in it. Every topic in a collection now carries an Edit link to its file in the in-app editor, pointing at the file the cards actually live in rather than at the topic's name, which a file's frontmatter can change without moving anything. The whole-file editor migrates a running session the same way. Deleting or renaming a collection is still refused while it is being drilled: a session cannot be re-keyed onto cards that are gone, and deleting a collection unlinks the database the session still holds open. The bookmark star's tooltip no longer says "for later editing": with editing one tap away, a bookmark means "save this for later" again.
+            </change>
+        </added>
         <changed>
             <change author="claude">
             **Drill** on the collection list now starts the session. It used to open a topic picker whose own button also said "Drill", so studying a collection always cost two presses of the same word — and on a first visit the picker's answer was already the one you wanted, every topic with anything due pre-ticked. The one-tap start takes every topic and no limit; a collection's own page, now reached by its name, is where you go to drill part of one, or to look at its topics, stats, bookmarks and export.
@@ -23,6 +28,9 @@
             </change>
         </removed>
         <fixed>
+            <change author="claude">
+            Deleting or renaming a collection is no longer allowed out from under a running cross-collection deck. Sessions are keyed by URL slug and a saved deck has its own, so the guard that looked the *collection's* slug up in the session map never saw a deck session drawing on it: the collection went, taking the review database the session still held open, and every grade written afterwards landed in a file nothing could read back. A session is now found by asking what it actually loaded.
+            </change>
             <change author="claude">
             The session-completed screen no longer navigates away on a five-second timer. It is the one page in a session a user might want to sit and read.
             </change>

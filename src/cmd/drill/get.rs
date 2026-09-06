@@ -40,6 +40,8 @@ pub struct RenderContext<'a> {
     pub answer_controls: AnswerControls,
     pub form_action: &'a str,
     pub file_url_prefix: &'a str,
+    /// The slug this session is addressed by, for links out of the drill.
+    pub slug: &'a str,
 }
 
 /// Human-readable progress: "N of M", plus "(+k repeats)" when cards
@@ -136,7 +138,12 @@ pub fn render_session_page(ctx: &RenderContext, mutable: &MutableState) -> Falli
                         div.progress-fill style=(progress_bar_style) {}
                     }
                 }
-                (bookmark_button(is_bookmarked))
+                div.header-actions {
+                    @if mutable.reveal {
+                        (edit_button(ctx.slug, &card.hash().to_hex()))
+                    }
+                    (bookmark_button(is_bookmarked))
+                }
             }
             div.card-container {
                 div.card {
@@ -396,6 +403,26 @@ fn end_button() -> Markup {
     }
 }
 
+/// The card editor, as a pencil beside the star.
+///
+/// A link, not a submit: the editor is its own page, and the drill screen
+/// is one big form whose every button grades or navigates the session.
+///
+/// Shown only after the answer is revealed. Opening the editor before then
+/// would put the answer in a textarea in front of a user who is still
+/// trying to recall it, quietly corrupting the grade they are about to
+/// give. Before reveal the star is the right affordance, and it is already
+/// there.
+fn edit_button(slug: &str, hash_hex: &str) -> Markup {
+    html! {
+        a.icon-button href=(format!("/collection/{slug}/edit/{hash_hex}?return_to=collection"))
+            aria-label="Edit this card"
+            title="Edit this card." {
+            span aria-hidden="true" { "\u{270e}" }
+        }
+    }
+}
+
 /// The bookmark, as a star in the top-right corner. Filled while it holds:
 /// bookmarked is a state, not an action.
 fn bookmark_button(is_bookmarked: bool) -> Markup {
@@ -411,7 +438,7 @@ fn bookmark_button(is_bookmarked: bool) -> Markup {
         html! {
             button #bookmark .icon-button type="submit" name="action" value="Bookmark"
                 aria-label="Bookmark this card" aria-pressed="false"
-                title="Bookmark this card for later editing. Shortcut: b." {
+                title="Save this card for later. Shortcut: b." {
                 span aria-hidden="true" { "\u{2606}" }
             }
         }
@@ -457,6 +484,7 @@ mod tests {
             answer_controls: AnswerControls::Full,
             form_action: "/",
             file_url_prefix: "/file",
+            slug: "test-collection",
         };
         let html = render_completion_page(&ctx, &mutable)?.into_string();
         assert!(html.contains("No cards were reviewed."), "html: {html}");
@@ -485,6 +513,7 @@ mod tests {
             answer_controls: AnswerControls::Full,
             form_action: "/",
             file_url_prefix: "http://localhost:0/file",
+            slug: "test-collection",
         }
     }
 
@@ -709,6 +738,7 @@ mod tests {
             answer_controls: AnswerControls::Full,
             form_action: "/",
             file_url_prefix: "/file",
+            slug: "test-collection",
         };
         let html = render_completion_page(&ctx, &mutable)?.into_string();
 

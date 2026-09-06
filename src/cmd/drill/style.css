@@ -540,7 +540,7 @@ input[type="checkbox"] { accent-color: var(--color-accent); }
 .root .header {
   flex: none;
   display: grid;
-  grid-template-columns: 2.5rem 1fr 2.5rem;
+  grid-template-columns: 2.5rem 1fr 5rem;
   align-items: center;
   padding: 0.875rem 1rem;
   background: var(--color-bg-surface);
@@ -548,7 +548,12 @@ input[type="checkbox"] { accent-color: var(--color-accent); }
 }
 .root .header .progress { grid-column: 2; }
 .root .header #undo { justify-self: start; }
-.root .header #bookmark { justify-self: end; }
+/* The star, and the pencil that joins it once the answer is revealed. The
+   column is sized for both, so the star does not shift when it appears. */
+.root .header .header-actions {
+  grid-column: 3; justify-self: end;
+  display: flex; align-items: center;
+}
 
 /* A control that is available but not being offered: an icon in a corner, at
    the muted weight of a caption, sized for a thumb regardless. */
@@ -557,6 +562,7 @@ input[type="checkbox"] { accent-color: var(--color-accent); }
   display: inline-flex; align-items: center; justify-content: center;
   width: 2.25rem; height: 2.25rem; padding: 0;
   font-family: inherit; font-size: 1.125rem; line-height: 1;
+  text-decoration: none;
   cursor: pointer;
   background: transparent; color: var(--color-fg-muted);
   border: 1px solid transparent; border-radius: var(--radius-sm);

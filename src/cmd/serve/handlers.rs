@@ -191,6 +191,7 @@ fn collection_get_inner(
         answer_controls: session.answer_controls,
         form_action: &form_action,
         file_url_prefix: &file_url_prefix,
+        slug,
     };
     let body = if session.mutable.finished_at.is_some() {
         render_completion_page(&ctx, &session.mutable)?
