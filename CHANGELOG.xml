@@ -1,57 +1,59 @@
 <changelog>
     <unreleased>
-        <added>
-            <change author="claude">
-            **A card can be edited while you are drilling it.** A pencil sits beside the bookmark star once the answer is revealed, and saving lands back on the card, re-rendered. It was refused before, and had to be: a live session keys card identity in four places — the queue, where a card requeued by Forgot or Hard appears twice; the undo stack, which holds the performance to restore; the performance cache; and the per-card database routes that send a custom deck's grades to the collection the card actually belongs to — and an edit renames the hash all four are keyed by. The session now follows the card, so the grade after an edit lands on the card in front of you and the old card's schedule comes with it. The pencil appears only after the answer is shown: opening the editor earlier would put the answer in a textarea in front of a user still trying to recall it. A card the edit deleted leaves the queue and the undo stack — undoing back to a card that is in no file would offer something you could not edit, re-drill or reach again — and an edit that empties the queue finishes the session rather than leaving a live one with nothing in it. Every topic in a collection now carries an Edit link to its file in the in-app editor, pointing at the file the cards actually live in rather than at the topic's name, which a file's frontmatter can change without moving anything. The whole-file editor migrates a running session the same way. Deleting or renaming a collection is still refused while it is being drilled: a session cannot be re-keyed onto cards that are gone, and deleting a collection unlinks the database the session still holds open. The bookmark star's tooltip no longer says "for later editing": with editing one tap away, a bookmark means "save this for later" again.
-            </change>
-        </added>
-        <changed>
-            <change author="claude">
-            **Drill** on the collection list now starts the session. It used to open a topic picker whose own button also said "Drill", so studying a collection always cost two presses of the same word — and on a first visit the picker's answer was already the one you wanted, every topic with anything due pre-ticked. The one-tap start takes every topic and no limit; a collection's own page, now reached by its name, is where you go to drill part of one, or to look at its topics, stats, bookmarks and export.
-            </change>
-            <change author="claude">
-            The drill's bottom bar holds the grades and nothing else. Undo and Bookmark sat in it at the same weight as Forgot/Hard/Good/Easy, and on a phone the bar became a column where each of them was a full-width button — three ways to lose a session's place, all the size of the buttons pressed hundreds of times an hour. Undo is now a back-arrow in the top-left corner, Bookmark a star in the top-right, and End a quiet line under the grades. The theme switch, which floats in that top-right corner on every page, is hidden during a session: a drill is not where a theme gets chosen, and it would sit on the star.
-            </change>
-            <change author="claude">
-            "Deck" now means one thing. It named both a heading inside a collection's markdown and a saved cross-collection selection, to the point where the decks page had to define itself with a sentence using the word twice. The heading is a **topic**; a **deck** is only ever the saved selection. Saved decks are also no longer kept behind a "Manage Decks" button — they are drillable in exactly the way a collection is, so they are listed among the collections, tagged, with their own counts.
-            </change>
-            <change author="claude">
-            The collection list is one list again. Four full-width bars — sign-in, decks, sources, git — announced background details above it, each as loud as the thing the page is for. They are now one line of small links beside the title and one muted status line under it, and the collections are rows carrying the due count in the one colour on the page.
-            </change>
-        </changed>
-        <removed>
-            <change author="claude">
-            **Remote sources are gone.** `[git]`, `[[source]]`/`[[hedgedoc]]` and the auto-commit of web edits are removed, and with them the `/sources` page, both background sync tasks and every outbound request except OIDC. They could not be edited: a save to a HedgeDoc-backed collection was overwritten on the next sync tick with no warning, and a commit into the git worktree was never pushed, so once the remote moved the branch had diverged and every later `git pull --ff-only` failed silently. A collection is now one thing — a top-level folder in your own card tree, discovered by reading the directory and identified by the stable id in its `.hashcards.toml` — so "a card can be edited" is a flat fact about the application rather than a property of where the card came from. Ownership is structural too: which tree a folder sits in is who owns it, so a collection nobody can reach stops being expressible. Three slug namespaces collapse to one, two database-naming schemes to one, and `{data_dir}/local` is renamed `{data_dir}/cards` now that there is no `{data_dir}/repo` for it to be named against. Review databases stay in `{data_dir}/db` under the names they already have, so no history moves. To bring markdown in, create a file in **My Cards** and paste the text into the editor, which previews through the production parser and validates images before saving. Nothing was deployed, so there is no migration: `[git]`, `[[source]]`, `[[hedgedoc]]` and `[[collection]]` are no longer accepted in `hashcards.toml`.
-            </change>
-            <change author="claude">
-            The notice about sessions a crash left open is now reported per review database rather than per URL slug, and the startup sweep that finds them walks every user's card tree. It used to iterate only the configured collections, which no longer exist; and two users who both call a collection "Spanish" slugify alike, so whichever of them opened the page first was shown the other's count.
-            </change>
-        </removed>
-        <fixed>
-            <change author="claude">
-            Deleting or renaming a collection is no longer allowed out from under a running cross-collection deck. Sessions are keyed by URL slug and a saved deck has its own, so the guard that looked the *collection's* slug up in the session map never saw a deck session drawing on it: the collection went, taking the review database the session still held open, and every grade written afterwards landed in a file nothing could read back. A session is now found by asking what it actually loaded.
-            </change>
-            <change author="claude">
-            The session-completed screen no longer navigates away on a five-second timer. It is the one page in a session a user might want to sit and read.
-            </change>
-            <change author="claude">
-            A running drill belongs to the user who started it. Sessions were filed under the URL slug alone, and a collection is now a folder in its owner's card tree, so two users each owning a "Spanish" both address it as `Spanish` — whoever asked second was shown the other's live card, and could Reveal, grade, Undo and End it, writing reviews into a database that was never theirs. The same slug on the collection list offered a stranger's session to Resume. Sessions are now keyed by owner as well as slug.
-            </change>
-            <change author="claude">
-            A card drilled inside a deck can be edited and shows its images. The pencil and the media URLs both name the slug the session is filed under, which for a saved deck is the deck's own slug and names no collection at all: the editor answered "Unknown collection: deck-..." with a 500, and every image in the session 404'd. The editor now looks through a deck to the member collection that actually holds the card — which is also the only way a deck spanning several collections could name the right one — and returns to the drill it was opened from. Each session records the home collection of every card it holds, not only the ones drawing on more than one collection.
-            </change>
-            <change author="claude">
-            An edit that makes a card byte-identical to another card the session is already drilling no longer corrupts the survivor's schedule. The database declines that rename — the target has its own history, and neither row may be destroyed — but the session's performance cache took the rename anyway, so the next grade of the surviving card computed its stability, difficulty and interval from the edited-away card's history. The cache now keeps what the database kept.
-            </change>
-            <change author="claude">
-            A deck whose counts cannot be worked out is still listed. It was logged and dropped, so a deck whose member collection had stopped loading — one missing image is enough — vanished from the one page that lists it, with nothing on screen to say anything was wrong. It now appears, says "Counts unavailable", and explains itself when opened.
-            </change>
-            <change author="claude">
-            A card tree is named for its owner's email *and* eight characters of its hash. Slugifying alone is not injective — every character outside `[A-Za-z0-9._-]` becomes `-`, so `me+work@example.com` and `me-work@example.com` named one folder — and which tree a collection sits in is who owns it, so two OIDC identities would have shared every collection, every file and every review database. Nothing was deployed, so there is no migration; a tree left over from a local run is renamed by hand or created afresh.
-            </change>
-        </fixed>
         </unreleased>
     <releases>
+        <release version="0.4.10" date="2026-09-06">
+            <added>
+                <change author="claude">
+            **A card can be edited while you are drilling it.** A pencil sits beside the bookmark star once the answer is revealed, and saving lands back on the card, re-rendered. It was refused before, and had to be: a live session keys card identity in four places — the queue, where a card requeued by Forgot or Hard appears twice; the undo stack, which holds the performance to restore; the performance cache; and the per-card database routes that send a custom deck's grades to the collection the card actually belongs to — and an edit renames the hash all four are keyed by. The session now follows the card, so the grade after an edit lands on the card in front of you and the old card's schedule comes with it. The pencil appears only after the answer is shown: opening the editor earlier would put the answer in a textarea in front of a user still trying to recall it. A card the edit deleted leaves the queue and the undo stack — undoing back to a card that is in no file would offer something you could not edit, re-drill or reach again — and an edit that empties the queue finishes the session rather than leaving a live one with nothing in it. Every topic in a collection now carries an Edit link to its file in the in-app editor, pointing at the file the cards actually live in rather than at the topic's name, which a file's frontmatter can change without moving anything. The whole-file editor migrates a running session the same way. Deleting or renaming a collection is still refused while it is being drilled: a session cannot be re-keyed onto cards that are gone, and deleting a collection unlinks the database the session still holds open. The bookmark star's tooltip no longer says "for later editing": with editing one tap away, a bookmark means "save this for later" again.
+            </change>
+            </added>
+            <changed>
+                <change author="claude">
+            **Drill** on the collection list now starts the session. It used to open a topic picker whose own button also said "Drill", so studying a collection always cost two presses of the same word — and on a first visit the picker's answer was already the one you wanted, every topic with anything due pre-ticked. The one-tap start takes every topic and no limit; a collection's own page, now reached by its name, is where you go to drill part of one, or to look at its topics, stats, bookmarks and export.
+            </change>
+                <change author="claude">
+            The drill's bottom bar holds the grades and nothing else. Undo and Bookmark sat in it at the same weight as Forgot/Hard/Good/Easy, and on a phone the bar became a column where each of them was a full-width button — three ways to lose a session's place, all the size of the buttons pressed hundreds of times an hour. Undo is now a back-arrow in the top-left corner, Bookmark a star in the top-right, and End a quiet line under the grades. The theme switch, which floats in that top-right corner on every page, is hidden during a session: a drill is not where a theme gets chosen, and it would sit on the star.
+            </change>
+                <change author="claude">
+            "Deck" now means one thing. It named both a heading inside a collection's markdown and a saved cross-collection selection, to the point where the decks page had to define itself with a sentence using the word twice. The heading is a **topic**; a **deck** is only ever the saved selection. Saved decks are also no longer kept behind a "Manage Decks" button — they are drillable in exactly the way a collection is, so they are listed among the collections, tagged, with their own counts.
+            </change>
+                <change author="claude">
+            The collection list is one list again. Four full-width bars — sign-in, decks, sources, git — announced background details above it, each as loud as the thing the page is for. They are now one line of small links beside the title and one muted status line under it, and the collections are rows carrying the due count in the one colour on the page.
+            </change>
+            </changed>
+            <removed>
+                <change author="claude">
+            **Remote sources are gone.** `[git]`, `[[source]]`/`[[hedgedoc]]` and the auto-commit of web edits are removed, and with them the `/sources` page, both background sync tasks and every outbound request except OIDC. They could not be edited: a save to a HedgeDoc-backed collection was overwritten on the next sync tick with no warning, and a commit into the git worktree was never pushed, so once the remote moved the branch had diverged and every later `git pull --ff-only` failed silently. A collection is now one thing — a top-level folder in your own card tree, discovered by reading the directory and identified by the stable id in its `.hashcards.toml` — so "a card can be edited" is a flat fact about the application rather than a property of where the card came from. Ownership is structural too: which tree a folder sits in is who owns it, so a collection nobody can reach stops being expressible. Three slug namespaces collapse to one, two database-naming schemes to one, and `{data_dir}/local` is renamed `{data_dir}/cards` now that there is no `{data_dir}/repo` for it to be named against. Review databases stay in `{data_dir}/db` under the names they already have, so no history moves. To bring markdown in, create a file in **My Cards** and paste the text into the editor, which previews through the production parser and validates images before saving. Nothing was deployed, so there is no migration: `[git]`, `[[source]]`, `[[hedgedoc]]` and `[[collection]]` are no longer accepted in `hashcards.toml`.
+            </change>
+                <change author="claude">
+            The notice about sessions a crash left open is now reported per review database rather than per URL slug, and the startup sweep that finds them walks every user's card tree. It used to iterate only the configured collections, which no longer exist; and two users who both call a collection "Spanish" slugify alike, so whichever of them opened the page first was shown the other's count.
+            </change>
+            </removed>
+            <fixed>
+                <change author="claude">
+            Deleting or renaming a collection is no longer allowed out from under a running cross-collection deck. Sessions are keyed by URL slug and a saved deck has its own, so the guard that looked the *collection's* slug up in the session map never saw a deck session drawing on it: the collection went, taking the review database the session still held open, and every grade written afterwards landed in a file nothing could read back. A session is now found by asking what it actually loaded.
+            </change>
+                <change author="claude">
+            The session-completed screen no longer navigates away on a five-second timer. It is the one page in a session a user might want to sit and read.
+            </change>
+                <change author="claude">
+            A running drill belongs to the user who started it. Sessions were filed under the URL slug alone, and a collection is now a folder in its owner's card tree, so two users each owning a "Spanish" both address it as `Spanish` — whoever asked second was shown the other's live card, and could Reveal, grade, Undo and End it, writing reviews into a database that was never theirs. The same slug on the collection list offered a stranger's session to Resume. Sessions are now keyed by owner as well as slug.
+            </change>
+                <change author="claude">
+            A card drilled inside a deck can be edited and shows its images. The pencil and the media URLs both name the slug the session is filed under, which for a saved deck is the deck's own slug and names no collection at all: the editor answered "Unknown collection: deck-..." with a 500, and every image in the session 404'd. The editor now looks through a deck to the member collection that actually holds the card — which is also the only way a deck spanning several collections could name the right one — and returns to the drill it was opened from. Each session records the home collection of every card it holds, not only the ones drawing on more than one collection.
+            </change>
+                <change author="claude">
+            An edit that makes a card byte-identical to another card the session is already drilling no longer corrupts the survivor's schedule. The database declines that rename — the target has its own history, and neither row may be destroyed — but the session's performance cache took the rename anyway, so the next grade of the surviving card computed its stability, difficulty and interval from the edited-away card's history. The cache now keeps what the database kept.
+            </change>
+                <change author="claude">
+            A deck whose counts cannot be worked out is still listed. It was logged and dropped, so a deck whose member collection had stopped loading — one missing image is enough — vanished from the one page that lists it, with nothing on screen to say anything was wrong. It now appears, says "Counts unavailable", and explains itself when opened.
+            </change>
+                <change author="claude">
+            A card tree is named for its owner's email *and* eight characters of its hash. Slugifying alone is not injective — every character outside `[A-Za-z0-9._-]` becomes `-`, so `me+work@example.com` and `me-work@example.com` named one folder — and which tree a collection sits in is who owns it, so two OIDC identities would have shared every collection, every file and every review database. Nothing was deployed, so there is no migration; a tree left over from a local run is renamed by hand or created afresh.
+            </change>
+            </fixed>
+        </release>
         <release version="0.4.9" date="2026-09-05">
             <fixed>
                 <change author="claude">
