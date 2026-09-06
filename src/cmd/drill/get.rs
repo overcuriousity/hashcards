@@ -40,6 +40,8 @@ pub struct RenderContext<'a> {
     pub answer_controls: AnswerControls,
     pub form_action: &'a str,
     pub file_url_prefix: &'a str,
+    /// The slug this session is addressed by, for links out of the drill.
+    pub slug: &'a str,
 }
 
 /// Human-readable progress: "N of M", plus "(+k repeats)" when cards
@@ -91,8 +93,12 @@ pub fn render_session_page(ctx: &RenderContext, mutable: &MutableState) -> Falli
     };
     let card_content = render_card(&card, mutable.reveal, &config)?;
     let form_action = ctx.form_action;
-    let card_controls = if mutable.reveal {
-        let grades = match ctx.answer_controls {
+    // Reveal and the grades are the only controls in the bottom bar: they are
+    // the session's actual work, and on a phone the bar is where the thumb
+    // rests. Undo and Bookmark are occasional, so they live as icons in the
+    // header instead, where a mis-tap costs nothing.
+    let answer_controls = if mutable.reveal {
+        match ctx.answer_controls {
             AnswerControls::Binary => html! {
                 input id="forgot" type="submit" name="action" value="Forgot" title="Mark card as forgotten.";
                 input id="good" type="submit" name="action" value="Good" title="Mark card as remembered.";
@@ -103,41 +109,23 @@ pub fn render_session_page(ctx: &RenderContext, mutable: &MutableState) -> Falli
                 input id="good" type="submit" name="action" value="Good" title="Mark card as remembered well. Shortcut: 3.";
                 input id="easy" type="submit" name="action" value="Easy" title="Mark card as very easy. Shortcut: 4.";
             },
-        };
-        html! {
-            form action=(form_action) method="post" {
-                input type="hidden" name="card" value=(card.hash().to_hex());
-                @if let Some(id) = undo_review {
-                    input type="hidden" name="undo_review" value=(id);
-                }
-                (undo_button(undo_disabled))
-                (bookmark_button(is_bookmarked))
-                div.spacer {}
-                div.grades {
-                    (grades)
-                }
-                div.spacer {}
-                (end_button())
-            }
         }
     } else {
         html! {
-            form action=(form_action) method="post" {
-                @if let Some(id) = undo_review {
-                    input type="hidden" name="undo_review" value=(id);
-                }
-                (undo_button(undo_disabled))
-                (bookmark_button(is_bookmarked))
-                div.spacer {}
-                input id="reveal" type="submit" name="action" value="Reveal" title="Show the answer. Shortcut: space.";
-                div.spacer {}
-                (end_button())
-            }
+            input id="reveal" type="submit" name="action" value="Reveal" title="Show the answer. Shortcut: space.";
         }
     };
+    // One form around the whole screen, so a header icon and a grade button
+    // submit the same hidden fields without the header having to carry a
+    // duplicate copy of them.
     let html = html! {
-        div.root {
+        form.root action=(form_action) method="post" {
+            input type="hidden" name="card" value=(card.hash().to_hex());
+            @if let Some(id) = undo_review {
+                input type="hidden" name="undo_review" value=(id);
+            }
             div.header {
+                (undo_button(undo_disabled))
                 div.progress {
                     div.progress-text { (progress_label) }
                     div.progress-bar
@@ -149,6 +137,12 @@ pub fn render_session_page(ctx: &RenderContext, mutable: &MutableState) -> Falli
                     {
                         div.progress-fill style=(progress_bar_style) {}
                     }
+                }
+                div.header-actions {
+                    @if mutable.reveal {
+                        (edit_button(ctx.slug, &card.hash().to_hex()))
+                    }
+                    (bookmark_button(is_bookmarked))
                 }
             }
             div.card-container {
@@ -162,7 +156,10 @@ pub fn render_session_page(ctx: &RenderContext, mutable: &MutableState) -> Falli
                 }
             }
             div.controls {
-                (card_controls)
+                div.grades {
+                    (answer_controls)
+                }
+                (end_button())
             }
         }
     };
@@ -214,31 +211,6 @@ fn render_card(card: &Card, reveal: bool, config: &MarkdownRenderConfig) -> Fall
 }
 
 const TS_FORMAT: &str = "%Y-%m-%d %H:%M:%S";
-
-const REDIRECT_SCRIPT: &str = r#"
-(function() {
-    var secs = 5;
-    var el = document.getElementById('countdown');
-    var timer = setInterval(function() {
-        secs--;
-        if (el) el.textContent = secs;
-        if (secs <= 0) {
-            clearInterval(timer);
-            var form = document.getElementById('home-form');
-            if (form) form.submit();
-        }
-    }, 1000);
-    var cancel = document.getElementById('cancel-redirect');
-    if (cancel) {
-        cancel.addEventListener('click', function(e) {
-            e.preventDefault();
-            clearInterval(timer);
-            var notice = document.querySelector('.redirect-notice');
-            if (notice) notice.style.display = 'none';
-        });
-    }
-})();
-"#;
 
 pub fn render_completion_page(ctx: &RenderContext, mutable: &MutableState) -> Fallible<Markup> {
     if mutable.reviews.is_empty() {
@@ -323,13 +295,12 @@ pub fn render_completion_page(ctx: &RenderContext, mutable: &MutableState) -> Fa
         if distinct_cards == 1 { "" } else { "s" }
     );
 
-    let (action_button, redirect_notice) = completion_actions(ctx);
+    let action_button = completion_actions(ctx);
 
     let html = html! {
         div.finished {
             h1 { "Session Completed" }
             div.summary { (summary_line) }
-            (redirect_notice)
             details {
                 summary { "Session Stats" }
                 div.stats {
@@ -381,75 +352,94 @@ pub fn render_completion_page(ctx: &RenderContext, mutable: &MutableState) -> Fa
     Ok(html)
 }
 
-/// The "Home" button and the auto-redirect notice shown once a session is
-/// finished.
-fn completion_actions(ctx: &RenderContext) -> (Markup, Markup) {
-    (
-        html! {
-            div.shutdown-container {
-                form #home-form action=(ctx.form_action) method="post" style="display:inline" {
-                    input type="hidden" name="action" value="Home";
-                    button #home .home-button.btn.btn-primary type="submit" { "Home" }
-                }
+/// The buttons shown once a session is finished. Nothing here happens on a
+/// timer: the page a session ends on is the one page a user may want to sit
+/// and read, so it waits.
+fn completion_actions(ctx: &RenderContext) -> Markup {
+    html! {
+        div.shutdown-container {
+            form #home-form action=(ctx.form_action) method="post" {
+                input type="hidden" name="action" value="Home";
+                button #home .home-button.btn.btn-primary type="submit" { "Back to collections" }
             }
-        },
-        html! {
-            p.redirect-notice {
-                "Returning to collections in "
-                span #countdown { "5" }
-                "s. "
-                a #cancel-redirect href="#" { "Cancel" }
-            }
-            script { (maud::PreEscaped(REDIRECT_SCRIPT)) }
-        },
-    )
+        }
+    }
 }
 
 /// Completion page for a session that ended before any card was graded:
 /// no stats block, since there is nothing meaningful to report.
 fn render_empty_completion_page(ctx: &RenderContext) -> Markup {
-    let (action_button, redirect_notice) = completion_actions(ctx);
+    let action_button = completion_actions(ctx);
     html! {
         div.finished {
             h1 { "Session Ended" }
             div.summary { "No cards were reviewed." }
-            (redirect_notice)
             (action_button)
         }
     }
 }
 
+/// Undo, as a back-arrow in the top-left corner.
+///
+/// It is a correction, not part of the loop, so it is placed where the eye
+/// goes to leave a screen rather than where the thumb goes to grade one.
 fn undo_button(disabled: bool) -> Markup {
-    if disabled {
-        html! {
-            input id="undo" type="submit" name="action" value="Undo" disabled;
-        }
-    } else {
-        html! {
-            input id="undo" type="submit" name="action" value="Undo" title="Undo last action. Shortcut: u.";
+    html! {
+        button #undo .icon-button type="submit" name="action" value="Undo"
+            disabled[disabled]
+            aria-label="Undo the last answer"
+            title="Undo last action. Shortcut: u." {
+            span aria-hidden="true" { "\u{21b6}" }
         }
     }
 }
 
+/// Ending early is a way out, not an answer, so it is a quiet line under the
+/// grades rather than a button competing with them.
 fn end_button() -> Markup {
     html! {
-        input id="end" type="submit" name="action" value="End" title="End the session (changes are saved)";
+        button #end .end-link type="submit" name="action" value="End"
+            title="End the session (changes are saved)" { "End session" }
     }
 }
 
+/// The card editor, as a pencil beside the star.
+///
+/// A link, not a submit: the editor is its own page, and the drill screen
+/// is one big form whose every button grades or navigates the session.
+///
+/// Shown only after the answer is revealed. Opening the editor before then
+/// would put the answer in a textarea in front of a user who is still
+/// trying to recall it, quietly corrupting the grade they are about to
+/// give. Before reveal the star is the right affordance, and it is already
+/// there.
+fn edit_button(slug: &str, hash_hex: &str) -> Markup {
+    html! {
+        a.icon-button href=(format!("/collection/{slug}/edit/{hash_hex}?return_to=collection"))
+            aria-label="Edit this card"
+            title="Edit this card." {
+            span aria-hidden="true" { "\u{270e}" }
+        }
+    }
+}
+
+/// The bookmark, as a star in the top-right corner. Filled while it holds:
+/// bookmarked is a state, not an action.
 fn bookmark_button(is_bookmarked: bool) -> Markup {
     if is_bookmarked {
         html! {
-            button #bookmark .bookmark-active type="submit" name="action" value="Unbookmark"
+            button #bookmark .icon-button.bookmark-active type="submit" name="action" value="Unbookmark"
+                aria-label="Remove bookmark" aria-pressed="true"
                 title="Remove bookmark. Shortcut: b." {
-                "\u{2605} Bookmarked"
+                span aria-hidden="true" { "\u{2605}" }
             }
         }
     } else {
         html! {
-            button #bookmark type="submit" name="action" value="Bookmark"
-                title="Bookmark this card for later editing. Shortcut: b." {
-                "\u{2606} Bookmark"
+            button #bookmark .icon-button type="submit" name="action" value="Bookmark"
+                aria-label="Bookmark this card" aria-pressed="false"
+                title="Save this card for later. Shortcut: b." {
+                span aria-hidden="true" { "\u{2606}" }
             }
         }
     }
@@ -494,6 +484,7 @@ mod tests {
             answer_controls: AnswerControls::Full,
             form_action: "/",
             file_url_prefix: "/file",
+            slug: "test-collection",
         };
         let html = render_completion_page(&ctx, &mutable)?.into_string();
         assert!(html.contains("No cards were reviewed."), "html: {html}");
@@ -522,6 +513,7 @@ mod tests {
             answer_controls: AnswerControls::Full,
             form_action: "/",
             file_url_prefix: "http://localhost:0/file",
+            slug: "test-collection",
         }
     }
 
@@ -555,6 +547,76 @@ mod tests {
         let ctx = make_ctx(Path::new("."));
         let result = render_completion_page(&ctx, &mutable);
         assert!(result.is_err());
+    }
+
+    /// The completion screen never navigates on its own. It is the one page
+    /// a user may want to sit and read, and a countdown reading it for them
+    /// is the opposite of that.
+    #[test]
+    fn test_completion_page_has_no_countdown() {
+        let ctx = make_ctx(Path::new("."));
+        let html = render_empty_completion_page(&ctx).into_string();
+        assert!(
+            !html.contains("countdown") && !html.contains("setInterval"),
+            "the completion page must not run a redirect timer: {html}"
+        );
+        assert!(
+            !html.contains("Returning to collections"),
+            "no auto-redirect notice: {html}"
+        );
+        assert!(html.contains("Back to collections"), "html: {html}");
+    }
+
+    /// The bottom bar is for grading and nothing else: Undo and Bookmark are
+    /// header icons, End is a quiet line. A control that shares the grades'
+    /// weight gets pressed at the grades' rate.
+    #[test]
+    fn test_session_page_keeps_the_grade_bar_for_grades() -> Fallible<()> {
+        let dir = crate::helper::create_tmp_directory()?;
+        std::fs::write(dir.join("deck.md"), "Q: Question?\nA: Answer.\n")?;
+        let db = Database::new(":memory:")?;
+        let now = Timestamp::now();
+        let card = Card::new(
+            "Deck".to_string(),
+            dir.join("deck.md"),
+            (1, 2),
+            CardContent::new_basic("Question?", "Answer."),
+        );
+        db.insert_card(card.hash(), now)?;
+        let session_id = db.create_session(now)?;
+        let mut mutable = MutableState::new(
+            SessionDbs::single(db, session_id),
+            Cache::new(),
+            vec![card],
+            Jitter::none(),
+            TinyRng::from_seed(1),
+        );
+        mutable.reveal = true;
+        let ctx = make_ctx(&dir);
+        let html = render_session_page(&ctx, &mutable)?.into_string();
+
+        let controls = html
+            .split_once(r#"<div class="controls">"#)
+            .map(|(_, rest)| rest.to_string())
+            .unwrap_or_default();
+        assert!(
+            !controls.contains(r#"id="undo""#) && !controls.contains(r#"id="bookmark""#),
+            "undo and bookmark belong in the header, not the grade bar: {controls}"
+        );
+        let header = html
+            .split_once(r#"<div class="header">"#)
+            .and_then(|(_, rest)| rest.split_once(r#"<div class="card-container">"#))
+            .map(|(head, _)| head.to_string())
+            .unwrap_or_default();
+        assert!(
+            header.contains(r#"id="undo""#) && header.contains(r#"id="bookmark""#),
+            "undo and bookmark must be in the header: {header}"
+        );
+        assert!(
+            controls.contains(r#"id="end""#) && controls.contains("end-link"),
+            "End stays available, as a quiet link: {controls}"
+        );
+        Ok(())
     }
 
     /// FEAT-08: "N of M" text, with "(+k repeats)" only when repeats exist.
@@ -676,6 +738,7 @@ mod tests {
             answer_controls: AnswerControls::Full,
             form_action: "/",
             file_url_prefix: "/file",
+            slug: "test-collection",
         };
         let html = render_completion_page(&ctx, &mutable)?.into_string();
 

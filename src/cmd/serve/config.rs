@@ -1,7 +1,5 @@
-use std::collections::HashMap;
 use std::env::current_dir;
 use std::fs::read_to_string;
-use std::path::Component;
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -19,41 +17,11 @@ use crate::types::performance::Jitter;
 pub struct ServeConfig {
     pub server: ServerSection,
     #[serde(default)]
-    pub git: Option<GitSection>,
-    #[serde(default)]
     pub defaults: DefaultsSection,
     #[serde(default)]
     pub oidc: Option<OidcSection>,
-    #[serde(rename = "collection", default)]
-    pub collections: Vec<CollectionEntry>,
-    #[serde(rename = "source", default)]
-    pub sources: Vec<SourceEntry>,
-    /// Deprecated spelling of `[[source]]`, still accepted so existing
-    /// config files keep working. New entries are written as `[[source]]`.
-    #[serde(rename = "hedgedoc", default)]
-    pub hedgedoc: Vec<SourceEntry>,
     #[serde(rename = "deck", default)]
     pub decks: Vec<CustomDeckEntry>,
-}
-
-/// One remote markdown document drilled as its own collection: a HedgeDoc
-/// note or a file in a git repository. Which of the two is re-derived from
-/// the URL at load time, never stored.
-#[derive(Deserialize, Serialize, Clone)]
-pub struct SourceEntry {
-    pub url: String,
-    #[serde(default)]
-    pub owner: Option<String>,
-}
-
-impl ServeConfig {
-    /// Every configured remote source, from both the current `[[source]]`
-    /// spelling and the deprecated `[[hedgedoc]]` one.
-    pub fn source_entries(&self) -> Vec<SourceEntry> {
-        let mut entries = self.sources.clone();
-        entries.extend(self.hedgedoc.iter().cloned());
-        entries
-    }
 }
 
 /// A user-assembled deck: a named selection of decks drawn from any of the
@@ -123,37 +91,6 @@ fn default_port() -> u16 {
 
 fn default_session_timeout_minutes() -> u64 {
     1440
-}
-
-#[derive(Deserialize)]
-pub struct GitSection {
-    pub repo_url: Option<String>,
-    #[serde(default = "default_branch")]
-    pub branch: String,
-    #[serde(default = "default_poll_interval")]
-    pub poll_interval_minutes: u64,
-    /// Author name for auto-commits of in-browser edits.
-    #[serde(default = "default_commit_author_name")]
-    pub commit_author_name: String,
-    /// Author email for auto-commits of in-browser edits.
-    #[serde(default = "default_commit_author_email")]
-    pub commit_author_email: String,
-}
-
-fn default_branch() -> String {
-    "main".to_string()
-}
-
-fn default_poll_interval() -> u64 {
-    30
-}
-
-fn default_commit_author_name() -> String {
-    "hashcards web edit".to_string()
-}
-
-fn default_commit_author_email() -> String {
-    "hashcards@localhost".to_string()
 }
 
 #[derive(Deserialize)]
@@ -237,20 +174,6 @@ impl From<AnswerControlsConfig> for AnswerControls {
     }
 }
 
-#[derive(Deserialize, Serialize, Clone)]
-pub struct CollectionEntry {
-    pub name: String,
-    pub path: String,
-    #[serde(default)]
-    pub owner: Option<String>,
-}
-
-impl CollectionEntry {
-    pub fn slug(&self) -> String {
-        slugify(&self.path)
-    }
-}
-
 pub fn slugify(s: &str) -> String {
     s.chars()
         .map(|c| {
@@ -272,16 +195,6 @@ pub fn load_config(path: &Path) -> Fallible<ServeConfig> {
 
 // --- Resolved runtime config ---
 
-pub struct ResolvedGit {
-    pub repo_url: String,
-    pub branch: String,
-    pub poll_interval_minutes: u64,
-    pub commit_author_name: String,
-    pub commit_author_email: String,
-    pub repo_dir: PathBuf,
-    pub db_dir: PathBuf,
-}
-
 #[derive(Clone)]
 pub struct ResolvedCollection {
     pub name: String,
@@ -295,15 +208,11 @@ pub struct ResolvedCollection {
 pub struct ResolvedServeConfig {
     pub host: String,
     pub port: u16,
-    pub git: Option<ResolvedGit>,
     pub defaults: DefaultsSection,
-    pub collections: Vec<ResolvedCollection>,
-    /// The directory holding the repo clone and the review databases.
+    /// The directory holding the card trees and the review databases.
     pub data_dir: Option<PathBuf>,
     /// Config file path; needed to persist UI changes back to disk.
     pub config_path: Option<PathBuf>,
-    /// Remote source URLs loaded from the config file.
-    pub hedgedoc_entries: Vec<SourceEntry>,
     /// User-assembled cross-collection decks loaded from the config file.
     pub custom_decks: Vec<CustomDeckEntry>,
     /// Idle drill sessions are evicted after this many minutes (0 = never).
@@ -311,24 +220,6 @@ pub struct ResolvedServeConfig {
     /// Set when `[oidc]` is configured. Gates every route except `/auth/*`
     /// behind login and scopes collections/notes to their `owner`.
     pub oidc: Option<ResolvedOidc>,
-}
-
-/// Reject collections whose names map to the same URL slug.
-///
-/// `slugify` collapses every non-alphanumeric character to `-`, so distinct
-/// paths like `a/b` and `a-b` collide and would silently share one database.
-pub(crate) fn check_slug_collisions(collections: &[ResolvedCollection]) -> Fallible<()> {
-    let mut seen: HashMap<&str, &ResolvedCollection> = HashMap::new();
-    for rc in collections {
-        if let Some(first) = seen.get(rc.slug.as_str()) {
-            return fail(format!(
-                "configuration error: collections '{}' and '{}' both map to the URL slug '{}'. Rename one of them so their slugs differ.",
-                first.name, rc.name, rc.slug
-            ));
-        }
-        seen.insert(rc.slug.as_str(), rc);
-    }
-    Ok(())
 }
 
 impl ResolvedServeConfig {
@@ -341,58 +232,6 @@ impl ResolvedServeConfig {
                 current_dir()?.join(p)
             }
         };
-        let repo_dir = data_dir.join("repo");
-        let db_dir = data_dir.join("db");
-
-        // Read before the `[oidc]` match below partially moves `config`.
-        let configured_sources = config.source_entries();
-
-        let collections = config
-            .collections
-            .iter()
-            .map(|entry| {
-                let entry_path = PathBuf::from(&entry.path);
-                // `is_absolute()` alone misses a path that `has_root()` but,
-                // on Windows, no drive prefix (e.g. `/etc`, or a UNC-less
-                // `\etc`): `is_absolute()` is false for it there, yet
-                // `repo_dir.join(entry_path)` below still discards
-                // `repo_dir` and keeps only its own root, exactly like an
-                // absolute path would. `has_root()` catches that case on
-                // every platform (on Unix it is equivalent to
-                // `is_absolute()`).
-                if entry_path.is_absolute() || entry_path.has_root() {
-                    return fail(format!(
-                        "configuration error: collection path must be relative \
-                         (it is resolved inside `{}`), but `{}` is absolute",
-                        repo_dir.display(),
-                        entry.path
-                    ));
-                }
-                if entry_path.components().any(|c| c == Component::ParentDir) {
-                    return fail(format!(
-                        "configuration error: collection path must not contain \
-                         `..` components: `{}`",
-                        entry.path
-                    ));
-                }
-                let slug = entry.slug();
-                Ok(ResolvedCollection {
-                    name: entry.name.clone(),
-                    coll_dir: repo_dir.join(&entry.path),
-                    db_path: db_dir.join(format!("{slug}.db")),
-                    slug,
-                    owner: entry.owner.as_ref().map(|o| o.to_lowercase()),
-                })
-            })
-            .collect::<Fallible<Vec<ResolvedCollection>>>()?;
-
-        // Local card folders share the slug namespace with configured
-        // collections, but they are the user's own writing: one that
-        // shadows a configured collection is dropped from discovery at
-        // runtime with a warning (see `local_collections_for`), rather than
-        // stopping the server from booting.
-        check_slug_collisions(&collections)?;
-
         let oidc = match config.oidc {
             None => None,
             Some(o) => {
@@ -428,16 +267,6 @@ impl ResolvedServeConfig {
             }
         };
 
-        // Source owners are matched against the lowercased email claim just
-        // like collection owners, so they are normalized the same way.
-        let hedgedoc_entries: Vec<SourceEntry> = configured_sources
-            .iter()
-            .map(|h| SourceEntry {
-                url: h.url.clone(),
-                owner: h.owner.as_ref().map(|o| o.to_lowercase()),
-            })
-            .collect();
-
         let custom_decks: Vec<CustomDeckEntry> = config
             .decks
             .iter()
@@ -463,24 +292,6 @@ impl ResolvedServeConfig {
         }
 
         if oidc.is_some() {
-            for c in &collections {
-                if c.owner.is_none() {
-                    return fail(format!(
-                        "configuration error: [oidc] is enabled, so every collection must \
-                         declare an `owner`, but collection '{}' has none",
-                        c.name
-                    ));
-                }
-            }
-            for h in &hedgedoc_entries {
-                if h.owner.is_none() {
-                    return fail(format!(
-                        "configuration error: [oidc] is enabled, so every [[hedgedoc]] entry \
-                         must declare an `owner`, but the entry for '{}' has none",
-                        h.url
-                    ));
-                }
-            }
             for d in &custom_decks {
                 if d.owner.is_none() {
                     return fail(format!(
@@ -494,14 +305,6 @@ impl ResolvedServeConfig {
             // Without `[oidc]` every request is unauthenticated, so `owner`
             // can never match and the entry would simply be unreachable.
             // Silently ignoring the field would hide that; refuse instead.
-            if let Some(c) = collections.iter().find(|c| c.owner.is_some()) {
-                return fail(format!(
-                    "configuration error: collection '{}' declares an `owner`, but [oidc] is \
-                     not configured, so nobody is ever logged in and the collection would be \
-                     unreachable. Add an [oidc] section or remove the `owner`",
-                    c.name
-                ));
-            }
             if let Some(d) = custom_decks.iter().find(|d| d.owner.is_some()) {
                 return fail(format!(
                     "configuration error: the [[deck]] entry '{}' declares an `owner`, but \
@@ -510,45 +313,14 @@ impl ResolvedServeConfig {
                     d.name
                 ));
             }
-            if let Some(h) = hedgedoc_entries.iter().find(|h| h.owner.is_some()) {
-                return fail(format!(
-                    "configuration error: the [[hedgedoc]] entry for '{}' declares an `owner`, \
-                     but [oidc] is not configured, so nobody is ever logged in and the note \
-                     would be unreachable. Add an [oidc] section or remove the `owner`",
-                    h.url
-                ));
-            }
         }
-
-        let git = match config.git {
-            None => None,
-            Some(g) => match g.repo_url {
-                Some(repo_url) => Some(ResolvedGit {
-                    repo_url,
-                    branch: g.branch,
-                    poll_interval_minutes: g.poll_interval_minutes,
-                    commit_author_name: g.commit_author_name,
-                    commit_author_email: g.commit_author_email,
-                    repo_dir: repo_dir.clone(),
-                    db_dir: db_dir.clone(),
-                }),
-                None => {
-                    return fail(
-                        "configuration error: [git] section is present but `repo_url` is missing",
-                    );
-                }
-            },
-        };
 
         Ok(Self {
             host: config.server.host,
             port: config.server.port,
-            git,
             defaults: config.defaults,
-            collections,
             data_dir: Some(data_dir),
             config_path: None,
-            hedgedoc_entries,
             custom_decks,
             session_timeout_minutes: config.server.session_timeout_minutes,
             oidc,
@@ -559,58 +331,6 @@ impl ResolvedServeConfig {
         self.config_path = Some(path);
         self
     }
-
-    /// Build a config that serves `directories` directly, with no git
-    /// remote, no HedgeDoc sources and no owners.
-    ///
-    /// Test-only: the server requires a config file, so there is no
-    /// production path that reaches this. It survives because most serve
-    /// tests want a state holding one throwaway collection.
-    #[cfg(test)]
-    pub fn from_directories(directories: Vec<String>, host: String, port: u16) -> Fallible<Self> {
-        let base = current_dir()?;
-        let mut collections = Vec::new();
-
-        for dir_str in &directories {
-            let dir = base.join(dir_str);
-            if !dir.exists() {
-                return fail(format!("directory does not exist: {dir_str}"));
-            }
-            let dir = dir.canonicalize()?;
-
-            let name = dir
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| dir_str.clone());
-
-            let slug = slugify(&name);
-            let db_path = dir.join("hashcards.db");
-
-            collections.push(ResolvedCollection {
-                name,
-                slug,
-                coll_dir: dir,
-                db_path,
-                owner: None,
-            });
-        }
-
-        check_slug_collisions(&collections)?;
-
-        Ok(Self {
-            host,
-            port,
-            git: None,
-            defaults: DefaultsSection::default(),
-            collections,
-            data_dir: None,
-            config_path: None,
-            hedgedoc_entries: Vec::new(),
-            custom_decks: Vec::new(),
-            session_timeout_minutes: default_session_timeout_minutes(),
-            oidc: None,
-        })
-    }
 }
 
 #[cfg(test)]
@@ -619,25 +339,6 @@ mod tests {
     use crate::error::ErrorReport;
     use crate::error::Fallible;
 
-    #[test]
-    fn source_and_hedgedoc_arrays_both_parse() {
-        let toml_text = r#"
-            [server]
-            data_dir = "/tmp/hc"
-
-            [[source]]
-            url = "https://github.com/me/cards/blob/main/a.md"
-
-            [[hedgedoc]]
-            url = "https://notes.example.com/abc123"
-        "#;
-        let parsed: ServeConfig = toml::from_str(toml_text).unwrap();
-        let entries = parsed.source_entries();
-        assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].url, "https://github.com/me/cards/blob/main/a.md");
-        assert_eq!(entries[1].url, "https://notes.example.com/abc123");
-    }
-
     /// Regression test for BUG-47: with no `host` key in the config, the
     /// server must bind to localhost, not to all interfaces.
     #[test]
@@ -645,117 +346,6 @@ mod tests {
         let toml = "[server]\ndata_dir = \"/var/lib/hashcards\"\n";
         let config: ServeConfig = toml::from_str(toml)?;
         assert_eq!(config.server.host, "127.0.0.1");
-        Ok(())
-    }
-
-    /// Regression test for BUG-48: an absolute collection path (e.g.
-    /// `path = "/etc"`) must be rejected at config load time.
-    #[test]
-    fn test_absolute_collection_path_rejected() -> Fallible<()> {
-        let toml = "[server]\ndata_dir = \"/var/lib/hashcards\"\n\n\
-                    [[collection]]\nname = \"Evil\"\npath = \"/etc\"\n";
-        let config: ServeConfig = toml::from_str(toml)?;
-        let error = match ResolvedServeConfig::from_toml(config) {
-            Ok(_) => panic!("expected an error for an absolute collection path"),
-            Err(e) => e,
-        };
-        assert!(error.to_string().contains("must be relative"));
-        Ok(())
-    }
-
-    /// Regression test for BUG-48: a collection path with `..` components
-    /// must be rejected at config load time.
-    #[test]
-    fn test_parent_collection_path_rejected() -> Fallible<()> {
-        let toml = "[server]\ndata_dir = \"/var/lib/hashcards\"\n\n\
-                    [[collection]]\nname = \"Evil\"\npath = \"../../etc\"\n";
-        let config: ServeConfig = toml::from_str(toml)?;
-        let error = match ResolvedServeConfig::from_toml(config) {
-            Ok(_) => panic!("expected an error for a `..` collection path"),
-            Err(e) => e,
-        };
-        assert!(error.to_string().contains(".."));
-        Ok(())
-    }
-
-    /// A well-formed relative collection path still resolves under
-    /// {data_dir}/repo.
-    #[test]
-    fn test_relative_collection_path_accepted() -> Fallible<()> {
-        // `/var/lib/hashcards` is not a platform-absolute path on Windows
-        // (no drive prefix), so a literal expected string would not match
-        // there; build both the fixture and the expectation from the same
-        // guaranteed-absolute path instead.
-        let data_dir = current_dir()?.join("var-lib-hashcards");
-        let toml = format!(
-            "[server]\ndata_dir = {:?}\n\n\
-             [[collection]]\nname = \"Japanese\"\npath = \"japanese\"\n",
-            data_dir
-        );
-        let config: ServeConfig = toml::from_str(&toml)?;
-        let resolved = ResolvedServeConfig::from_toml(config)?;
-        assert_eq!(resolved.collections.len(), 1);
-        assert_eq!(
-            resolved.collections[0].coll_dir,
-            data_dir.join("repo").join("japanese")
-        );
-        Ok(())
-    }
-
-    /// BUG-43 regression: `a/b` and `a-b` slugify identically and must be
-    /// rejected at config load with a message naming both collections.
-    #[test]
-    fn test_slug_collision_in_config_is_rejected() -> Fallible<()> {
-        let toml_str = r#"
-[server]
-data_dir = "/tmp/hc-test-data"
-
-[[collection]]
-name = "Alpha Slash"
-path = "a/b"
-
-[[collection]]
-name = "Alpha Dash"
-path = "a-b"
-"#;
-        let config: ServeConfig =
-            toml::from_str(toml_str).map_err(|e| ErrorReport::new(e.to_string()))?;
-        let err = match ResolvedServeConfig::from_toml(config) {
-            Ok(_) => return fail("expected a slug collision error"),
-            Err(e) => e,
-        };
-        let msg = err.to_string();
-        assert!(
-            msg.contains("Alpha Slash"),
-            "must name the first collection: {msg}"
-        );
-        assert!(
-            msg.contains("Alpha Dash"),
-            "must name the second collection: {msg}"
-        );
-        assert!(msg.contains("a-b"), "must name the colliding slug: {msg}");
-        Ok(())
-    }
-
-    /// Distinct slugs still load fine.
-    #[test]
-    fn test_distinct_slugs_are_accepted() -> Fallible<()> {
-        let toml_str = r#"
-[server]
-data_dir = "/tmp/hc-test-data"
-
-[[collection]]
-name = "Alpha"
-path = "alpha"
-
-[[collection]]
-name = "Beta"
-path = "beta"
-"#;
-        let config: ServeConfig =
-            toml::from_str(toml_str).map_err(|e| ErrorReport::new(e.to_string()))?;
-        let resolved = ResolvedServeConfig::from_toml(config)?;
-        assert_eq!(resolved.collections.len(), 2);
         Ok(())
     }
 
@@ -794,83 +384,6 @@ path = "beta"
         Ok(())
     }
 
-    /// When `[oidc]` is present, every collection must declare an `owner`.
-    #[test]
-    fn test_oidc_requires_owner_on_every_collection() -> Fallible<()> {
-        let data_dir = current_dir()?.join("var-lib-hashcards-oidc-owner-test");
-        let toml_str = format!(
-            "[server]\ndata_dir = {:?}\n\n\
-             [oidc]\n\
-             issuer_url = \"https://idp.example.com\"\n\
-             client_id = \"abc\"\n\
-             client_secret = \"secret\"\n\
-             external_url = \"https://hashcards.example.com\"\n\
-             session_secret = \"a-very-long-random-session-secret-value\"\n\n\
-             [[collection]]\n\
-             name = \"Japanese\"\n\
-             path = \"japanese\"\n",
-            data_dir
-        );
-        let config: ServeConfig = toml::from_str(&toml_str)?;
-        match ResolvedServeConfig::from_toml(config) {
-            Ok(_) => panic!("expected an error for a collection with no owner while [oidc] is set"),
-            Err(e) => assert!(
-                e.to_string().contains("Japanese") && e.to_string().contains("owner"),
-                "error should name the offending collection and mention `owner`: {e}"
-            ),
-        }
-        Ok(())
-    }
-
-    /// When `[oidc]` is present and every collection has an `owner`, config
-    /// loads cleanly and the owner is lowercased for case-insensitive
-    /// matching later.
-    #[test]
-    fn test_oidc_with_owner_on_every_collection_loads() -> Fallible<()> {
-        let data_dir = current_dir()?.join("var-lib-hashcards-oidc-owner-ok-test");
-        let toml_str = format!(
-            "[server]\ndata_dir = {:?}\n\n\
-             [oidc]\n\
-             issuer_url = \"https://idp.example.com\"\n\
-             client_id = \"abc\"\n\
-             client_secret = \"secret\"\n\
-             external_url = \"https://hashcards.example.com\"\n\
-             session_secret = \"a-very-long-random-session-secret-value\"\n\n\
-             [[collection]]\n\
-             name = \"Japanese\"\n\
-             path = \"japanese\"\n\
-             owner = \"Me@Example.com\"\n",
-            data_dir
-        );
-        let config: ServeConfig = toml::from_str(&toml_str)?;
-        let resolved = ResolvedServeConfig::from_toml(config)?;
-        assert_eq!(
-            resolved.collections[0].owner.as_deref(),
-            Some("me@example.com")
-        );
-        assert!(resolved.oidc.is_some());
-        Ok(())
-    }
-
-    /// Without `[oidc]`, an `owner`-less collection loads exactly as before
-    /// — the new field is inert.
-    #[test]
-    fn test_no_oidc_owner_field_is_inert() -> Fallible<()> {
-        let data_dir = current_dir()?.join("var-lib-hashcards-no-oidc-test");
-        let toml_str = format!(
-            "[server]\ndata_dir = {:?}\n\n\
-             [[collection]]\n\
-             name = \"Japanese\"\n\
-             path = \"japanese\"\n",
-            data_dir
-        );
-        let config: ServeConfig = toml::from_str(&toml_str)?;
-        let resolved = ResolvedServeConfig::from_toml(config)?;
-        assert!(resolved.oidc.is_none());
-        assert_eq!(resolved.collections[0].owner, None);
-        Ok(())
-    }
-
     /// `Key::derive_from` panics below 32 bytes, so a short `session_secret`
     /// must be rejected at config load with a message the operator can act
     /// on rather than crashing the server at startup.
@@ -899,57 +412,6 @@ path = "beta"
                 "error should name the offending setting: {e}"
             ),
         }
-        Ok(())
-    }
-
-    /// An `owner` with no `[oidc]` section means nobody is ever logged in, so
-    /// the collection would silently 404 for everyone. Refuse to start.
-    #[test]
-    fn test_owner_without_oidc_is_rejected() -> Fallible<()> {
-        let data_dir = current_dir()?.join("var-lib-hashcards-owner-no-oidc-test");
-        let toml_str = format!(
-            "[server]\ndata_dir = {:?}\n\n\
-             [[collection]]\n\
-             name = \"Japanese\"\n\
-             path = \"japanese\"\n\
-             owner = \"me@example.com\"\n",
-            data_dir
-        );
-        let config: ServeConfig = toml::from_str(&toml_str)?;
-        match ResolvedServeConfig::from_toml(config) {
-            Ok(_) => panic!("expected an error for an `owner` without [oidc]"),
-            Err(e) => assert!(
-                e.to_string().contains("Japanese") && e.to_string().contains("oidc"),
-                "error should name the collection and mention [oidc]: {e}"
-            ),
-        }
-        Ok(())
-    }
-
-    /// `[[hedgedoc]]` owners are lowercased just like collection owners, so a
-    /// config written with mixed case still matches the OIDC email claim.
-    #[test]
-    fn test_hedgedoc_owner_is_lowercased() -> Fallible<()> {
-        let data_dir = current_dir()?.join("var-lib-hashcards-hedgedoc-owner-case-test");
-        let toml_str = format!(
-            "[server]\ndata_dir = {:?}\n\n\
-             [oidc]\n\
-             issuer_url = \"https://idp.example.com\"\n\
-             client_id = \"abc\"\n\
-             client_secret = \"secret\"\n\
-             external_url = \"https://hashcards.example.com\"\n\
-             session_secret = \"a-very-long-random-session-secret-value\"\n\n\
-             [[hedgedoc]]\n\
-             url = \"https://pad.example.com/abc\"\n\
-             owner = \"Me@Example.com\"\n",
-            data_dir
-        );
-        let config: ServeConfig = toml::from_str(&toml_str)?;
-        let resolved = ResolvedServeConfig::from_toml(config)?;
-        assert_eq!(
-            resolved.hedgedoc_entries[0].owner.as_deref(),
-            Some("me@example.com")
-        );
         Ok(())
     }
 
@@ -996,7 +458,7 @@ path = "beta"
     }
 
     /// With `[oidc]` on, every deck needs an owner, exactly like collections
-    /// and HedgeDoc notes.
+    /// do.
     #[test]
     fn test_oidc_requires_owner_on_every_deck() -> Fallible<()> {
         let data_dir = current_dir()?.join("var-lib-hashcards-deck-owner-test");
@@ -1063,28 +525,6 @@ path = "beta"
             ResolvedServeConfig::from_toml(config).is_err(),
             "an `owner` without [oidc] must be rejected for decks too"
         );
-        Ok(())
-    }
-
-    /// A local card folder is the user's own writing, created through the
-    /// web UI or dropped in by hand. It must never be able to stop the
-    /// server from booting: a folder shadowing a configured collection is
-    /// dropped from discovery at runtime, with a warning.
-    #[test]
-    fn a_local_folder_shadowing_a_configured_collection_does_not_stop_startup() -> Fallible<()> {
-        let data_dir = crate::helper::create_tmp_directory()?;
-        let shadow = data_dir.join("local").join("default").join("japanese");
-        std::fs::create_dir_all(&shadow)?;
-        crate::cmd::serve::local::collection_id(&shadow)?;
-
-        let toml = format!(
-            "[server]\ndata_dir = {:?}\n\n\
-             [[collection]]\nname = \"Japanese\"\npath = \"japanese\"\n",
-            data_dir
-        );
-        let config: ServeConfig = toml::from_str(&toml)?;
-        let resolved = ResolvedServeConfig::from_toml(config)?;
-        assert_eq!(resolved.collections.len(), 1);
         Ok(())
     }
 }

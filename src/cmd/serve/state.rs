@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -6,43 +7,71 @@ use axum_extra::extract::cookie::Key;
 use chrono::Duration;
 use parking_lot::Mutex;
 
-use tokio::sync::RwLock;
-
 use crate::cmd::drill::render::AnswerControls;
+use crate::cmd::drill::state::CardMigration;
+use crate::cmd::drill::state::MigrationEffect;
 use crate::cmd::drill::state::MutableState;
 use crate::cmd::serve::auth::OidcRuntime;
-use crate::cmd::serve::config::ResolvedCollection;
 use crate::cmd::serve::config::ResolvedServeConfig;
 use crate::cmd::serve::decks::ResolvedCustomDeck;
 use crate::types::timestamp::Timestamp;
 
-/// A drill session shared behind a per-slug lock. Handlers clone the `Arc`
-/// out of the map (releasing the map lock immediately) and lock the session
-/// itself for the duration of the request, so an error can never remove the
-/// session from the map.
+/// A drill session shared behind a per-session lock. Handlers clone the
+/// `Arc` out of the map (releasing the map lock immediately) and lock the
+/// session itself for the duration of the request, so an error can never
+/// remove the session from the map.
 pub type SharedSession = Arc<Mutex<DrillSession>>;
+
+/// What a running drill session is filed under: the slug it is addressed by,
+/// and who it belongs to.
+///
+/// The owner is part of the key, not decoration. A collection is a folder in
+/// its owner's card tree, so two users may each own a "Spanish" and both
+/// slugify to `Spanish`; keyed by slug alone, whoever asked second was
+/// handed the other's live session and could grade into their database.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct SessionKey {
+    /// The owner's email, or `None` when `[oidc]` is off and there is only
+    /// the shared `default` tree.
+    owner: Option<String>,
+    slug: String,
+}
+
+impl SessionKey {
+    pub fn new(owner: Option<&str>, slug: &str) -> Self {
+        Self {
+            owner: owner.map(|o| o.to_string()),
+            slug: slug.to_string(),
+        }
+    }
+
+    pub fn slug(&self) -> &str {
+        &self.slug
+    }
+
+    pub fn owner(&self) -> Option<&str> {
+        self.owner.as_deref()
+    }
+}
 
 #[derive(Clone)]
 pub struct AppState {
     pub config: Arc<ResolvedServeConfig>,
-    pub collections: Arc<RwLock<Vec<CollectionInfo>>>,
-    pub sessions: Arc<Mutex<HashMap<String, SharedSession>>>,
-    pub last_synced: Arc<Mutex<Option<Timestamp>>>,
-    pub hedgedoc_sources: Arc<Mutex<Vec<HedgedocSource>>>,
+    pub sessions: Arc<Mutex<HashMap<SessionKey, SharedSession>>>,
     /// User-assembled cross-collection decks, resolved at startup and
     /// refreshed whenever one is added or deleted. A `parking_lot` mutex
-    /// like `hedgedoc_sources`: these are read from the blocking drill
+    /// rather than an async one: these are read from the blocking drill
     /// paths, not only from async handlers.
     pub custom_decks: Arc<Mutex<Vec<ResolvedCustomDeck>>>,
-    pub hedgedoc_last_synced: Arc<Mutex<Option<Timestamp>>>,
     pub config_path: Arc<Mutex<Option<PathBuf>>>,
-    /// When the collection counts were last recomputed (BUG-45).
-    pub counts_refreshed_at: Arc<Mutex<Option<Timestamp>>>,
-    /// Per-slug count of session rows closed by the startup sweep, waiting to
-    /// be reported to the user. The deck browser takes the entry the first
-    /// time it renders, so the notice is shown once rather than on every
-    /// visit (see `close_dangling_sessions`).
-    pub interrupted_closed: Arc<Mutex<HashMap<String, usize>>>,
+    /// Per-database count of session rows closed by the startup sweep,
+    /// waiting to be reported to the user. The topic browser takes the entry
+    /// the first time it renders, so the notice is shown once rather than on
+    /// every visit (see `sweep_dangling_sessions`).
+    ///
+    /// Keyed by database path, not by slug: two users may each own a
+    /// collection called "Spanish".
+    pub interrupted_closed: Arc<Mutex<HashMap<PathBuf, usize>>>,
     /// Signs the OIDC session and login-flow cookies. When `[oidc]` is not
     /// configured this key is generated randomly at startup and never used
     /// — keeping it non-optional avoids threading `Option` through every
@@ -68,28 +97,6 @@ pub struct CollectionInfo {
     pub total_cards: usize,
     pub due_today: usize,
     pub owner: Option<String>,
-}
-
-/// A single HedgeDoc note, used as a collection of its own.
-///
-/// Notes are deliberately *not* grouped by HedgeDoc host. Grouping made the
-/// host's first-seen `owner` the owner of every note on it, so on a shared
-/// HedgeDoc instance one user's note landed in another user's collection.
-/// One note, one collection, one database, one owner.
-#[derive(Clone)]
-pub struct HedgedocSource {
-    /// The scheme/host/port the note lives on. Display only.
-    pub source_uri: String,
-    pub collection: ResolvedCollection,
-    pub note: HedgedocNote,
-}
-
-#[derive(Clone)]
-pub struct HedgedocNote {
-    pub url: String,
-    pub deck_name: String,
-    pub file_name: String,
-    pub last_error: Option<String>,
 }
 
 pub struct DrillSession {
@@ -151,22 +158,22 @@ impl DrillSession {
 
 /// Remove sessions idle for at least `timeout_minutes` and close their DB
 /// session rows. `timeout_minutes == 0` disables eviction. Returns the
-/// evicted slugs.
+/// evicted keys.
 ///
 /// DB work happens after the map lock is released, so eviction never holds
 /// the sessions lock across SQLite calls.
 pub fn evict_idle_sessions(
-    sessions: &Mutex<HashMap<String, SharedSession>>,
+    sessions: &Mutex<HashMap<SessionKey, SharedSession>>,
     timeout_minutes: u64,
     now: Timestamp,
-) -> Vec<String> {
+) -> Vec<SessionKey> {
     if timeout_minutes == 0 {
         return Vec::new();
     }
     let timeout = Duration::minutes(timeout_minutes as i64);
-    let expired: Vec<(String, SharedSession)> = {
+    let expired: Vec<(SessionKey, SharedSession)> = {
         let mut map = sessions.lock();
-        let keys: Vec<String> = map
+        let keys: Vec<SessionKey> = map
             .iter()
             .filter(|(_, s)| now.into_inner() - s.lock().last_activity_at.into_inner() >= timeout)
             .map(|(k, _)| k.clone())
@@ -177,88 +184,131 @@ pub fn evict_idle_sessions(
             .collect()
     };
     let mut evicted = Vec::new();
-    for (slug, session) in expired {
+    for (key, session) in expired {
         let session = session.lock();
         if session.mutable.finished_at.is_none() {
             if let Err(e) = session.mutable.dbs.close_all(now) {
-                log::error!("Failed to close evicted session for collection '{slug}': {e}");
+                log::error!(
+                    "Failed to close evicted session for collection '{}': {e}",
+                    key.slug()
+                );
             }
         }
-        evicted.push(slug);
+        evicted.push(key);
     }
     evicted
 }
 
-/// Test-only constructors for `AppState`.
+/// Every live session drawing cards from `coll_dir`.
 ///
-/// Every serve test needs a state with a known set of collections; without
-/// this they each hand-roll the same fifteen-field literal.
+/// Answered from the sessions themselves rather than from deck
+/// configuration: a session holds what it actually loaded when it started,
+/// which is the question being asked, and the configuration may have moved
+/// since. It also closes a bug at its root — a custom deck has its own key
+/// in the sessions map, so looking the *collection's* slug up in the map
+/// misses a running deck session that includes it.
+///
+/// A session drawing on several collections records each one in its
+/// `SessionDb.source`. A single-collection session leaves every `source` as
+/// `None` and is identified by its own directory instead.
+///
+/// Follows the map-then-session lock order: the map lock is released before
+/// any session lock is taken.
+pub fn sessions_touching(state: &AppState, coll_dir: &Path) -> Vec<SharedSession> {
+    let candidates: Vec<SharedSession> = state.sessions.lock().values().cloned().collect();
+    candidates
+        .into_iter()
+        .filter(|shared| {
+            let session = shared.lock();
+            if session.is_detached() {
+                return false;
+            }
+            let mut routed = false;
+            for entry in session.mutable.dbs.all() {
+                if let Some(source) = &entry.source {
+                    routed = true;
+                    if same_dir(&source.coll_dir, coll_dir) {
+                        return true;
+                    }
+                }
+            }
+            !routed && same_dir(&session.directory, coll_dir)
+        })
+        .collect()
+}
+
+/// Apply `migration` to every live session drawing on `coll_dir`, and
+/// report the total effect.
+///
+/// Called only after the file has been written and the database
+/// transaction has committed, which is what lets it be infallible.
+///
+/// A session that started between the write and this call looks like a
+/// race and is not: a session parses its collection when it starts, so one
+/// beginning after the write already holds the new hashes, and the
+/// migration — which looks up old ones — finds nothing and does nothing. A
+/// session that began before the write is in the map.
+pub fn migrate_sessions(
+    state: &AppState,
+    coll_dir: &Path,
+    migration: &CardMigration,
+) -> MigrationEffect {
+    let mut total = MigrationEffect {
+        renamed: 0,
+        dropped: 0,
+        session_finished: false,
+    };
+    for shared in sessions_touching(state, coll_dir) {
+        let mut session = shared.lock();
+        let effect = session.mutable.apply_card_migration(migration);
+        // The progress bar's denominator counts the cards the session set
+        // out with; an edit that removed some must not leave it stuck.
+        session.total_cards = session.total_cards.saturating_sub(effect.dropped);
+        total.renamed += effect.renamed;
+        total.dropped += effect.dropped;
+        total.session_finished |= effect.session_finished;
+    }
+    total
+}
+
+/// Whether two paths name the same directory.
+///
+/// Canonicalized first: one caller has the path the collection was
+/// discovered at and another has it after `canonicalize`, and a symlinked
+/// or `..`-bearing spelling of the same directory must not read as a
+/// different collection. A path that cannot be canonicalized — it was just
+/// deleted, say — falls back to a literal comparison.
+fn same_dir(a: &Path, b: &Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    }
+}
+
+/// Test-only constructor for `AppState`.
 #[cfg(test)]
 pub mod test_support {
     use super::*;
     use crate::cmd::serve::config::DefaultsSection;
-    use crate::cmd::serve::config::ResolvedCollection;
     use crate::cmd::serve::config::ResolvedServeConfig;
 
-    /// An `AppState` serving exactly `collections`, with no git remote, no
-    /// HedgeDoc sources, and no OIDC runtime.
-    pub fn state_with_collections(collections: Vec<ResolvedCollection>) -> AppState {
-        state_with_config(ResolvedServeConfig {
-            host: "127.0.0.1".to_string(),
-            port: 0,
-            git: None,
-            defaults: DefaultsSection::default(),
-            collections,
-            data_dir: None,
-            config_path: None,
-            hedgedoc_entries: Vec::new(),
-            custom_decks: Vec::new(),
-            session_timeout_minutes: 1440,
-            oidc: None,
-        })
-    }
-
-    /// An `AppState` whose local card trees live under `data_dir`, serving
-    /// `collections` as configured ones.
-    pub fn state_with_data_dir(
-        data_dir: PathBuf,
-        collections: Vec<ResolvedCollection>,
-    ) -> AppState {
-        state_with_config(ResolvedServeConfig {
-            host: "127.0.0.1".to_string(),
-            port: 0,
-            git: None,
-            defaults: DefaultsSection::default(),
-            collections,
-            data_dir: Some(data_dir),
-            config_path: None,
-            hedgedoc_entries: Vec::new(),
-            custom_decks: Vec::new(),
-            session_timeout_minutes: 1440,
-            oidc: None,
-        })
-    }
-
-    /// An `AppState` wrapping an already-built config.
-    ///
-    /// `config_path` is taken from the config rather than left empty, so a
-    /// test that passes a config recording where it was loaded from gets a
-    /// state that agrees with it. `hedgedoc_sources` and `custom_decks`
-    /// stay empty: the config holds *entries*, which the real startup path
-    /// turns into sources and resolved decks by fetching notes and reading
-    /// collections. A test needing those must build them itself.
-    pub fn state_with_config(config: ResolvedServeConfig) -> AppState {
-        let config_path = config.config_path.clone();
+    /// An `AppState` whose card trees live under `data_dir`, with no OIDC
+    /// runtime and no saved decks.
+    pub fn state_with_data_dir(data_dir: PathBuf) -> AppState {
         AppState {
-            config: Arc::new(config),
-            collections: Arc::new(RwLock::new(Vec::new())),
+            config: Arc::new(ResolvedServeConfig {
+                host: "127.0.0.1".to_string(),
+                port: 0,
+                defaults: DefaultsSection::default(),
+                data_dir: Some(data_dir),
+                config_path: None,
+                custom_decks: Vec::new(),
+                session_timeout_minutes: 1440,
+                oidc: None,
+            }),
             sessions: Arc::new(Mutex::new(HashMap::new())),
-            last_synced: Arc::new(Mutex::new(None)),
-            hedgedoc_sources: Arc::new(Mutex::new(Vec::new())),
             custom_decks: Arc::new(Mutex::new(Vec::new())),
-            hedgedoc_last_synced: Arc::new(Mutex::new(None)),
-            config_path: Arc::new(Mutex::new(config_path)),
-            counts_refreshed_at: Arc::new(Mutex::new(None)),
+            config_path: Arc::new(Mutex::new(None)),
             interrupted_closed: Arc::new(Mutex::new(HashMap::new())),
             session_key: Key::generate(),
             oidc: None,
@@ -310,12 +360,12 @@ mod tests {
     fn test_idle_session_is_evicted_and_db_row_closed() -> Fallible<()> {
         let dir = tempdir()?;
         let session = session_started_at("2026-01-01T10:00:00.000", dir.path())?;
-        let sessions = Mutex::new(HashMap::from([("demo".to_string(), session)]));
+        let sessions = Mutex::new(HashMap::from([(SessionKey::new(None, "demo"), session)]));
 
         // 25 hours later, with a 24h (1440 minute) timeout.
         let now = Timestamp::try_from("2026-01-02T11:00:00.000".to_string())?;
         let evicted = evict_idle_sessions(&sessions, 1440, now);
-        assert_eq!(evicted, vec!["demo".to_string()]);
+        assert_eq!(evicted, vec![SessionKey::new(None, "demo")]);
         assert!(sessions.lock().is_empty());
 
         // The DB session row was closed with the eviction time.
@@ -342,9 +392,12 @@ mod tests {
         let handler_view = Arc::clone(&session);
         assert!(!handler_view.lock().is_detached());
 
-        let sessions = Mutex::new(HashMap::from([("demo".to_string(), session)]));
+        let sessions = Mutex::new(HashMap::from([(SessionKey::new(None, "demo"), session)]));
         let now = Timestamp::try_from("2026-01-02T11:00:00.000".to_string())?;
-        assert_eq!(evict_idle_sessions(&sessions, 1440, now), vec!["demo"]);
+        assert_eq!(
+            evict_idle_sessions(&sessions, 1440, now),
+            vec![SessionKey::new(None, "demo")]
+        );
 
         assert!(
             handler_view.lock().is_detached(),
@@ -359,7 +412,7 @@ mod tests {
     fn test_active_session_is_not_evicted() -> Fallible<()> {
         let dir = tempdir()?;
         let session = session_started_at("2026-01-01T10:00:00.000", dir.path())?;
-        let sessions = Mutex::new(HashMap::from([("demo".to_string(), session)]));
+        let sessions = Mutex::new(HashMap::from([(SessionKey::new(None, "demo"), session)]));
 
         // Only one hour later.
         let now = Timestamp::try_from("2026-01-01T11:00:00.000".to_string())?;
@@ -374,7 +427,7 @@ mod tests {
     fn test_zero_timeout_disables_eviction() -> Fallible<()> {
         let dir = tempdir()?;
         let session = session_started_at("2020-01-01T10:00:00.000", dir.path())?;
-        let sessions = Mutex::new(HashMap::from([("demo".to_string(), session)]));
+        let sessions = Mutex::new(HashMap::from([(SessionKey::new(None, "demo"), session)]));
         let now = Timestamp::try_from("2026-01-01T10:00:00.000".to_string())?;
         let evicted = evict_idle_sessions(&sessions, 0, now);
         assert!(evicted.is_empty());

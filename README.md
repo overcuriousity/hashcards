@@ -6,13 +6,13 @@
 
 ![Screenshot of the app, showing a front/back flashcard.](screenshot.webp)
 
-A multi-user web server for plain text spaced repetition. Point it at a git
-repository of Markdown files and it serves them as flashcard collections,
+A multi-user web server for plain text spaced repetition. Point it at a
+directory of Markdown files and it serves them as flashcard collections,
 scheduling reviews with [FSRS] and keeping every user's history in SQLite.
 
-- **Plain text, in your repository.** Cards are Markdown files you write in
-  your own editor and track in git. The server clones the repository and
-  syncs it on a timer; edits made in the browser are committed back.
+- **Plain text, in your own files.** Cards are Markdown you write in your own
+  editor, or in the browser — the server owns the bytes either way, so a card
+  can be edited wherever you happen to be looking at it.
 - **Content addressed.** A card is identified by the hash of its text, so
   editing a card is a deliberate act with visible consequences for its
   schedule — nothing is silently rewritten behind your back.
@@ -24,8 +24,8 @@ scheduling reviews with [FSRS] and keeping every user's history in SQLite.
 This is a fork of [hashcards] by [Fernando Borretti][fb], which is a local
 command-line tool. The card format, the parser, the FSRS implementation and
 the review schema are all his work; see [Prior Art](#prior-art). This fork
-removed the command-line interface and grew the server: HedgeDoc note
-sources, cross-collection decks, in-browser editing, and OIDC login.
+removed the command-line interface and grew the server: cross-collection
+decks, in-browser card writing and editing, and OIDC login.
 
 ## Quick start
 
@@ -88,10 +88,18 @@ data_dir = "/var/lib/hashcards"     # required
 session_timeout_minutes = 1440      # 0 disables eviction
 ```
 
-`data_dir` is where the server keeps the repository clone (`{data_dir}/repo`),
-the review databases (`{data_dir}/db`) and any HedgeDoc notes
-(`{data_dir}/hedgedoc`). Collection paths are always resolved inside
-`{data_dir}/repo`.
+`data_dir` is where the server keeps the card trees (`{data_dir}/cards/{user}`)
+and the review databases (`{data_dir}/db`). A collection is a top-level folder
+in one of those trees — discovered by reading the directory, not declared in
+this file — and its review database is named from the stable id in the
+folder's `.hashcards.toml`, so renaming a folder keeps its history.
+
+Ownership is structural: with `[oidc]` configured a user's collections are the
+folders in `{data_dir}/cards/{their-email-slug}-{hash}/`, and without it they
+are the folders in `{data_dir}/cards/default/`. The hash is eight characters
+of the email's own digest, because slugifying alone is not injective and the
+tree a folder sits in is who owns it. There is no `owner` to declare and no
+way to name a collection nobody can reach.
 
 The server creates all of these at startup, and refuses to start with a message
 naming the directory if it cannot. **It must be writable by the user the server
@@ -120,87 +128,10 @@ an `[oidc]` section there is no authentication whatsoever — anyone who can
 reach the port can read your cards and edit the underlying files. Expose it
 only behind an authenticating reverse proxy, or configure OIDC.
 
-### `[git]`
-
-```toml
-[git]
-repo_url = "https://github.com/user/flashcards.git"
-branch = "main"
-poll_interval_minutes = 30          # 0 disables polling
-commit_author_name = "hashcards web edit"
-commit_author_email = "hashcards@localhost"
-```
-
-The repository is cloned into `{data_dir}/repo` at startup and pulled on the
-interval; the landing page also has a "Sync Now" button. Cards edited in the
-browser are committed with the configured author — or, when OIDC is on, as the
-logged-in user.
-
-The section is optional. Without it there is no syncing, and you are
-responsible for putting the cards under `{data_dir}/repo` yourself.
-
-### `[[collection]]`
-
-```toml
-[[collection]]
-name = "Japanese"
-path = "japanese"
-# owner = "me@example.com"          # required when [oidc] is configured
-```
-
-Each collection is a directory of Markdown files under `{data_dir}/repo`, with
-its own review database at `{data_dir}/db/{slug}.db`. The slug is derived from
-`path`, so `medicine/anatomy` becomes `medicine-anatomy`; two collections whose
-paths produce the same slug are rejected at startup rather than silently
-sharing a database.
-
-### `[[source]]`
-
-```toml
-[[source]]
-url = "https://notes.example.com/q1QcHIRvQFiTxzwnF-_L3g"
-# owner = "me@example.com"
-
-[[source]]
-url = "https://github.com/me/cards/blob/main/spanish.md"
-# owner = "me@example.com"
-```
-
-A Markdown document fetched over HTTPS and served as a collection of its own.
-Either a [HedgeDoc] note or a file in a git repository — hashcards works out
-which from the URL, so there is nothing to declare.
-
-Recognised git URL shapes:
-
-| Pasted | Fetched from |
-|---|---|
-| `github.com/{owner}/{repo}/blob/{ref}/{path}` | `raw.githubusercontent.com/{owner}/{repo}/{ref}/{path}` |
-| `gitlab.com/{owner}/{repo}/-/blob/{ref}/{path}` | the same host, `/-/raw/` |
-| Gitea and Forgejo `/src/branch/{branch}/{path}` | the same host, `/raw/branch/` |
-| any URL whose path ends in `.md` | unchanged — it is already raw |
-
-Anything else is treated as a HedgeDoc note, whose raw Markdown comes from
-`{url}/download`. Note ids never carry an extension, so the two cannot be
-confused. Private repositories are not supported: the file must be reachable
-without authentication.
-
-The collection name comes from the document title, and sources are re-fetched
-on the same interval as git. Sources can also be added and removed from the web
-interface, which writes them back to this file.
-
-Each source is its own collection, owned by that entry's owner alone. Notes are
-never grouped by host, so several people can take notes from one shared
-HedgeDoc instance — including the same note — without sharing a collection or a
-review database.
-
-`[[hedgedoc]]` is still accepted as a deprecated spelling of `[[source]]`.
-Sources added through the web interface are written as `[[source]]`.
-
 ## My Cards
 
-Cards do not have to come from anywhere else. **My Cards** (`/files`) is a
-folder tree hashcards keeps at `{data_dir}/local/{user}` and that only you write
-to — no git remote, no sync that can overwrite it.
+**My Cards** (`/files`) is the folder tree hashcards keeps at
+`{data_dir}/cards/{user}`, and that only you write to.
 
 Each top-level folder is a collection; files inside it are decks. Create a
 folder, add a `.md` file, and write cards in the editor: the buttons insert
@@ -212,12 +143,13 @@ Renaming a folder is safe. Each one keeps a `.hashcards.toml` holding a stable
 id, and review databases are named from that id rather than from the folder
 name, so your history follows the rename.
 
-A collection folder cannot take the URL slug of a collection or source that
-already exists — routing prefers those, so the folder would be unreachable.
-Names are rejected when you create or rename a folder; a folder that comes to
-collide later (a `[[collection]]` added afterwards, or a folder copied in by
-hand) is left out of the collection list with a warning in the log rather than
-stopping the server.
+A collection folder cannot take the URL slug of a saved deck: both are
+addressed through `/collection/{slug}` and routing prefers the collection, so
+the deck would become unreachable. Names are rejected when you create or rename
+a folder. Two folders whose names produce the same slug are also a collision;
+the first by name order wins and the other is left out of the list with a
+warning in the log, rather than making the URL mean whichever the filesystem
+happened to yield first.
 
 Deleting a collection folder deletes its review database with it. Folders that
 still hold files are refused, so this only happens once you have emptied one.
@@ -288,7 +220,7 @@ session_secret = "..."              # at least 32 bytes
 ```
 
 Adding this section turns on login for every route except `/auth/*`, and
-requires every `[[collection]]`, `[[source]]` and `[[deck]]` entry to declare
+requires every `[[deck]]` entry to declare
 an `owner` — an email, matched case-insensitively against the OIDC `email`
 claim. Config load fails if any entry is missing one, and equally if an `owner`
 appears *without* an `[oidc]` section, since nobody would ever be logged in to
@@ -326,7 +258,6 @@ one shows its deck tree; select decks and start a drill. From there:
 | `/collection/{slug}/export` | The whole collection as JSON |
 | `/collection/{slug}/bookmarks` | Cards you flagged while drilling |
 | `/decks` | Create and delete cross-collection decks |
-| `/hedgedoc` | Add and remove HedgeDoc note sources |
 
 **Editing.** Bookmark a card during a drill (shortcut: `b`), then edit it from
 the bookmark list. Edits are written to the Markdown file and committed to git.
@@ -602,7 +533,6 @@ explains the reasoning behind the design.
 - [My implementation of a personal mnemonic medium](https://notes.andymatuschak.org/My_implementation_of_a_personal_mnemonic_medium)
 
 [FSRS]: https://github.com/open-spaced-repetition/fsrs4anki
-[HedgeDoc]: https://hedgedoc.org/
 [hashcards]: https://github.com/eudoxia0/hashcards
 [blog]: https://borretti.me/article/hashcards-plain-text-spaced-repetition
 [esr]: https://borretti.me/article/effective-spaced-repetition

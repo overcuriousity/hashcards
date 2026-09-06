@@ -72,6 +72,31 @@ impl Cache {
             None => fail(format!("Card with hash {card_hash} not found in cache")),
         }
     }
+
+    /// Move a card's performance to a new hash after an edit renamed it.
+    ///
+    /// Infallible on purpose. `insert` and `update` refuse a missing or
+    /// duplicate key, which is right while a session is grading; this runs
+    /// after an edit has already been written to disk and committed, where
+    /// there is nothing to roll back to and a hash this session never held
+    /// is simply not its business.
+    ///
+    /// A target the session already holds is the collision case, and the one
+    /// the database declines: it keeps the target's row, its history and its
+    /// performance, so the cache keeps them too and the old entry is simply
+    /// forgotten. Letting the incoming value win instead fed the *old*
+    /// card's stability and difficulty into the next grade of a card whose
+    /// record had never changed.
+    pub fn rekey(&mut self, old: CardHash, new: CardHash) {
+        if let Some(performance) = self.changes.remove(&old) {
+            self.changes.entry(new).or_insert(performance);
+        }
+    }
+
+    /// Forget a card the edit deleted from the corpus.
+    pub fn remove(&mut self, card_hash: CardHash) {
+        self.changes.remove(&card_hash);
+    }
 }
 
 #[cfg(test)]
@@ -176,6 +201,85 @@ mod tests {
         });
         let res = cache.update(card_hash, reviewed);
         assert!(res.is_err());
+        Ok(())
+    }
+
+    /// A rename moves the performance to the new hash and forgets the old
+    /// one: a session that kept both would answer `get` for a card that no
+    /// file contains any more.
+    #[test]
+    fn test_cache_rekey_moves_the_performance() -> Fallible<()> {
+        let mut cache = Cache::new();
+        let old = CardHash::hash_bytes(b"old");
+        let new = CardHash::hash_bytes(b"new");
+        cache.insert(old, Performance::New)?;
+        cache.rekey(old, new);
+        assert!(cache.get(new)?.is_new());
+        assert!(cache.get(old).is_err());
+        Ok(())
+    }
+
+    /// Rekeying a hash the session never held is a no-op, not an error: an
+    /// edit renames cards across a whole file, and a session may hold only
+    /// some of them.
+    #[test]
+    fn test_cache_rekey_of_an_absent_hash_is_a_noop() {
+        let mut cache = Cache::new();
+        let old = CardHash::hash_bytes(b"old");
+        let new = CardHash::hash_bytes(b"new");
+        cache.rekey(old, new);
+        assert!(cache.get(new).is_err());
+    }
+
+    /// The collision case, and the one the database declines: an edit makes
+    /// one card byte-identical to another the session is already holding.
+    /// The surviving card keeps its own row, so it must keep its own
+    /// performance — the next grade of it is computed from what the cache
+    /// says.
+    #[test]
+    fn test_cache_rekey_keeps_the_performance_of_a_card_already_held() -> Fallible<()> {
+        let mut cache = Cache::new();
+        let old = CardHash::hash_bytes(b"old");
+        let new = CardHash::hash_bytes(b"new");
+        cache.insert(old, reviewed(7))?;
+        cache.insert(new, reviewed(3))?;
+
+        cache.rekey(old, new);
+
+        match cache.get(new)? {
+            Performance::Reviewed(rp) => assert_eq!(
+                rp.review_count, 3,
+                "the surviving card's own history must stand"
+            ),
+            _ => return fail("Expected Performance::Reviewed"),
+        }
+        assert!(
+            cache.get(old).is_err(),
+            "the edited-away hash must be forgotten"
+        );
+        Ok(())
+    }
+
+    /// A reviewed performance distinguishable by its review count.
+    fn reviewed(review_count: usize) -> Performance {
+        Performance::Reviewed(ReviewedPerformance {
+            last_reviewed_at: Timestamp::now(),
+            stability: 1.0,
+            difficulty: 2.0,
+            interval_raw: 0.4,
+            interval_days: 1,
+            due_date: Date::today(),
+            review_count,
+        })
+    }
+
+    #[test]
+    fn test_cache_remove_forgets_the_card() -> Fallible<()> {
+        let mut cache = Cache::new();
+        let hash = CardHash::hash_bytes(b"a");
+        cache.insert(hash, Performance::New)?;
+        cache.remove(hash);
+        assert!(cache.get(hash).is_err());
         Ok(())
     }
 

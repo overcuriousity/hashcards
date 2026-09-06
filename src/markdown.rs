@@ -122,10 +122,10 @@ fn modify_url(url: &str, config: &MarkdownRenderConfig) -> Fallible<String> {
     let prefix = config.file_url_prefix.trim_end_matches('/');
     let resolved = match config.resolver.resolve(url) {
         Ok(p) => p,
-        // External URLs (e.g. HedgeDoc image uploads) are passed through after
-        // parsing and re-serializing. This rejects invalid URLs (including those
-        // containing whitespace or control characters) and non-http(s) schemes,
-        // and produces a canonicalized string that is safe to embed in HTML.
+        // An external URL is passed through after parsing and re-serializing.
+        // This rejects invalid URLs (including those containing whitespace or
+        // control characters) and non-http(s) schemes, and produces a
+        // canonicalized string that is safe to embed in HTML.
         Err(ResolveError::ExternalUrl) => {
             let parsed = Url::parse(url).map_err(|err| {
                 ErrorReport::new(format!(
@@ -250,8 +250,8 @@ mod tests {
 
     #[test]
     fn test_external_url_image_renders_unchanged() -> Fallible<()> {
-        // External image URLs (e.g. HedgeDoc uploads) must be passed through
-        // as-is so the browser fetches them directly.
+        // An external image URL must be passed through as-is so the browser
+        // fetches it directly.
         let markdown = "![alt](https://example.com/image.png)";
         let config = make_test_config()?;
         let html = markdown_to_html(&config, markdown)?;

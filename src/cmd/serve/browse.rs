@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::collections::hash_map::Entry;
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -7,7 +8,7 @@ use maud::Markup;
 use maud::html;
 
 use crate::cmd::drill::template::page_template;
-use crate::cmd::serve::href::safe_href;
+use crate::cmd::serve::href::encoded_path;
 use crate::collection::Collection;
 use crate::error::Fallible;
 use crate::flash::Flash;
@@ -68,6 +69,14 @@ pub struct BrowseData {
     /// The directory the collection was loaded from, stripped from duplicate
     /// locations before they are shown.
     pub coll_dir: PathBuf,
+    /// Topic name to the file its cards came from, relative to the
+    /// collection folder — the target of the topic's edit link.
+    ///
+    /// Not derived from the topic *name*: that defaults to the file's path,
+    /// but a file's frontmatter `name:` overrides it, so the name is not a
+    /// path. A topic whose cards come from more than one file gets no
+    /// entry, since there is no one file to open.
+    pub edit_paths: HashMap<String, PathBuf>,
 }
 
 /// Build a deck tree from a collection, computing per-deck due/total counts.
@@ -88,6 +97,8 @@ pub fn build_deck_tree(coll_dir: &Path, db_path: &Path) -> Fallible<BrowseData> 
 
     // Count per deck
     let mut counts: HashMap<String, DeckCounts> = HashMap::new();
+    // `None` marks a topic seen in more than one file.
+    let mut sources: HashMap<String, Option<PathBuf>> = HashMap::new();
     for card in &collection.cards {
         let entry = counts
             .entry(card.deck_name().clone())
@@ -96,12 +107,28 @@ pub fn build_deck_tree(coll_dir: &Path, db_path: &Path) -> Fallible<BrowseData> 
         if due_hashes.contains(&card.hash()) {
             entry.due += 1;
         }
+        let rel = card.relative_file_path(&collection.directory).ok();
+        match sources.entry(card.deck_name().clone()) {
+            Entry::Occupied(mut slot) => {
+                if slot.get().as_ref() != rel.as_ref() {
+                    slot.insert(None);
+                }
+            }
+            Entry::Vacant(slot) => {
+                slot.insert(rel);
+            }
+        }
     }
+    let edit_paths: HashMap<String, PathBuf> = sources
+        .into_iter()
+        .filter_map(|(name, path)| path.map(|p| (name, p)))
+        .collect();
 
     Ok(BrowseData {
         tree: build_tree_from_counts(counts),
         duplicates: collection.duplicates,
         coll_dir: coll_dir.to_path_buf(),
+        edit_paths,
     })
 }
 
@@ -186,14 +213,16 @@ fn duplicates_summary(count: usize) -> String {
     format!("{subject}. Only one copy is drilled, and only that copy carries review history.")
 }
 
-/// Render the deck browser page for a collection.
-/// `hedge_urls` maps deck name to the original HedgeDoc note URL, for collections
-/// backed by HedgeDoc. Pass an empty map for file-based collections.
+/// Render a collection's own page: its topics, and the things you can do
+/// with the collection as a whole.
+///
+/// The list page drills a collection in one tap, so this page is no longer a
+/// gate on the way in — it is where you come to drill part of a collection,
+/// or to look at what is in it.
 pub fn render_browse_page(
     collection_name: &str,
     slug: &str,
     browse: &BrowseData,
-    hedge_urls: &HashMap<String, String>,
     bookmark_count: usize,
     interrupted_sessions_closed: usize,
     flash: Option<Flash>,
@@ -202,6 +231,7 @@ pub fn render_browse_page(
         tree,
         duplicates,
         coll_dir,
+        edit_paths,
     } = browse;
     let total_due = tree.due_today_recursive();
     page_template(html! {
@@ -229,12 +259,13 @@ pub fn render_browse_page(
                 }
             }
             @if tree.children.is_empty() {
-                p.empty { "No decks found in this collection." }
+                p.empty { "No topics found in this collection." }
             } @else {
+                h2.section-title { "Topics" }
                 form action=(format!("/collection/{slug}/start")) method="post" {
                     div.deck-tree {
                         @for child in &tree.children {
-                            (render_deck_node(child, 0, hedge_urls))
+                            (render_deck_node(child, 0, collection_name, edit_paths))
                         }
                     }
                     div.browse-controls {
@@ -252,7 +283,7 @@ pub fn render_browse_page(
                             }
                             input
                                 type="submit"
-                                value=(format!("Drill ({total_due} due)"))
+                                value=(format!("Start ({total_due} due)"))
                                 class="drill-button btn btn-primary"
                                 disabled[total_due == 0];
                         }
@@ -282,16 +313,35 @@ pub fn render_browse_page(
     })
 }
 
-fn render_deck_node(node: &DeckNode, depth: usize, hedge_urls: &HashMap<String, String>) -> Markup {
+/// A leaf topic links to the file it lives in, opened in the in-app editor.
+/// The target is a path we construct, so it needs no scheme check, and it
+/// opens in the same tab.
+fn render_deck_node(
+    node: &DeckNode,
+    depth: usize,
+    collection_name: &str,
+    edit_paths: &HashMap<String, PathBuf>,
+) -> Markup {
     let total = node.total_cards_recursive();
     let due = node.due_today_recursive();
     let has_children = !node.children.is_empty();
-    let edit_url = if !has_children {
-        hedge_urls.get(&node.path).and_then(|url| safe_href(url))
-    } else {
+    // A parent aggregates several files; there is no one file to open.
+    let edit_url = if has_children {
         None
+    } else {
+        edit_paths.get(&node.path).map(|rel| {
+            // `/`-separated, like every other path the file manager takes.
+            let rel = rel
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+                .join("/");
+            format!(
+                "/files/edit/{}",
+                encoded_path(&format!("{collection_name}/{rel}"))
+            )
+        })
     };
-
     html! {
         div.deck-node {
             div.deck-row style=(format!("padding-left: {}px", depth * 24)) {
@@ -318,18 +368,21 @@ fn render_deck_node(node: &DeckNode, depth: usize, hedge_urls: &HashMap<String, 
                     span.deck-name { (node.name) }
                 }
                 span.deck-counts {
-                    span.deck-due class=@if due == 0 { "muted" } { (due) }
+                    // One `class` attribute: a second is emitted verbatim and
+                    // the browser keeps only the first, so a topic with
+                    // nothing due never dimmed.
+                    span class=(if due == 0 { "deck-due muted" } else { "deck-due" }) { (due) }
                     " / "
                     span.deck-total { (total) }
                 }
                 @if let Some(url) = edit_url {
-                    a.edit-link href=(url) target="_blank" rel="noopener noreferrer" { "Edit \u{2197}" }
+                    a.edit-link href=(url) { "Edit" }
                 }
             }
             @if has_children {
                 div.deck-children {
                     @for child in &node.children {
-                        (render_deck_node(child, depth + 1, hedge_urls))
+                        (render_deck_node(child, depth + 1, collection_name, edit_paths))
                     }
                 }
             }
@@ -399,7 +452,7 @@ function updateDrillButton() {
         var dueEl = row.querySelector('.deck-due');
         if (dueEl) totalDue += parseInt(dueEl.textContent) || 0;
     });
-    btn.value = 'Drill (' + totalDue + ' due)';
+    btn.value = 'Start (' + totalDue + ' due)';
     btn.disabled = totalDue === 0;
 }
 "#;
@@ -409,35 +462,24 @@ mod tests {
     use super::*;
     use crate::helper::create_tmp_directory;
 
+    /// The link points at the file the topic's cards actually live in, not
+    /// at its name: a file's frontmatter `name:` renames the topic without
+    /// moving the file, and a link built from the name would 404.
     #[test]
-    fn browse_page_never_links_unsafe_edit_urls() {
-        // Regression test for BUG-24 (render-time guard on edit links).
-        let tree = DeckNode {
-            name: String::new(),
-            path: String::new(),
-            total_cards: 0,
-            due_today: 0,
-            children: vec![DeckNode {
-                name: "deck".to_string(),
-                path: "deck".to_string(),
-                total_cards: 1,
-                due_today: 1,
-                children: vec![],
-            }],
-        };
-        let mut hedge_urls: HashMap<String, String> = HashMap::new();
-        hedge_urls.insert("deck".to_string(), "javascript:alert(1)".to_string());
-        let browse = BrowseData {
-            tree,
-            duplicates: Vec::new(),
-            coll_dir: PathBuf::new(),
-        };
-        let html =
-            render_browse_page("Coll", "coll", &browse, &hedge_urls, 0, 0, None).into_string();
+    fn a_topic_links_to_the_file_its_cards_live_in() -> Fallible<()> {
+        let dir = create_tmp_directory()?;
+        std::fs::create_dir_all(dir.join("grammar"))?;
+        std::fs::write(
+            dir.join("grammar").join("particles.md"),
+            "---\nname = \"Little words\"\n---\n\nQ: wa\nA: topic marker\n",
+        )?;
+        let browse = build_deck_tree(&dir, &dir.join("test.db"))?;
+        let html = render_browse_page("My Cards", "My-Cards", &browse, 0, 0, None).into_string();
         assert!(
-            !html.contains(r#"href="javascript:"#),
-            "unsafe scheme must not become an edit link: {html}"
+            html.contains("/files/edit/My%20Cards/grammar/particles.md"),
+            "got: {html}"
         );
+        Ok(())
     }
 
     /// Byte-identical cards are silently deduplicated at load time, so one
@@ -458,8 +500,7 @@ mod tests {
             "the two identical cards must be reported as one duplicate"
         );
 
-        let html =
-            render_browse_page("Coll", "coll", &browse, &HashMap::new(), 0, 0, None).into_string();
+        let html = render_browse_page("Coll", "coll", &browse, 0, 0, None).into_string();
         assert!(
             html.contains("duplicate card"),
             "the duplicate must be named on the page: {html}"
@@ -477,6 +518,41 @@ mod tests {
             "the server's path to the collection must not be shown: {html}"
         );
         Ok(())
+    }
+
+    /// A topic with nothing due is dimmed. It used to be rendered with two
+    /// `class` attributes, of which a browser keeps only the first, so the
+    /// muted style never reached the page.
+    #[test]
+    fn browse_page_dims_a_topic_with_nothing_due() {
+        let tree = DeckNode {
+            name: String::new(),
+            path: String::new(),
+            total_cards: 0,
+            due_today: 0,
+            children: vec![DeckNode {
+                name: "quiet".to_string(),
+                path: "quiet".to_string(),
+                total_cards: 4,
+                due_today: 0,
+                children: vec![],
+            }],
+        };
+        let browse = BrowseData {
+            tree,
+            duplicates: Vec::new(),
+            coll_dir: PathBuf::new(),
+            edit_paths: HashMap::new(),
+        };
+        let html = render_browse_page("Coll", "coll", &browse, 0, 0, None).into_string();
+        assert!(
+            html.contains(r#"class="deck-due muted""#),
+            "a topic with nothing due must be dimmed: {html}"
+        );
+        assert!(
+            !html.contains(r#"class="deck-due" class="#),
+            "one class attribute, not two: {html}"
+        );
     }
 
     /// One duplicate is one card, and the sentence has to say so.
@@ -508,9 +584,9 @@ mod tests {
             tree,
             duplicates: Vec::new(),
             coll_dir: PathBuf::new(),
+            edit_paths: HashMap::new(),
         };
-        let html =
-            render_browse_page("Coll", "coll", &browse, &HashMap::new(), 0, 0, None).into_string();
+        let html = render_browse_page("Coll", "coll", &browse, 0, 0, None).into_string();
         assert!(!html.contains("duplicate"), "html: {html}");
     }
 }

@@ -12,8 +12,8 @@
                                       # anyone who can reach the port can read
                                       # and edit your cards.
 # port = 8000                         # Port number (default: 8000)
-data_dir = "/var/lib/hashcards"       # Directory for the repo clone, the review
-                                      # databases and any HedgeDoc notes. Created
+data_dir = "/var/lib/hashcards"       # Directory for the card trees, the review
+                                      # databases. Created
                                       # at startup, but only if the parent is
                                       # writable: /var/lib is root-owned, so a
                                       # systemd unit wants `StateDirectory=hashcards`
@@ -23,24 +23,17 @@ data_dir = "/var/lib/hashcards"       # Directory for the repo clone, the review
 
 # session_timeout_minutes = 1440       # Evict drill sessions idle this long; 0 disables (default: 1440)
 
-[git]
-repo_url = "https://github.com/user/flashcards.git"
-# branch = "main"                     # Branch to track (default: main)
-# poll_interval_minutes = 30          # Sync interval; 0 to disable (default: 30)
-# commit_author_name = "hashcards web edit"     # Author of auto-commits for in-browser edits
-# commit_author_email = "hashcards@localhost"   # Author email for those commits
-
 [defaults]
 # answer_controls = "full"            # "full" or "binary" (default: full)
 # bury_siblings = true                # Hide sibling cards in same session (default: true)
 # jitter = 0.05                       # Random +/- fraction applied to review intervals (0.0 to 0.5, default: 0.05)
 
 # Optional: OIDC login. Adding this section gates every route except /auth/*
-# behind a login, and then *requires* an `owner` on every [[collection]],
-# [[source]] and [[deck]] entry below. Each collection is visible to exactly
-# its one owner; there is no sharing, signup flow or admin UI. Conversely, an
-# `owner` declared without an [oidc] section is a config error, since nobody
-# would ever be logged in to match it.
+# behind a login, and then *requires* an `owner` on every [[deck]] entry
+# below. Each user's collections are the folders in their own card tree, so
+# a collection is visible to exactly its one owner; there is no sharing,
+# signup flow or admin UI. Conversely, an `owner` declared without an [oidc]
+# section is a config error, since nobody would ever be logged in to match it.
 
 # [oidc]
 # issuer_url = "https://cloud.example.com"
@@ -83,42 +76,14 @@ repo_url = "https://github.com/user/flashcards.git"
 #                                     #   curl -H "Authorization: Bearer <token>" \
 #                                     #     {issuer_url}/apps/oidc/userinfo
 
-# Define one or more collections. Paths are relative to {data_dir}/repo.
-
-[[collection]]
-name = "Japanese"
-path = "japanese"
-# owner = "me@example.com"            # Required when [oidc] is configured
-
-[[collection]]
-name = "Anatomy"
-path = "medicine/anatomy"
-# owner = "someone-else@example.com"
-
-# Optional: remote sources. Each entry is a publicly accessible URL for one
-# markdown document -- a HedgeDoc note or a file in a git repository, worked
-# out from the URL. hashcards fetches the raw markdown, derives the collection
-# name from the document title, and syncs it on the same interval as git.
-# Sources can also be added/removed via the web interface.
-#
-# Each source is a collection of its own, owned by that entry's `owner` alone --
-# notes are never grouped by host, so several users can take notes from one
-# shared HedgeDoc instance without sharing a collection or a review database.
-
-# [[source]]
-# url = "https://notes.example.com/q1QcHIRvQFiTxzwnF-_L3g"
-# owner = "me@example.com"            # Required when [oidc] is configured
-
-# A file in a git repository works the same way. GitHub /blob/, GitLab
-# /-/blob/, Gitea and Forgejo /src/branch/ URLs are rewritten to their raw
-# endpoints; a URL already ending in .md is fetched as-is.
-
-# [[source]]
-# url = "https://github.com/me/cards/blob/main/spanish.md"
+# Collections are not configured here. A collection is a top-level folder in
+# your card tree -- {data_dir}/cards/{your-email-slug}-{hash} with [oidc], or
+# {data_dir}/cards/default without it -- created through My Cards (/files) or
+# by hand. Which tree the folder sits in is who owns it.
 
 # Optional: decks assembled across collections, drilled together in one session.
 # `members` are "{collection-slug}/{deck-name}" pairs. Decks created through the
-# web interface are written back to this file, exactly as sources are.
+# web interface are written back to this file.
 
 # [[deck]]
 # name = "Exam revision"

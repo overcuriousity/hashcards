@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -10,7 +11,6 @@ use axum::routing::get;
 use axum::routing::post;
 use axum_extra::extract::cookie::Key;
 use tokio::net::TcpListener;
-use tokio::sync::RwLock;
 
 use crate::cmd::drill::fonts::font_handler;
 use crate::cmd::drill::hljs::HLJS_CSS_URL;
@@ -35,9 +35,8 @@ use crate::cmd::serve::auth::require_auth;
 use crate::cmd::serve::bookmarks::bookmark_delete_handler;
 use crate::cmd::serve::bookmarks::bookmark_list_handler;
 use crate::cmd::serve::bookmarks::bookmark_note_handler;
+use crate::cmd::serve::cards::discover_all_collections;
 use crate::cmd::serve::config::MIN_SESSION_SECRET_BYTES;
-use crate::cmd::serve::config::ResolvedCollection;
-use crate::cmd::serve::config::ResolvedGit;
 use crate::cmd::serve::config::ResolvedOidc;
 use crate::cmd::serve::config::ResolvedServeConfig;
 use crate::cmd::serve::decks::check_deck_slug_collisions;
@@ -48,8 +47,6 @@ use crate::cmd::serve::decks::resolve_custom_decks;
 use crate::cmd::serve::edit::edit_get_handler;
 use crate::cmd::serve::edit::edit_post_handler;
 use crate::cmd::serve::export::collection_export_handler;
-use axum::response::Redirect;
-
 use crate::cmd::serve::files::editor_get_handler;
 use crate::cmd::serve::files::editor_post_handler;
 use crate::cmd::serve::files::files_delete_handler;
@@ -58,25 +55,14 @@ use crate::cmd::serve::files::files_folder_handler;
 use crate::cmd::serve::files::files_get_handler;
 use crate::cmd::serve::files::files_rename_handler;
 use crate::cmd::serve::files::preview_handler;
-use crate::cmd::serve::git::clone_or_pull;
-use crate::cmd::serve::git::spawn_sync_task;
 use crate::cmd::serve::handlers::collection_file_handler;
 use crate::cmd::serve::handlers::collection_get_handler;
 use crate::cmd::serve::handlers::collection_post_handler;
 use crate::cmd::serve::handlers::collection_script_handler;
 use crate::cmd::serve::handlers::collection_start_handler;
-use crate::cmd::serve::handlers::hedgedoc_add_handler;
-use crate::cmd::serve::handlers::hedgedoc_delete_handler;
-use crate::cmd::serve::handlers::hedgedoc_manage_handler;
-use crate::cmd::serve::handlers::hedgedoc_sync_now_handler;
-use crate::cmd::serve::handlers::sync_handler;
-use crate::cmd::serve::hedgedoc::build_combined_infos;
-use crate::cmd::serve::hedgedoc::build_source_lossless;
-use crate::cmd::serve::hedgedoc::check_startup_slug_collisions;
-use crate::cmd::serve::hedgedoc::spawn_hedgedoc_sync_task;
 use crate::cmd::serve::landing::landing_handler;
 use crate::cmd::serve::state::AppState;
-use crate::cmd::serve::state::HedgedocSource;
+use crate::cmd::serve::state::SessionKey;
 use crate::cmd::serve::state::SharedSession;
 use crate::cmd::serve::state::evict_idle_sessions;
 use crate::cmd::serve::stats::collection_stats_handler;
@@ -100,34 +86,28 @@ use crate::utils::ensure_dir;
 const SESSION_STALE_MINUTES: i64 = 60;
 
 /// Close session rows left dangling by a crash or restart, across every
-/// collection this server serves, and return the per-slug counts so the deck
-/// browser can report them once.
+/// collection this server can serve, and return the per-database counts so
+/// the topic browser can report them once.
+///
+/// Keyed by database path rather than by URL slug: two users may each own a
+/// collection called "Spanish", and a slug-keyed notice would be shown to
+/// whichever of them opened the page first.
 ///
 /// A collection whose database cannot be opened is skipped with a log line
-/// rather than failing startup: an unreadable database is the deck browser's
-/// problem to report, not a reason to refuse to serve everything else.
-///
-/// Each collection's database is independent, so the sweeps run on their own
-/// threads rather than one after another: a server with many collections
-/// would otherwise have its startup delayed in proportion to how many it
-/// serves.
-fn sweep_dangling_sessions(
-    config: &ResolvedServeConfig,
-    hedgedoc_sources: &[HedgedocSource],
-) -> HashMap<String, usize> {
+/// rather than failing startup: an unreadable database is the topic
+/// browser's problem to report, not a reason to refuse to serve everything
+/// else. Each database is independent, so the sweeps run on their own
+/// threads rather than one after another.
+fn sweep_dangling_sessions(data_dir: &Path) -> HashMap<PathBuf, usize> {
     // Only sessions whose heartbeat has been silent this long are presumed
-    // dead. A CLI `drill` sharing the database stamps its heartbeat as the
-    // user works, so a live session is never swept out from under it.
+    // dead. A session in another process stamps its heartbeat as the user
+    // works, so a live one is never swept out from under it.
     let stale_before = Timestamp::now().minus_minutes(SESSION_STALE_MINUTES);
-    let collections: Vec<&ResolvedCollection> = config
-        .collections
-        .iter()
-        .chain(hedgedoc_sources.iter().map(|s| &s.collection))
-        .collect();
+    let collections = discover_all_collections(data_dir);
 
-    let results: Vec<(String, Fallible<usize>)> = std::thread::scope(|scope| {
+    let results: Vec<(PathBuf, Fallible<usize>)> = std::thread::scope(|scope| {
         let handles: Vec<_> = collections
-            .into_iter()
+            .iter()
             .map(|rc| {
                 scope.spawn(move || {
                     let closed = (|| {
@@ -140,7 +120,7 @@ fn sweep_dangling_sessions(
                         Database::new(db_path)
                             .and_then(|db| db.close_dangling_sessions(stale_before))
                     })();
-                    (rc.slug.clone(), closed)
+                    (rc.db_path.clone(), closed)
                 })
             })
             .collect();
@@ -151,16 +131,17 @@ fn sweep_dangling_sessions(
     });
 
     let mut counts = HashMap::new();
-    for (slug, closed) in results {
+    for (db_path, closed) in results {
         match closed {
             Ok(0) => {}
             Ok(n) => {
-                log::info!("Closed {n} interrupted session(s) for collection '{slug}'");
-                counts.insert(slug, n);
+                log::info!("Closed {n} interrupted session(s) in {}", db_path.display());
+                counts.insert(db_path, n);
             }
-            Err(e) => {
-                log::error!("Could not close interrupted sessions for collection '{slug}': {e}")
-            }
+            Err(e) => log::error!(
+                "Could not close interrupted sessions in {}: {e}",
+                db_path.display()
+            ),
         }
     }
     counts
@@ -198,117 +179,27 @@ pub async fn start_serve(config: ResolvedServeConfig) -> Fallible<()> {
     // `/var/lib/hashcards`, which on a systemd deployment only exists, and is
     // only owned by the service user, when the unit declares
     // `StateDirectory=hashcards`. Without that nothing created it, and the
-    // first attempt to write -- adding a HedgeDoc note, minutes or restarts
+    // first attempt to write -- creating a card folder, minutes or restarts
     // later -- failed with a bare "Permission denied (os error 13)" naming no
     // path at all.
     if let Some(data_dir) = &config.data_dir {
         ensure_dir(data_dir, "data directory")?;
         ensure_dir(&data_dir.join("db"), "review database directory")?;
-        ensure_dir(&data_dir.join("hedgedoc"), "HedgeDoc note directory")?;
     }
-
-    // Git mode: clone/pull repo and create data directories
-    let sync_git = match &config.git {
-        Some(git) => {
-            ensure_dir(&git.repo_dir, "git repository directory")?;
-            ensure_dir(&git.db_dir, "review database directory")?;
-
-            log::debug!("Initial git sync...");
-            clone_or_pull(&git.repo_url, &git.branch, &git.repo_dir).await?;
-
-            Some(ResolvedGit {
-                repo_url: git.repo_url.clone(),
-                branch: git.branch.clone(),
-                poll_interval_minutes: git.poll_interval_minutes,
-                commit_author_name: git.commit_author_name.clone(),
-                commit_author_email: git.commit_author_email.clone(),
-                repo_dir: git.repo_dir.clone(),
-                db_dir: git.db_dir.clone(),
-            })
-        }
-        None => None,
-    };
-
-    // Ensure DB parent directories exist for all collections (in git mode these
-    // are already created above; in non-git TOML mode they may not exist yet).
-    for rc in &config.collections {
-        if let Some(parent) = rc.db_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-    }
-
-    // Build initial HedgeDoc sources (fetch markdown, write to disk).
-    let data_dir: Option<PathBuf> = config.data_dir.clone();
-
-    let hedgedoc_sources_init = if let Some(ref dd) = data_dir {
-        // One source per `[[hedgedoc]]` entry: notes are never grouped by
-        // host, so an entry can never inherit another entry's owner.
-        // build_source_lossless never drops an entry (BUG-40).
-        let mut sources: Vec<HedgedocSource> = Vec::new();
-        for entry in &config.hedgedoc_entries {
-            sources.push(build_source_lossless(&entry.url, dd, entry.owner.clone()).await);
-        }
-        sources
-    } else {
-        Vec::new()
-    };
-
-    // Build combined collection info (static + hedgedoc)
-    let collection_infos = build_combined_infos(&config.collections, &hedgedoc_sources_init);
-    log::debug!("Loaded {} collections", collection_infos.len());
-
-    let last_synced = if config.git.is_some() {
-        Some(Timestamp::now())
-    } else {
-        None
-    };
-
-    let sync_collections: Vec<ResolvedCollection> = config
-        .collections
-        .iter()
-        .map(|c| ResolvedCollection {
-            name: c.name.clone(),
-            slug: c.slug.clone(),
-            coll_dir: c.coll_dir.clone(),
-            db_path: c.db_path.clone(),
-            owner: c.owner.clone(),
-        })
-        .collect();
-
-    // Determine poll interval for HedgeDoc (inherit from git, or default 30 min).
-    let hedgedoc_poll_minutes = config
-        .git
-        .as_ref()
-        .map(|g| g.poll_interval_minutes)
-        .unwrap_or(30);
 
     let config_path: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(config.config_path.clone()));
     let bind = format!("{}:{}", config.host, config.port);
 
     let config = Arc::new(config);
-    // Mark initial sync time only if at least one note was fetched without error.
-    let hedgedoc_last_synced_init = if hedgedoc_sources_init
-        .iter()
-        .any(|s| s.note.last_error.is_none())
-    {
-        Some(Timestamp::now())
-    } else {
-        None
-    };
-    // BUG-43: refuse to start if two collections share a URL slug. Routing
-    // prefers configured collections, so a collision silently addresses the
-    // wrong database rather than failing visibly.
-    check_startup_slug_collisions(&config.collections, &hedgedoc_sources_init)?;
-
     // FEAT-03: close session rows left open by a crash or restart, once, at
     // startup. They cannot be resumed (the card queue lives only in memory),
     // so they are closed with all persisted reviews kept. This must not run
     // per request: the predicate cannot distinguish a crashed session from a
     // live one, and a CLI `drill` may be running against the same database.
-    let interrupted_closed = sweep_dangling_sessions(&config, &hedgedoc_sources_init);
-
-    let hedgedoc_sources = Arc::new(Mutex::new(hedgedoc_sources_init));
-    let hedgedoc_last_synced = Arc::new(Mutex::new(hedgedoc_last_synced_init));
+    let interrupted_closed = match &config.data_dir {
+        Some(data_dir) => sweep_dangling_sessions(data_dir),
+        None => HashMap::new(),
+    };
 
     // Discovery happens once at startup, not lazily on the first login
     // attempt, so a broken [oidc] config fails fast with a clear error.
@@ -320,27 +211,17 @@ pub async fn start_serve(config: ResolvedServeConfig) -> Fallible<()> {
     // User-assembled decks are resolved once here; adds and deletes refresh
     // the list in place.
     let custom_decks = resolve_custom_decks(&config.custom_decks);
-    // Decks must not collide with a HedgeDoc note's slug either, since both
-    // are addressed through `/collection/{slug}`.
-    let all_slugged: Vec<ResolvedCollection> = config
-        .collections
-        .iter()
-        .cloned()
-        .chain(hedgedoc_sources.lock().iter().map(|s| s.collection.clone()))
-        .collect();
-    check_deck_slug_collisions(&custom_decks, &all_slugged)?;
+    // Nothing to check a deck against at startup any more: collections are
+    // discovered per request, from each caller's own tree. The file manager
+    // refuses a folder that would take a deck's slug, which is where the
+    // collision can actually be created.
+    let _ = check_deck_slug_collisions;
 
     let state = AppState {
         config: config.clone(),
-        collections: Arc::new(RwLock::new(collection_infos)),
         sessions: Arc::new(Mutex::new(HashMap::new())),
-        last_synced: Arc::new(Mutex::new(last_synced)),
-        hedgedoc_sources: hedgedoc_sources.clone(),
         custom_decks: Arc::new(Mutex::new(custom_decks)),
-        hedgedoc_last_synced: hedgedoc_last_synced.clone(),
         config_path,
-        // Counts were just computed above, so the stamp starts fresh.
-        counts_refreshed_at: Arc::new(Mutex::new(Some(Timestamp::now()))),
         interrupted_closed: Arc::new(Mutex::new(interrupted_closed)),
         session_key: session_key(config.oidc.as_ref())?,
         oidc,
@@ -348,31 +229,8 @@ pub async fn start_serve(config: ResolvedServeConfig) -> Fallible<()> {
 
     spawn_session_eviction_task(state.sessions.clone(), config.session_timeout_minutes);
 
-    // Spawn background git sync task (only in git mode)
-    if let Some(git) = sync_git {
-        spawn_sync_task(
-            git,
-            sync_collections.clone(),
-            state.collections.clone(),
-            state.last_synced.clone(),
-            state.hedgedoc_sources.clone(),
-        );
-    }
-
-    // Spawn background HedgeDoc sync task (only when data_dir is available)
-    if data_dir.is_some() {
-        spawn_hedgedoc_sync_task(
-            hedgedoc_sources,
-            state.collections.clone(),
-            hedgedoc_last_synced,
-            sync_collections,
-            hedgedoc_poll_minutes,
-        );
-    }
-
     let app = Router::new()
         .route("/", get(landing_handler))
-        .route("/sync", post(sync_handler))
         .route("/files", get(files_get_handler))
         .route("/files/folder", post(files_folder_handler))
         .route("/files/file", post(files_file_handler))
@@ -387,15 +245,6 @@ pub async fn start_serve(config: ResolvedServeConfig) -> Fallible<()> {
         .route(
             "/files/media/{*path}",
             post(media_upload_handler).layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES)),
-        )
-        .route("/sources", get(hedgedoc_manage_handler))
-        .route("/sources/add", post(hedgedoc_add_handler))
-        .route("/sources/delete", post(hedgedoc_delete_handler))
-        .route("/sources/sync", post(hedgedoc_sync_now_handler))
-        // Kept so bookmarks from before the rename keep working.
-        .route(
-            "/hedgedoc",
-            get(|| async { Redirect::permanent("/sources") }),
         )
         .route("/decks", get(decks_manage_handler))
         .route("/decks/add", post(deck_add_handler))
@@ -515,7 +364,7 @@ async fn shutdown_signal() {
 /// Periodically evict drill sessions idle past the configured timeout,
 /// closing their DB session rows (BUG-08).
 fn spawn_session_eviction_task(
-    sessions: Arc<Mutex<HashMap<String, SharedSession>>>,
+    sessions: Arc<Mutex<HashMap<SessionKey, SharedSession>>>,
     timeout_minutes: u64,
 ) {
     if timeout_minutes == 0 {
@@ -536,10 +385,11 @@ fn spawn_session_eviction_task(
             .await
             {
                 Ok(evicted) if !evicted.is_empty() => {
+                    let slugs: Vec<&str> = evicted.iter().map(|k| k.slug()).collect();
                     log::info!(
                         "Evicted {} idle drill session(s): {}",
                         evicted.len(),
-                        evicted.join(", ")
+                        slugs.join(", ")
                     );
                 }
                 Ok(_) => {}
@@ -547,4 +397,47 @@ fn spawn_session_eviction_task(
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cmd::serve::cards::collection_id;
+    use crate::helper::create_tmp_directory;
+
+    /// Two users may each have a collection called "Spanish". They slugify
+    /// alike, so a notice keyed by slug would be shown to whichever of them
+    /// opened the page first, reporting the other's interrupted sessions.
+    /// Keyed by database path, each notice reaches its own owner.
+    #[test]
+    fn interrupted_notices_are_keyed_per_database_not_per_slug() -> Fallible<()> {
+        let data_dir = create_tmp_directory()?;
+        let db_dir = data_dir.join("db");
+        ensure_dir(&db_dir, "review database directory")?;
+
+        let mut db_paths = Vec::new();
+        for user in ["alice-example.com", "bob-example.com"] {
+            let folder = data_dir.join("cards").join(user).join("Spanish");
+            std::fs::create_dir_all(&folder)?;
+            let id = collection_id(&folder)?;
+            let db_path = db_dir.join(format!("{id}.db"));
+            let db_str = match db_path.to_str() {
+                Some(p) => p,
+                None => return fail("temp path is not UTF-8"),
+            };
+            let db = Database::new(db_str)?;
+            // A session row opened long ago and never closed: exactly what a
+            // crash leaves behind.
+            let started = Timestamp::now().minus_minutes(SESSION_STALE_MINUTES * 2);
+            db.create_session(started)?;
+            db_paths.push(db_path);
+        }
+
+        let counts = sweep_dangling_sessions(&data_dir);
+        assert_eq!(counts.len(), 2, "each user's collection swept separately");
+        for db_path in &db_paths {
+            assert_eq!(counts.get(db_path), Some(&1), "{}", db_path.display());
+        }
+        Ok(())
+    }
 }

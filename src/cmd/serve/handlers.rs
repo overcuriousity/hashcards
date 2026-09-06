@@ -42,21 +42,10 @@ use crate::cmd::serve::browse::render_browse_page;
 use crate::cmd::serve::config::ResolvedCollection;
 use crate::cmd::serve::decks::ResolvedCustomDeck;
 use crate::cmd::serve::decks::find_custom_deck;
-use crate::cmd::serve::files::existing_local_collections_for;
-use crate::cmd::serve::git::clone_or_pull;
-use crate::cmd::serve::hedgedoc::apply_sync_result;
-use crate::cmd::serve::hedgedoc::build_combined_infos;
-use crate::cmd::serve::hedgedoc::build_source;
-use crate::cmd::serve::hedgedoc::cleanup_after_delete;
-use crate::cmd::serve::hedgedoc::commit_add;
-use crate::cmd::serve::hedgedoc::commit_delete;
-use crate::cmd::serve::hedgedoc::find_slug_collision;
-use crate::cmd::serve::hedgedoc::normalize_hedgedoc_url;
-use crate::cmd::serve::hedgedoc::slug_for_note;
-use crate::cmd::serve::hedgedoc::source_uri_from_url;
-use crate::cmd::serve::hedgedoc::sync_source;
+use crate::cmd::serve::files::existing_collections_for_user;
 use crate::cmd::serve::state::AppState;
 use crate::cmd::serve::state::DrillSession;
+use crate::cmd::serve::state::SessionKey;
 use crate::cmd::serve::state::SharedSession;
 use crate::collection::Collection;
 use crate::db::Database;
@@ -76,7 +65,7 @@ use crate::types::timestamp::Timestamp;
 ///
 /// Serve handlers parse collections from disk and touch SQLite; doing that
 /// on the async executor stalls every other request (BUG-44). Pattern as in
-/// `git.rs` (`spawn_blocking` in `spawn_sync_task`).
+/// the counting paths (`spawn_blocking` in the landing handler).
 pub async fn collection_get_handler(
     State(state): State<AppState>,
     Path(slug): Path<String>,
@@ -133,7 +122,8 @@ fn collection_get_inner(
 ) -> Fallible<String> {
     // Clone the Arc out of the map so the map lock is not held during
     // rendering; the session itself stays in the map even if rendering fails.
-    let session: Option<SharedSession> = state.sessions.lock().get(slug).cloned();
+    let key = SessionKey::new(owner, slug);
+    let session: Option<SharedSession> = state.sessions.lock().get(&key).cloned();
 
     // A concurrent Home action (or eviction) may have removed this session
     // from the map, and closed its DB row, between the clone above and the
@@ -154,22 +144,6 @@ fn collection_get_inner(
         let rc = find_collection(state, slug, owner)
             .ok_or_else(|| crate::error::ErrorReport::new(format!("Unknown collection: {slug}")))?;
         let browse = build_deck_tree(&rc.coll_dir, &rc.db_path)?;
-        // Build a deck-name → HedgeDoc URL map so the browse page can show
-        // edit links. A HedgeDoc collection is exactly one note, so this is
-        // at most one entry. All URLs were validated as HTTPS when added.
-        let hedge_urls: std::collections::HashMap<String, String> = {
-            let sources = state.hedgedoc_sources.lock();
-            sources
-                .iter()
-                .find(|s| s.collection.slug == slug)
-                .map(|s| {
-                    std::collections::HashMap::from([(
-                        s.note.deck_name.clone(),
-                        s.note.url.clone(),
-                    )])
-                })
-                .unwrap_or_default()
-        };
         let db_path = rc.db_path.to_str().ok_or_else(|| {
             crate::error::ErrorReport::new(format!(
                 "Database path is not valid UTF-8: {}",
@@ -183,13 +157,16 @@ fn collection_get_inner(
         // database, so doing it per request would stamp `ended_at` on a
         // session that is still going. Taking the entry also means the
         // notice appears once instead of on every visit.
-        let interrupted_closed = state.interrupted_closed.lock().remove(slug).unwrap_or(0);
+        let interrupted_closed = state
+            .interrupted_closed
+            .lock()
+            .remove(&rc.db_path)
+            .unwrap_or(0);
         let bookmark_count = db.count_bookmarks()?;
         let html = render_browse_page(
             &rc.name,
             slug,
             &browse,
-            &hedge_urls,
             bookmark_count,
             interrupted_closed,
             flash,
@@ -216,6 +193,7 @@ fn collection_get_inner(
         answer_controls: session.answer_controls,
         form_action: &form_action,
         file_url_prefix: &file_url_prefix,
+        slug,
     };
     let body = if session.mutable.finished_at.is_some() {
         render_completion_page(&ctx, &session.mutable)?
@@ -231,8 +209,8 @@ fn collection_get_inner(
     Ok(html.into_string())
 }
 
-/// Every slug that can be drilled: a configured collection (or HedgeDoc
-/// note, which is one too) or a user-assembled cross-collection deck.
+/// Every slug that can be drilled: a collection or a user-assembled
+/// cross-collection deck.
 pub(super) enum DrillTarget {
     Collection(ResolvedCollection),
     Deck(ResolvedCustomDeck),
@@ -290,25 +268,9 @@ pub(super) fn find_collection(
     slug: &str,
     owner: Option<&str>,
 ) -> Option<ResolvedCollection> {
-    if let Some(rc) = state
-        .config
-        .collections
-        .iter()
-        .find(|c| c.slug == slug && c.owner.as_deref() == owner)
-    {
-        return Some(rc.clone());
-    }
-    if let Some(rc) = existing_local_collections_for(state, current_user_for(owner).as_ref())
+    existing_collections_for_user(state, current_user_for(owner).as_ref())
         .into_iter()
         .find(|c| c.slug == slug && c.owner.as_deref() == owner)
-    {
-        return Some(rc);
-    }
-    let sources = state.hedgedoc_sources.lock();
-    sources
-        .iter()
-        .find(|s| s.collection.slug == slug && s.collection.owner.as_deref() == owner)
-        .map(|s| s.collection.clone())
 }
 
 /// `find_collection`, off the async executor.
@@ -343,7 +305,7 @@ pub(super) async fn collection_exists(state: &AppState, slug: &str, owner: Optio
     find_collection_blocking(state, slug, owner).await.is_some()
 }
 
-/// `local_collections_for` keys the tree off a `CurrentUser`; callers here
+/// `collections_for_user` keys the tree off a `CurrentUser`; callers here
 /// already reduced that to an owner email.
 pub(super) fn current_user_for(owner: Option<&str>) -> Option<CurrentUser> {
     owner.map(|email| CurrentUser {
@@ -356,6 +318,10 @@ pub struct StartDrillForm {
     pub decks: Vec<String>,
     /// Optional card limit: `0` or absent means "all due cards".
     pub limit: Option<usize>,
+    /// Set by the one-tap Drill button on the collection list, which offers
+    /// no topic checkboxes at all. It is what tells an empty `decks` apart
+    /// from a topic picker with everything unticked.
+    pub all_topics: bool,
 }
 
 /// Custom `Deserialize` for `StartDrillForm`.
@@ -380,9 +346,14 @@ impl<'de> serde::Deserialize<'de> for StartDrillForm {
             fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
                 let mut decks = Vec::new();
                 let mut limit: Option<usize> = None;
+                let mut all_topics = false;
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
                         "decks" => decks.push(map.next_value::<String>()?),
+                        "all_topics" => {
+                            let _ = map.next_value::<String>()?;
+                            all_topics = true;
+                        }
                         "limit" => {
                             let raw = map.next_value::<String>()?;
                             if let Ok(n) = raw.parse::<usize>() {
@@ -396,7 +367,11 @@ impl<'de> serde::Deserialize<'de> for StartDrillForm {
                         }
                     }
                 }
-                Ok(StartDrillForm { decks, limit })
+                Ok(StartDrillForm {
+                    decks,
+                    limit,
+                    all_topics,
+                })
             }
         }
 
@@ -414,7 +389,14 @@ pub async fn collection_start_handler(
     let slug2 = slug.clone();
     let owner = current_user.map(|u| u.email);
     match run_blocking(move || {
-        collection_start_inner(&state2, &slug2, form.decks, form.limit, owner.as_deref())
+        collection_start_inner(
+            &state2,
+            &slug2,
+            form.decks,
+            form.limit,
+            form.all_topics,
+            owner.as_deref(),
+        )
     })
     .await
     {
@@ -431,6 +413,7 @@ fn collection_start_inner(
     slug: &str,
     selected_decks: Vec<String>,
     limit: Option<usize>,
+    all_topics: bool,
     owner: Option<&str>,
 ) -> Fallible<()> {
     // The slug must be the caller's own before anything else happens —
@@ -439,22 +422,24 @@ fn collection_start_inner(
     let target = find_drill_target(state, slug, owner)
         .ok_or_else(|| ErrorReport::new(format!("Unknown collection: {slug}")))?;
     // A custom deck's membership is fixed when it is saved, so it carries no
-    // deck checkboxes; a collection needs at least one.
-    if matches!(target, DrillTarget::Collection(_)) && selected_decks.is_empty() {
-        return fail("Select at least one deck.");
+    // topic checkboxes; a collection needs at least one — unless the caller
+    // asked for all of them, which an empty `decks` already means downstream.
+    if matches!(target, DrillTarget::Collection(_)) && selected_decks.is_empty() && !all_topics {
+        return fail("Select at least one topic.");
     }
     // FEAT-03: never silently discard an unfinished session. The redirect
     // to /collection/{slug} lands on the running session; the user must
     // End it (or let BUG-08 eviction reap it) before starting a new one.
+    let key = SessionKey::new(owner, slug);
     {
         let mut sessions = state.sessions.lock();
-        if let Some(existing) = sessions.get(slug) {
+        if let Some(existing) = sessions.get(&key) {
             if existing.lock().mutable.finished_at.is_none() {
                 return Ok(());
             }
         }
         // Finished sessions are replaced.
-        if let Some(previous) = sessions.remove(slug) {
+        if let Some(previous) = sessions.remove(&key) {
             previous.lock().detach();
         }
     }
@@ -482,10 +467,7 @@ fn collection_start_inner(
         }
     };
     if let Some(s) = session {
-        state
-            .sessions
-            .lock()
-            .insert(slug.to_string(), Arc::new(Mutex::new(s)));
+        state.sessions.lock().insert(key, Arc::new(Mutex::new(s)));
     }
     Ok(())
 }
@@ -525,6 +507,9 @@ pub(super) fn create_session_from_sources(
     for (index, spec) in sources.into_iter().enumerate() {
         let rc = spec.collection;
         let collection = Collection::with_db_path(rc.coll_dir.clone(), rc.db_path.clone())?;
+        // Canonical, as every card's file path is: media is resolved by
+        // stripping this prefix off the file the card was parsed from.
+        let coll_dir = collection.directory.clone();
 
         // Sync new cards to DB
         let db_hashes: HashSet<CardHash> = collection.db.card_hashes()?;
@@ -570,10 +555,12 @@ pub(super) fn create_session_from_sources(
         session_dbs.push(SessionDb {
             db: collection.db,
             session_id,
-            // A single-collection session renders media against the
-            // session's own directory, exactly as before.
-            source: multi_source.then(|| SessionSource {
-                coll_dir: rc.coll_dir.clone(),
+            // Recorded for every session, not only a multi-collection one:
+            // a card's media is served from the collection that holds it,
+            // and a deck's slug names no collection, so a session addressed
+            // by one has no usable prefix of its own.
+            source: Some(SessionSource {
+                coll_dir,
                 file_url_prefix: format!("/collection/{}/file", rc.slug),
             }),
         });
@@ -643,8 +630,18 @@ pub(super) fn create_session_from_sources(
 /// How many of a custom deck's cards are due today, across every collection
 /// it draws on.
 fn due_card_count(sources: &[SessionSourceSpec]) -> Fallible<usize> {
+    Ok(deck_card_counts(sources)?.0)
+}
+
+/// `(due today, total)` over the topics a custom deck names.
+///
+/// A deck is a selection, not a collection, so its counts cannot be cached
+/// alongside the collection counts: they are recomputed from the member
+/// collections each time they are shown.
+pub(super) fn deck_card_counts(sources: &[SessionSourceSpec]) -> Fallible<(usize, usize)> {
     let today = Timestamp::now().date();
-    let mut total = 0;
+    let mut due_total = 0;
+    let mut card_total = 0;
     for spec in sources {
         let collection = Collection::with_db_path(
             spec.collection.coll_dir.clone(),
@@ -652,13 +649,18 @@ fn due_card_count(sources: &[SessionSourceSpec]) -> Fallible<usize> {
         )?;
         let due: HashSet<CardHash> = collection.db.due_today(today)?;
         let wanted: HashSet<&str> = spec.decks.iter().map(|d| d.as_str()).collect();
-        total += collection
+        for card in collection
             .cards
             .iter()
-            .filter(|c| wanted.contains(c.deck_name().as_str()) && due.contains(&c.hash()))
-            .count();
+            .filter(|c| wanted.contains(c.deck_name().as_str()))
+        {
+            card_total += 1;
+            if due.contains(&card.hash()) {
+                due_total += 1;
+            }
+        }
     }
-    Ok(total)
+    Ok((due_total, card_total))
 }
 
 /// The start page for a custom deck: what it contains, how much is due, and
@@ -697,7 +699,7 @@ fn render_custom_deck_page(
                 p.empty { "This deck has no members in collections you own." }
             } @else {
                 table.collection-table {
-                    thead { tr { th { "Collection" } th { "Decks" } } }
+                    thead { tr { th { "Collection" } th { "Topics" } } }
                     tbody {
                         @for source in sources {
                             tr {
@@ -761,12 +763,15 @@ fn collection_post_inner(
     form: FormData,
     owner: Option<&str>,
 ) -> Fallible<Redirect> {
-    // A grading/Home action on a slug that isn't the caller's own must not
-    // touch that slug's session, even if one happens to be active (sessions
-    // are keyed by slug alone, not by owner).
+    // A grading/Home action on a slug that isn't the caller's own is refused
+    // before the session map is touched at all. The map is keyed by owner as
+    // well as slug, so this cannot reach someone else's session either way;
+    // refusing here is what turns "not yours" into an error rather than a
+    // silent no-op against an empty key.
     if find_drill_target(state, slug, owner).is_none() {
         return fail(format!("Unknown collection: {slug}"));
     }
+    let key = SessionKey::new(owner, slug);
     let action = form.action;
     let submitted_undo: Option<i64> = form.undo_review;
     let submitted_card: Option<CardHash> = match form.card.as_deref() {
@@ -785,7 +790,7 @@ fn collection_post_inner(
     // Home action: close the session and drop it without needing to hold the
     // global lock during DB work.
     if matches!(action, Action::Home) {
-        let session = state.sessions.lock().remove(slug);
+        let session = state.sessions.lock().remove(&key);
         if let Some(s) = session {
             let mut s = s.lock();
             s.detach();
@@ -796,32 +801,13 @@ fn collection_post_inner(
             }
         }
 
-        // Snapshot inputs, then compute + update in background (don't block response).
-        let sources_snapshot = state.hedgedoc_sources.lock().clone();
-        let static_collections = state.config.collections.clone();
-        let collections_clone = state.collections.clone();
-        let counts_refreshed_at = state.counts_refreshed_at.clone();
-        tokio::spawn(async move {
-            match tokio::task::spawn_blocking(move || {
-                build_combined_infos(&static_collections, &sources_snapshot)
-            })
-            .await
-            {
-                Ok(combined) => {
-                    *collections_clone.write().await = combined;
-                    *counts_refreshed_at.lock() = Some(Timestamp::now());
-                }
-                Err(e) => log::error!("Collection count refresh failed: {e}"),
-            }
-        });
-
         return Ok(Redirect::to("/"));
     }
 
     // Lock the session in place: the map lock is released immediately, the
     // per-slug lock is held for the DB work, and an error leaves the session
     // in the map untouched.
-    let session: SharedSession = match state.sessions.lock().get(slug).cloned() {
+    let session: SharedSession = match state.sessions.lock().get(&key).cloned() {
         Some(s) => s,
         None => return Ok(Redirect::to(&format!("/collection/{slug}"))),
     };
@@ -854,28 +840,6 @@ fn collection_post_inner(
     // leaves the session running; the only result needing dispatch is
     // `Ignored`, which carries a one-shot message for the user.
     let result = handle_action(&mut session.mutable, action, submitted_card, submitted_undo)?;
-
-    // BUG-45: a finished session changes due counts; refresh them in the
-    // background so the landing page is up to date.
-    if matches!(result, ActionResult::SessionFinished) {
-        let sources_snapshot = state.hedgedoc_sources.lock().clone();
-        let static_collections = state.config.collections.clone();
-        let collections_clone = state.collections.clone();
-        let counts_refreshed_at = state.counts_refreshed_at.clone();
-        tokio::spawn(async move {
-            match tokio::task::spawn_blocking(move || {
-                build_combined_infos(&static_collections, &sources_snapshot)
-            })
-            .await
-            {
-                Ok(combined) => {
-                    *collections_clone.write().await = combined;
-                    *counts_refreshed_at.lock() = Some(Timestamp::now());
-                }
-                Err(e) => log::error!("Collection count refresh failed: {e}"),
-            }
-        });
-    }
 
     match result {
         ActionResult::Ignored(reason) => {
@@ -981,7 +945,8 @@ pub async fn collection_script_handler(
             script(&[]),
         );
     }
-    let session: Option<SharedSession> = state.sessions.lock().get(&slug).cloned();
+    let key = SessionKey::new(owner.as_deref(), &slug);
+    let session: Option<SharedSession> = state.sessions.lock().get(&key).cloned();
     let macros: Vec<(String, String)> = match session {
         Some(session) => session.lock().macros.clone(),
         // No active session; serve the script without macros.
@@ -994,336 +959,10 @@ pub async fn collection_script_handler(
     )
 }
 
-pub async fn sync_handler(State(state): State<AppState>) -> Redirect {
-    let git = match &state.config.git {
-        Some(git) => git,
-        None => {
-            return Flash::error("Sync is not available: no git repository is configured.")
-                .redirect("/");
-        }
-    };
-
-    match clone_or_pull(&git.repo_url, &git.branch, &git.repo_dir).await {
-        Ok(()) => {
-            let sources_snapshot = state.hedgedoc_sources.lock().clone();
-            let static_collections = state.config.collections.clone();
-            match tokio::task::spawn_blocking(move || {
-                build_combined_infos(&static_collections, &sources_snapshot)
-            })
-            .await
-            {
-                Ok(combined) => {
-                    *state.collections.write().await = combined;
-                    *state.counts_refreshed_at.lock() = Some(Timestamp::now());
-                }
-                Err(e) => log::error!("Manual sync failed to compute collection counts: {e}"),
-            }
-            *state.last_synced.lock() = Some(Timestamp::now());
-            log::debug!("Manual sync completed successfully");
-            Flash::success("Sync complete.").redirect("/")
-        }
-        Err(e) => {
-            log::error!("Manual sync failed: {e}");
-            Flash::error(format!("Sync failed: {e}")).redirect("/")
-        }
-    }
-}
-
-// ---- HedgeDoc management handlers ----
-
-/// Render the HedgeDoc source management page.
-pub async fn hedgedoc_manage_handler(
-    State(state): State<AppState>,
-    Query(query): Query<HashMap<String, String>>,
-    current_user: Option<CurrentUser>,
-) -> (StatusCode, Html<String>) {
-    use crate::cmd::serve::hedgedoc_ui::render_manage_page;
-    let flash = Flash::from_query(&query);
-    let owner = current_user.map(|u| u.email);
-    let all_sources = state.hedgedoc_sources.lock();
-    let sources: Vec<crate::cmd::serve::state::HedgedocSource> = all_sources
-        .iter()
-        .filter(|s| s.collection.owner == owner)
-        .cloned()
-        .collect();
-    let last_synced = *state.hedgedoc_last_synced.lock();
-    let config_available = state.config.data_dir.is_some();
-    let html = render_manage_page(&sources, last_synced, config_available, flash);
-    (StatusCode::OK, Html(html.into_string()))
-}
-
-#[derive(serde::Deserialize)]
-pub struct AddHedgedocForm {
-    pub url: String,
-}
-
-/// Add a new HedgeDoc source URL.
-pub async fn hedgedoc_add_handler(
-    State(state): State<AppState>,
-    current_user: Option<CurrentUser>,
-    Form(form): Form<AddHedgedocForm>,
-) -> Redirect {
-    let owner = current_user.map(|u| u.email);
-    // Normalize and validate the URL at storage time (BUG-24): strip
-    // query/fragment/trailing slash so equivalent URLs dedupe, and reject
-    // anything that is not a well-formed HTTPS URL so no raw string is
-    // ever persisted or rendered into an href.
-    if form.url.trim().is_empty() {
-        return Flash::error("Enter a HedgeDoc note or git file URL.").redirect("/sources");
-    }
-    let url = match normalize_hedgedoc_url(&form.url) {
-        Ok(url) => url,
-        Err(e) => return Flash::error(e.to_string()).redirect("/sources"),
-    };
-
-    let data_dir = match &state.config.data_dir {
-        Some(d) => d.clone(),
-        None => {
-            log::error!("Cannot add HedgeDoc source: no data_dir configured");
-            return Flash::error(
-                "Cannot add HedgeDoc source: no data directory is configured. Start hashcards-web with --config.",
-            )
-            .redirect("/sources");
-        }
-    };
-
-    // Check for duplicate URL, scoped to the caller: two users may each add
-    // the same public note, and they get separate collections.
-    {
-        let sources = state.hedgedoc_sources.lock();
-        if sources
-            .iter()
-            .any(|s| s.note.url == url && s.collection.owner == owner)
-        {
-            return Flash::error("This note is already added.").redirect("/sources");
-        }
-    }
-
-    if source_uri_from_url(&url).is_none() {
-        log::error!("Failed to parse HedgeDoc source URI from {url}");
-        return Flash::error(format!("Could not parse a HedgeDoc note URL from: {url}"))
-            .redirect("/sources");
-    }
-
-    // BUG-43: refuse to create a source whose slug collides with a configured
-    // collection; find_collection would route it to the wrong database.
-    let new_slug = slug_for_note(&url, owner.as_deref());
-    if let Some(existing) = find_slug_collision(&new_slug, &state.config.collections) {
-        return Flash::error(format!(
-            "Cannot add this HedgeDoc source: its collection slug '{new_slug}' collides with the configured collection '{}'. Rename that collection or use a different source.",
-            existing.name
-        ))
-        .redirect("/sources");
-    }
-
-    let new_source = match build_source(&url, &data_dir, owner.clone()).await {
-        Ok(source) => source,
-        Err(e) => {
-            log::error!("Failed to add HedgeDoc source {url}: {e}");
-            return Flash::error(format!("Failed to add HedgeDoc source: {e}"))
-                .redirect("/sources");
-        }
-    };
-
-    // A config file is mandatory, so the server cannot reach this point
-    // without one. Adding a note has nowhere to be persisted otherwise.
-    let config_path = match state.config_path.lock().clone() {
-        Some(p) => p,
-        None => {
-            log::error!("Cannot persist a HedgeDoc source: the server has no config file path");
-            return Flash::error(
-                "Cannot save this HedgeDoc source: the server was started without a \
-                 configuration file to write it back to.",
-            )
-            .redirect("/sources");
-        }
-    };
-
-    // BUG-39: duplicate check + mutation + persist under ONE lock, persisting
-    // from the post-mutation state. spawn_blocking because commit_add writes
-    // the config file while holding the lock.
-    let sources_arc = state.hedgedoc_sources.clone();
-    let config_path_owned = config_path.clone();
-    let url_owned = url.clone();
-    let owner_owned = owner.clone();
-    let snapshot = match tokio::task::spawn_blocking(move || {
-        commit_add(
-            &sources_arc,
-            Some(config_path_owned.as_path()),
-            &url_owned,
-            owner_owned.as_deref(),
-            new_source,
-        )
-    })
-    .await
-    .map_err(|e| ErrorReport::new(format!("HedgeDoc add task panicked: {e}")))
-    .and_then(|r| r)
-    {
-        Ok(snapshot) => snapshot,
-        Err(e) => {
-            log::error!("Failed to add HedgeDoc source {url}: {e}");
-            return Flash::error(e.to_string()).redirect("/sources");
-        }
-    };
-
-    // Refresh combined collection infos from the committed snapshot.
-    let static_collections = state.config.collections.clone();
-    let snapshot_for_counts = snapshot.clone();
-    match tokio::task::spawn_blocking(move || {
-        build_combined_infos(&static_collections, &snapshot_for_counts)
-    })
-    .await
-    {
-        Ok(combined) => *state.collections.write().await = combined,
-        Err(e) => log::error!("Failed to compute collection counts: {e}"),
-    }
-
-    // Update last synced time if the newly added note fetched without error.
-    if snapshot
-        .iter()
-        .any(|s| s.note.url == url && s.collection.owner == owner && s.note.last_error.is_none())
-    {
-        *state.hedgedoc_last_synced.lock() = Some(Timestamp::now());
-    }
-
-    Flash::success("Source added.").redirect("/sources")
-}
-
-#[derive(serde::Deserialize)]
-pub struct DeleteHedgedocForm {
-    pub url: String,
-}
-
-/// Remove a HedgeDoc source by URL.
-pub async fn hedgedoc_delete_handler(
-    State(state): State<AppState>,
-    current_user: Option<CurrentUser>,
-    Form(form): Form<DeleteHedgedocForm>,
-) -> Redirect {
-    let owner = current_user.map(|u| u.email);
-    let owns_url = state
-        .hedgedoc_sources
-        .lock()
-        .iter()
-        .any(|s| s.note.url == form.url && s.collection.owner == owner);
-    if !owns_url {
-        return Flash::error("No HedgeDoc source with this URL: ".to_string() + &form.url)
-            .redirect("/sources");
-    }
-    let maybe_config_path: Option<PathBuf> = state.config_path.lock().clone();
-    let sources_arc = state.hedgedoc_sources.clone();
-    let url = form.url.clone();
-    let owner_owned = owner.clone();
-    // BUG-39: mutation + persist under one lock (see commit_delete).
-    // BUG-42: on-disk cleanup runs in the same blocking task.
-    let (snapshot, message) = match tokio::task::spawn_blocking(move || {
-        let outcome = commit_delete(
-            &sources_arc,
-            maybe_config_path.as_deref(),
-            &url,
-            owner_owned.as_deref(),
-        )?;
-        let message = cleanup_after_delete(&outcome);
-        Ok::<_, ErrorReport>((outcome.snapshot, message))
-    })
-    .await
-    .map_err(|e| ErrorReport::new(format!("HedgeDoc delete task panicked: {e}")))
-    .and_then(|r| r)
-    {
-        Ok(pair) => pair,
-        Err(e) => {
-            log::error!("Failed to delete HedgeDoc source {}: {e}", form.url);
-            return Flash::error(e.to_string()).redirect("/sources");
-        }
-    };
-
-    let static_collections = state.config.collections.clone();
-    let snapshot_for_counts = snapshot.clone();
-    match tokio::task::spawn_blocking(move || {
-        build_combined_infos(&static_collections, &snapshot_for_counts)
-    })
-    .await
-    {
-        Ok(combined) => *state.collections.write().await = combined,
-        Err(e) => log::error!("Failed to compute collection counts: {e}"),
-    }
-
-    Flash::success(message).redirect("/sources")
-}
-
-/// Manually re-sync all HedgeDoc sources.
-pub async fn hedgedoc_sync_now_handler(
-    State(state): State<AppState>,
-    current_user: Option<CurrentUser>,
-) -> Redirect {
-    let owner = current_user.map(|u| u.email);
-    if state.config.data_dir.is_none() {
-        return Flash::error("HedgeDoc sync is not available: no data directory is configured.")
-            .redirect("/sources");
-    }
-
-    // Collect URLs to sync (release lock before awaiting). Only the caller's
-    // own notes: a manual sync must not do IO on other users' notes, nor
-    // name their note URLs in this user's error banner.
-    let entries: Vec<(String, ResolvedCollection)> = {
-        let sources = state.hedgedoc_sources.lock();
-        sources
-            .iter()
-            .filter(|s| s.collection.owner == owner)
-            .map(|s| (s.note.url.clone(), s.collection.clone()))
-            .collect()
-    };
-
-    let mut any_success = false;
-
-    for (url, rc) in &entries {
-        match sync_source(url, rc).await {
-            Ok((deck_name, file_name)) => {
-                any_success = true;
-                let mut sources = state.hedgedoc_sources.lock();
-                if let Some(src) = sources.iter_mut().find(|s| s.collection.slug == rc.slug) {
-                    apply_sync_result(src, deck_name, file_name);
-                }
-            }
-            Err(e) => {
-                let msg = e.to_string();
-                log::error!("Manual HedgeDoc sync failed for {url}: {msg}");
-                let mut sources = state.hedgedoc_sources.lock();
-                if let Some(src) = sources.iter_mut().find(|s| s.collection.slug == rc.slug) {
-                    src.note.last_error = Some(msg);
-                }
-            }
-        }
-    }
-
-    let sources_snapshot = state.hedgedoc_sources.lock().clone();
-    let static_collections = state.config.collections.clone();
-    match tokio::task::spawn_blocking(move || {
-        build_combined_infos(&static_collections, &sources_snapshot)
-    })
-    .await
-    {
-        Ok(combined) => *state.collections.write().await = combined,
-        Err(e) => log::error!("Failed to compute collection counts: {e}"),
-    }
-    if any_success {
-        *state.hedgedoc_last_synced.lock() = Some(Timestamp::now());
-    }
-
-    if any_success || entries.is_empty() {
-        Flash::success("Source sync finished.").redirect("/sources")
-    } else {
-        Flash::error("HedgeDoc sync failed for all notes; see the statuses below.")
-            .redirect("/sources")
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
     use std::time::Instant;
-
-    use std::collections::HashMap;
 
     use super::SessionSourceSpec;
     use super::collection_get_inner;
@@ -1334,9 +973,9 @@ mod tests {
     use crate::cmd::drill::state::MutableState;
     use crate::cmd::drill::state::SessionDbs;
     use crate::cmd::serve::config::ResolvedCollection;
-    use crate::cmd::serve::config::ResolvedServeConfig;
     use crate::cmd::serve::state::AppState;
     use crate::cmd::serve::state::DrillSession;
+    use crate::cmd::serve::state::SessionKey;
     use crate::db::Database;
     use crate::error::ErrorReport;
     use crate::error::Fallible;
@@ -1371,86 +1010,57 @@ mod tests {
     /// callers only match unowned collections.
     #[test]
     fn test_find_collection_is_scoped_to_owner() -> Fallible<()> {
-        use crate::cmd::serve::config::DefaultsSection;
-        use crate::cmd::serve::config::ResolvedCollection;
-        use crate::cmd::serve::handlers::find_collection;
+        let dir = tempfile::tempdir()?;
+        let data_dir = dir.path().to_path_buf();
+        card_collection(
+            &data_dir,
+            Some("alice@example.com"),
+            "alice-deck",
+            "Q: One\nA: 1\n",
+        )?;
+        card_collection(
+            &data_dir,
+            Some("bob@example.com"),
+            "bob-deck",
+            "Q: Two\nA: 2\n",
+        )?;
+        let state = crate::cmd::serve::state::test_support::state_with_data_dir(data_dir);
 
-        let alice_dir = tempfile::tempdir()?;
-        let bob_dir = tempfile::tempdir()?;
-        let collections = vec![
-            ResolvedCollection {
-                name: "Alice's Deck".to_string(),
-                slug: "alice-deck".to_string(),
-                coll_dir: alice_dir.path().to_path_buf(),
-                db_path: alice_dir.path().join("hashcards.db"),
-                owner: Some("alice@example.com".to_string()),
-            },
-            ResolvedCollection {
-                name: "Bob's Deck".to_string(),
-                slug: "bob-deck".to_string(),
-                coll_dir: bob_dir.path().to_path_buf(),
-                db_path: bob_dir.path().join("hashcards.db"),
-                owner: Some("bob@example.com".to_string()),
-            },
-        ];
-        let config = ResolvedServeConfig {
-            host: "127.0.0.1".to_string(),
-            port: 0,
-            git: None,
-            defaults: DefaultsSection::default(),
-            collections,
-            data_dir: None,
-            config_path: None,
-            hedgedoc_entries: Vec::new(),
-            custom_decks: Vec::new(),
-            session_timeout_minutes: 1440,
-            oidc: None,
-        };
-        let state = AppState {
-            config: std::sync::Arc::new(config),
-            collections: std::sync::Arc::new(tokio::sync::RwLock::new(Vec::new())),
-            sessions: std::sync::Arc::new(parking_lot::Mutex::new(HashMap::new())),
-            last_synced: std::sync::Arc::new(parking_lot::Mutex::new(None)),
-            hedgedoc_sources: std::sync::Arc::new(parking_lot::Mutex::new(Vec::new())),
-            custom_decks: std::sync::Arc::new(parking_lot::Mutex::new(Vec::new())),
-            hedgedoc_last_synced: std::sync::Arc::new(parking_lot::Mutex::new(None)),
-            config_path: std::sync::Arc::new(parking_lot::Mutex::new(None)),
-            counts_refreshed_at: std::sync::Arc::new(parking_lot::Mutex::new(None)),
-            interrupted_closed: std::sync::Arc::new(parking_lot::Mutex::new(HashMap::new())),
-            session_key: axum_extra::extract::cookie::Key::generate(),
-            oidc: None,
-        };
-
-        assert!(find_collection(&state, "bob-deck", Some("alice@example.com")).is_none());
-        assert!(find_collection(&state, "alice-deck", Some("alice@example.com")).is_some());
-        assert!(find_collection(&state, "alice-deck", None).is_none());
+        assert!(super::find_collection(&state, "bob-deck", Some("alice@example.com")).is_none());
+        assert!(super::find_collection(&state, "alice-deck", Some("alice@example.com")).is_some());
+        assert!(super::find_collection(&state, "alice-deck", None).is_none());
         Ok(())
     }
 
-    fn test_state(coll_dir: &std::path::Path) -> Fallible<AppState> {
-        let config = ResolvedServeConfig::from_directories(
-            vec![coll_dir.display().to_string()],
-            "127.0.0.1".to_string(),
-            0,
-        )?;
-        test_state_with_config(config)
+    /// Create a collection folder named `name` in `owner`'s card tree under
+    /// `data_dir`, holding one card, stamped with a stable id.
+    fn card_collection(
+        data_dir: &std::path::Path,
+        owner: Option<&str>,
+        name: &str,
+        card: &str,
+    ) -> Fallible<()> {
+        use crate::cmd::serve::cards::CardRoot;
+        use crate::cmd::serve::cards::collection_id;
+
+        let root = CardRoot::for_user(data_dir, owner)?;
+        let folder = root.path().join(name);
+        std::fs::create_dir_all(&folder)?;
+        std::fs::write(folder.join("Deck.md"), card)?;
+        std::fs::create_dir_all(data_dir.join("db"))?;
+        collection_id(&folder)?;
+        Ok(())
     }
 
-    fn test_state_with_config(config: ResolvedServeConfig) -> Fallible<AppState> {
-        Ok(AppState {
-            config: std::sync::Arc::new(config),
-            collections: std::sync::Arc::new(tokio::sync::RwLock::new(Vec::new())),
-            sessions: std::sync::Arc::new(parking_lot::Mutex::new(HashMap::new())),
-            last_synced: std::sync::Arc::new(parking_lot::Mutex::new(None)),
-            hedgedoc_sources: std::sync::Arc::new(parking_lot::Mutex::new(Vec::new())),
-            custom_decks: std::sync::Arc::new(parking_lot::Mutex::new(Vec::new())),
-            hedgedoc_last_synced: std::sync::Arc::new(parking_lot::Mutex::new(None)),
-            config_path: std::sync::Arc::new(parking_lot::Mutex::new(None)),
-            counts_refreshed_at: std::sync::Arc::new(parking_lot::Mutex::new(None)),
-            interrupted_closed: std::sync::Arc::new(parking_lot::Mutex::new(HashMap::new())),
-            session_key: axum_extra::extract::cookie::Key::generate(),
-            oidc: None,
-        })
+    /// A state whose card tree holds one collection named `Deck`, and that
+    /// collection as discovery reports it.
+    fn test_state(data_dir: &std::path::Path) -> Fallible<(AppState, ResolvedCollection)> {
+        card_collection(data_dir, None, "Deck", "Q: One\nA: 1\n")?;
+        let state =
+            crate::cmd::serve::state::test_support::state_with_data_dir(data_dir.to_path_buf());
+        let rc = super::find_collection(&state, "Deck", None)
+            .ok_or_else(|| ErrorReport::new("the collection was not discovered"))?;
+        Ok((state, rc))
     }
 
     /// Regression: a session removed from the map between the GET handler's
@@ -1462,12 +1072,11 @@ mod tests {
     #[test]
     fn test_detached_session_renders_browse_page_not_stale_session() -> Fallible<()> {
         let dir = tempfile::tempdir()?;
-        let coll_dir = dir.path().canonicalize()?;
-        std::fs::write(coll_dir.join("Deck.md"), "Q: One\nA: 1\n")?;
+        let data_dir = dir.path().canonicalize()?;
 
-        let state = test_state(&coll_dir)?;
-        let slug = state.config.collections[0].slug.clone();
-        let db_path = state.config.collections[0].db_path.clone();
+        let (state, rc) = test_state(&data_dir)?;
+        let slug = rc.slug.clone();
+        let db_path = rc.db_path.clone();
         let db_str = db_path
             .to_str()
             .ok_or_else(|| ErrorReport::new("non-utf8 db path"))?;
@@ -1483,19 +1092,79 @@ mod tests {
             TinyRng::from_seed(1),
         );
         let session = std::sync::Arc::new(parking_lot::Mutex::new(DrillSession::new(
-            coll_dir.clone(),
+            rc.coll_dir.clone(),
             Vec::new(),
             started_at,
             AnswerControls::Full,
             mutable,
         )));
         session.lock().detach();
-        state.sessions.lock().insert(slug.clone(), session);
+        state
+            .sessions
+            .lock()
+            .insert(SessionKey::new(None, &slug), session);
 
         let html = collection_get_inner(&state, &slug, None, None)?;
         assert!(
             html.contains(r#"class="browse""#),
             "detached session must fall back to the deck browser page, got: {html}"
+        );
+        Ok(())
+    }
+
+    /// Cross-user isolation: a collection is a folder in its owner's card
+    /// tree, so two users can each own one named "Deck" and both slugify to
+    /// `Deck`. Keyed by slug alone, the sessions map handed whoever asked
+    /// second the other's live session — their card to read, and their
+    /// database to grade into.
+    #[test]
+    fn a_session_is_not_shared_by_two_owners_of_the_same_slug() -> Fallible<()> {
+        let dir = tempfile::tempdir()?;
+        let data_dir = dir.path().to_path_buf();
+        card_collection(
+            &data_dir,
+            Some("alice@example.com"),
+            "Deck",
+            "Q: alice question?\nA: alice answer\n",
+        )?;
+        card_collection(
+            &data_dir,
+            Some("bob@example.com"),
+            "Deck",
+            "Q: bob question?\nA: bob answer\n",
+        )?;
+        let state = crate::cmd::serve::state::test_support::state_with_data_dir(data_dir);
+
+        let alice = super::find_collection(&state, "Deck", Some("alice@example.com"))
+            .ok_or_else(|| ErrorReport::new("alice's collection was not discovered"))?;
+        let session = create_session_from_sources(
+            &state,
+            vec![SessionSourceSpec {
+                collection: alice,
+                decks: Vec::new(),
+            }],
+            None,
+        )?
+        .ok_or_else(|| ErrorReport::new("expected alice's new card to be due"))?;
+        state.sessions.lock().insert(
+            SessionKey::new(Some("alice@example.com"), "Deck"),
+            std::sync::Arc::new(parking_lot::Mutex::new(session)),
+        );
+
+        let bob = collection_get_inner(&state, "Deck", None, Some("bob@example.com"))?;
+        assert!(
+            !bob.contains("alice question"),
+            "bob was served alice's card: {bob}"
+        );
+        assert!(
+            bob.contains(r#"class="browse""#),
+            "bob must get his own topic browser, got: {bob}"
+        );
+
+        let alice = collection_get_inner(&state, "Deck", None, Some("alice@example.com"))?;
+        assert!(
+            alice.contains("alice question"),
+            "alice must still reach her own session, got: {alice}"
         );
         Ok(())
     }
@@ -1537,45 +1206,36 @@ mod tests {
         use crate::cmd::serve::decks::ResolvedCustomDeck;
         use crate::cmd::serve::decks::slug_for_deck;
 
-        let alpha_dir = tempfile::tempdir()?;
-        std::fs::write(
-            alpha_dir.path().join("Alpha.md"),
+        // Two collections in one card tree: the deck draws on both, and
+        // `deck_sources` finds them by slug through discovery.
+        let dir = tempfile::tempdir()?;
+        let data_dir = dir.path().to_path_buf();
+        card_collection(
+            &data_dir,
+            None,
+            "alpha",
             "Q: alpha question?\nA: alpha answer\n",
         )?;
-        let beta_dir = tempfile::tempdir()?;
-        std::fs::write(
-            beta_dir.path().join("Beta.md"),
+        card_collection(
+            &data_dir,
+            None,
+            "beta",
             "Q: beta question?\nA: beta answer\n",
         )?;
-
-        let alpha = ResolvedCollection {
-            name: "Alpha".to_string(),
-            slug: "alpha".to_string(),
-            coll_dir: alpha_dir.path().to_path_buf(),
-            db_path: alpha_dir.path().join("alpha.db"),
-            owner: None,
-        };
-        let beta = ResolvedCollection {
-            name: "Beta".to_string(),
-            slug: "beta".to_string(),
-            coll_dir: beta_dir.path().to_path_buf(),
-            db_path: beta_dir.path().join("beta.db"),
-            owner: None,
-        };
-
-        let mut config =
-            ResolvedServeConfig::from_directories(Vec::new(), "127.0.0.1".to_string(), 0)?;
-        config.collections = vec![alpha.clone(), beta.clone()];
-        let state = test_state_with_config(config)?;
+        let state = crate::cmd::serve::state::test_support::state_with_data_dir(data_dir.clone());
+        let alpha = super::find_collection(&state, "alpha", None)
+            .ok_or_else(|| ErrorReport::new("alpha was not discovered"))?;
+        let beta = super::find_collection(&state, "beta", None)
+            .ok_or_else(|| ErrorReport::new("beta was not discovered"))?;
 
         let deck = ResolvedCustomDeck {
             name: "Mixed".to_string(),
             slug: slug_for_deck("Mixed", None),
             owner: None,
             members: vec![
-                crate::cmd::serve::config::DeckMember::parse("alpha/Alpha")
+                crate::cmd::serve::config::DeckMember::parse("alpha/Deck")
                     .ok_or_else(|| ErrorReport::new("member"))?,
-                crate::cmd::serve::config::DeckMember::parse("beta/Beta")
+                crate::cmd::serve::config::DeckMember::parse("beta/Deck")
                     .ok_or_else(|| ErrorReport::new("member"))?,
             ],
         };
@@ -1645,6 +1305,47 @@ mod tests {
         Ok(())
     }
 
+    /// A deck's slug names no collection, so `/collection/{deck}/file/...`
+    /// resolves to nothing and every image in the session 404s. The card's
+    /// home collection is recorded on the session for exactly that reason —
+    /// it used to be recorded only when a deck had more than one member, so
+    /// a one-member deck inherited the deck's own unusable prefix.
+    #[test]
+    fn a_deck_session_serves_media_from_the_home_collection() -> Fallible<()> {
+        let dir = tempfile::tempdir()?;
+        let data_dir = dir.path().to_path_buf();
+        card_collection(
+            &data_dir,
+            None,
+            "alpha",
+            "Q: alpha question?\nA: alpha answer\n",
+        )?;
+        let state = crate::cmd::serve::state::test_support::state_with_data_dir(data_dir);
+        let alpha = super::find_collection(&state, "alpha", None)
+            .ok_or_else(|| ErrorReport::new("alpha was not discovered"))?;
+
+        let session = create_session_from_sources(
+            &state,
+            vec![SessionSourceSpec {
+                collection: alpha,
+                decks: Vec::new(),
+            }],
+            None,
+        )?
+        .ok_or_else(|| ErrorReport::new("expected the new card to be due"))?;
+
+        let hash = session.mutable.cards[0].hash();
+        let source = session
+            .mutable
+            .dbs
+            .for_card(hash)
+            .source
+            .as_ref()
+            .ok_or_else(|| ErrorReport::new("the session recorded no source collection"))?;
+        assert_eq!(source.file_url_prefix, "/collection/alpha/file");
+        Ok(())
+    }
+
     /// Cards are content addressed, so the same fact in two collections has
     /// one hash. A deck spanning both must still start: the session cache
     /// rejects a duplicate hash outright, so the second copy is skipped
@@ -1672,10 +1373,10 @@ mod tests {
             db_path: two_dir.path().join("two.db"),
             owner: None,
         };
-        let mut config =
-            ResolvedServeConfig::from_directories(Vec::new(), "127.0.0.1".to_string(), 0)?;
-        config.collections = vec![one.clone(), two.clone()];
-        let state = test_state_with_config(config)?;
+        let data_dir = tempfile::tempdir()?;
+        let state = crate::cmd::serve::state::test_support::state_with_data_dir(
+            data_dir.path().to_path_buf(),
+        );
 
         let sources = vec![
             SessionSourceSpec {
@@ -1704,22 +1405,22 @@ mod tests {
     /// data directory.
     #[test]
     fn find_collection_does_not_write_into_the_local_tree() -> Fallible<()> {
+        use crate::cmd::serve::cards::collection_id;
         use crate::cmd::serve::handlers::find_collection;
-        use crate::cmd::serve::local::collection_id;
         use crate::cmd::serve::state::test_support::state_with_data_dir;
 
         let dir = tempfile::tempdir()?;
         let data_dir = dir.path().to_path_buf();
-        let state = state_with_data_dir(data_dir.clone(), Vec::new());
+        let state = state_with_data_dir(data_dir.clone());
 
         assert!(find_collection(&state, "Spanish", None).is_none());
         assert!(
-            !data_dir.join("local").exists(),
+            !data_dir.join("cards").exists(),
             "a lookup created the local tree"
         );
 
         // A folder that already has an id is still found.
-        let folder = data_dir.join("local").join("default").join("Spanish");
+        let folder = data_dir.join("cards").join("default").join("Spanish");
         std::fs::create_dir_all(&folder)?;
         collection_id(&folder)?;
         assert!(find_collection(&state, "Spanish", None).is_some());

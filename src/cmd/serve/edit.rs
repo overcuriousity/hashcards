@@ -1,11 +1,14 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::collections::HashMap;
+use std::collections::HashSet;
 use std::path::Path;
 use std::path::PathBuf;
 use std::time::UNIX_EPOCH;
 
 use axum::Form;
 use axum::extract::Path as AxumPath;
+use axum::extract::Query;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::Html;
@@ -14,12 +17,17 @@ use maud::Markup;
 use maud::html;
 use serde::Deserialize;
 
+use crate::cmd::drill::state::CardMigration;
+use crate::cmd::drill::state::MigrationEffect;
 use crate::cmd::drill::template::page_template;
 use crate::cmd::run_blocking;
 use crate::cmd::serve::auth::CurrentUser;
-use crate::cmd::serve::git::commit_edit;
-use crate::cmd::serve::handlers::find_collection;
+use crate::cmd::serve::config::ResolvedCollection;
+use crate::cmd::serve::handlers::DrillTarget;
+use crate::cmd::serve::handlers::deck_sources;
+use crate::cmd::serve::handlers::find_drill_target;
 use crate::cmd::serve::state::AppState;
+use crate::cmd::serve::state::migrate_sessions;
 use crate::db::Database;
 use crate::error::ErrorReport;
 use crate::error::Fallible;
@@ -33,18 +41,61 @@ use crate::types::card::CardContent;
 use crate::types::card_hash::CardHash;
 use crate::types::timestamp::Timestamp;
 
+/// Where a card edit returns to when it is saved.
+///
+/// Two values, not a caller-supplied path: a redirect target taken from a
+/// query string or a form field is an open redirect, and these cover every
+/// entry point the editor has. `/collection/{slug}` renders the drill when
+/// a session is live and the topic browser when it is not, so the pencil in
+/// a session and the edit link on the topic tree can share one value.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ReturnTo {
+    Bookmarks,
+    Collection,
+}
+
+impl ReturnTo {
+    /// Anything unrecognized is the bookmarks page. A bad value in a URL is
+    /// not worth an error page: the user still gets somewhere sensible.
+    pub fn parse(raw: Option<&str>) -> Self {
+        match raw {
+            Some("collection") => ReturnTo::Collection,
+            _ => ReturnTo::Bookmarks,
+        }
+    }
+
+    pub fn target(self, slug: &str) -> String {
+        match self {
+            ReturnTo::Collection => format!("/collection/{slug}"),
+            ReturnTo::Bookmarks => format!("/collection/{slug}/bookmarks"),
+        }
+    }
+
+    /// The spelling that round-trips through the form's hidden field.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ReturnTo::Collection => "collection",
+            ReturnTo::Bookmarks => "bookmarks",
+        }
+    }
+}
+
 // ── GET handler ───────────────────────────────────────────────────────────────
 
 pub async fn edit_get_handler(
     State(state): State<AppState>,
     AxumPath((slug, hash_hex)): AxumPath<(String, String)>,
+    Query(query): Query<HashMap<String, String>>,
     current_user: Option<CurrentUser>,
 ) -> (StatusCode, Html<String>) {
     let owner = current_user.map(|u| u.email);
+    let return_to = ReturnTo::parse(query.get("return_to").map(String::as_str));
     let state2 = state.clone();
     let slug2 = slug.clone();
     let hash2 = hash_hex.clone();
-    match run_blocking(move || edit_get_inner(&state2, &slug2, &hash2, owner.as_deref())).await {
+    match run_blocking(move || edit_get_inner(&state2, &slug2, &hash2, owner.as_deref(), return_to))
+        .await
+    {
         Ok(html) => (StatusCode::OK, Html(html)),
         Err(e) => error_page(&slug, &hash_hex, &e.to_string()),
     }
@@ -55,63 +106,124 @@ fn edit_get_inner(
     slug: &str,
     hash_hex: &str,
     owner: Option<&str>,
+    return_to: ReturnTo,
 ) -> Fallible<String> {
-    let rc = find_collection(state, slug, owner)
-        .ok_or_else(|| ErrorReport::new(format!("Unknown collection: {slug}")))?;
-
     let hash = CardHash::from_hex(hash_hex)?;
-    let coll_dir = rc.coll_dir.canonicalize()?;
-    let cards = parse_deck(&coll_dir)?.cards;
-    let card = find_card_by_hash(&cards, hash)?;
+    let site = card_site(state, slug, hash, owner)?;
+    let card = find_card_by_hash(&site.cards, hash)?;
 
     let file_path = card.file_path().clone();
     let file_content = std::fs::read_to_string(&file_path)?;
     let mtime_ms = file_mtime_ms(&file_path)?;
     let block = extract_card_block(&file_content, card.range())?;
     let rel_path = file_path
-        .strip_prefix(&coll_dir)
+        .strip_prefix(&site.coll_dir)
         .unwrap_or(&file_path)
         .display()
         .to_string();
 
-    let active_session = state.sessions.lock().contains_key(slug);
     let html = render_edit_form(
-        &rc.name,
+        &site.target_name,
         slug,
         hash_hex,
         &rel_path,
         &block,
         mtime_ms,
-        active_session,
+        return_to,
     );
     Ok(html.into_string())
 }
 
+/// Where a card being edited actually lives, reached through the slug the
+/// caller came from.
+struct CardSite {
+    /// The collection holding the card's file and its review database.
+    rc: ResolvedCollection,
+    /// `rc.coll_dir`, canonicalized: card file paths are canonical, so the
+    /// relative path shown in the form is taken against this.
+    coll_dir: PathBuf,
+    /// Every card in that collection, parsed once for both the lookup and
+    /// the sibling scan the save needs.
+    cards: Vec<Card>,
+    /// What the back link is labelled with — the deck's name when the
+    /// caller came from a deck, since that is where the link returns to.
+    target_name: String,
+}
+
+/// Resolve `slug` to the collection holding `hash`.
+///
+/// The slug is whatever the card was reached under, which is not always a
+/// collection: the pencil in a drill links to the slug the *session* is
+/// filed under, and for a custom deck that is the deck's own slug, naming
+/// no collection at all. A deck's members are searched for the card, which
+/// is also the only way a multi-collection deck could name the right one —
+/// the card's home need not be the collection the deck is listed under.
+fn card_site(
+    state: &AppState,
+    slug: &str,
+    hash: CardHash,
+    owner: Option<&str>,
+) -> Fallible<CardSite> {
+    let target = find_drill_target(state, slug, owner)
+        .ok_or_else(|| ErrorReport::new(format!("Unknown collection: {slug}")))?;
+    match target {
+        DrillTarget::Collection(rc) => {
+            let coll_dir = rc.coll_dir.canonicalize()?;
+            let cards = parse_deck(&coll_dir)?.cards;
+            let target_name = rc.name.clone();
+            Ok(CardSite {
+                rc,
+                coll_dir,
+                cards,
+                target_name,
+            })
+        }
+        DrillTarget::Deck(deck) => {
+            for source in deck_sources(state, &deck, owner) {
+                let rc = source.collection;
+                let coll_dir = rc.coll_dir.canonicalize()?;
+                let cards = parse_deck(&coll_dir)?.cards;
+                if cards.iter().any(|c| c.hash() == hash) {
+                    return Ok(CardSite {
+                        rc,
+                        coll_dir,
+                        cards,
+                        target_name: deck.name.clone(),
+                    });
+                }
+            }
+            fail(format!(
+                "That card is not in any collection the deck '{}' draws on.",
+                deck.name
+            ))
+        }
+    }
+}
+
 fn render_edit_form(
-    collection_name: &str,
+    return_label: &str,
     slug: &str,
     hash_hex: &str,
     rel_path: &str,
     block: &str,
     mtime_ms: u64,
-    active_session: bool,
+    return_to: ReturnTo,
 ) -> Markup {
     page_template(html! {
         div.edit-page {
             div.browse-header {
-                a.back-link href=(format!("/collection/{slug}/bookmarks")) {
-                    "\u{2190} " (collection_name) " Bookmarks"
+                a.back-link href=(return_to.target(slug)) {
+                    @match return_to {
+                        ReturnTo::Collection => { "\u{2190} " (return_label) }
+                        ReturnTo::Bookmarks => { "\u{2190} " (return_label) " Bookmarks" }
+                    }
                 }
                 h1 { "Edit Card" }
             }
             p.edit-path { code { (rel_path) } }
-            @if active_session {
-                div.edit-warning {
-                    "\u{26a0} A drill session is active. End it before saving to avoid stale state."
-                }
-            }
             form action=(format!("/collection/{slug}/edit/{hash_hex}")) method="post" {
                 input type="hidden" name="mtime_ms" value=(mtime_ms);
+                input type="hidden" name="return_to" value=(return_to.as_str());
                 textarea
                     name="new_text"
                     class="edit-textarea"
@@ -125,9 +237,7 @@ fn render_edit_form(
                 div.edit-controls {
                     button type="submit" class="btn btn-primary" { "Save" }
                     " "
-                    a.btn.btn-secondary
-                        href=(format!("/collection/{slug}/bookmarks"))
-                    { "Cancel" }
+                    a.btn.btn-secondary href=(return_to.target(slug)) { "Cancel" }
                 }
             }
         }
@@ -140,6 +250,8 @@ fn render_edit_form(
 pub struct EditForm {
     pub new_text: String,
     pub mtime_ms: String,
+    #[serde(default)]
+    pub return_to: Option<String>,
 }
 
 /// What a successful edit did, for user-facing reporting.
@@ -148,8 +260,8 @@ pub struct EditOutcome {
     pub migrated: usize,
     /// New cards that could not be matched to prior history and start fresh.
     pub skipped: usize,
-    /// Whether the edit was committed to a containing git repository.
-    pub committed: bool,
+    /// What the edit did to any live drill session on this collection.
+    pub session: MigrationEffect,
 }
 
 pub async fn edit_post_handler(
@@ -161,18 +273,26 @@ pub async fn edit_post_handler(
     let state2 = state.clone();
     let slug2 = slug.clone();
     let hash2 = hash_hex.clone();
-    match run_blocking(move || edit_post_inner(&state2, &slug2, &hash2, form, current_user)).await {
+    let owner = current_user.map(|u| u.email);
+    let return_to = ReturnTo::parse(form.return_to.as_deref());
+    match run_blocking(move || edit_post_inner(&state2, &slug2, &hash2, form, owner.as_deref()))
+        .await
+    {
         Ok(outcome) => {
             log::debug!(
-                "Edit saved: {} card(s) migrated, {} skipped, committed={}",
+                "Edit saved: {} card(s) migrated, {} skipped, {} session card(s) renamed, {} dropped",
                 outcome.migrated,
                 outcome.skipped,
-                outcome.committed
+                outcome.session.renamed,
+                outcome.session.dropped
             );
-            let target = format!("/collection/{slug}/bookmarks");
+            let target = return_to.target(&slug);
             let mut msg = String::from("Card saved.");
-            if outcome.committed {
-                msg.push_str(" Committed to git.");
+            if outcome.session.renamed > 0 || outcome.session.dropped > 0 {
+                msg.push_str(" Your running session was updated.");
+            }
+            if outcome.session.session_finished {
+                msg.push_str(" It has no cards left, so it is finished.");
             }
             let flash = if outcome.skipped > 0 {
                 Flash::error(format!(
@@ -193,19 +313,15 @@ fn edit_post_inner(
     slug: &str,
     hash_hex: &str,
     form: EditForm,
-    current_user: Option<CurrentUser>,
+    owner: Option<&str>,
 ) -> Fallible<EditOutcome> {
-    let owner = current_user.as_ref().map(|u| u.email.as_str());
-    let rc = find_collection(state, slug, owner)
-        .ok_or_else(|| ErrorReport::new(format!("Unknown collection: {slug}")))?;
-
-    if state.sessions.lock().contains_key(slug) {
-        return fail("A drill session is active. End it before editing.");
-    }
-
     let hash = CardHash::from_hex(hash_hex)?;
-    let coll_dir = rc.coll_dir.canonicalize()?;
-    let cards = parse_deck(&coll_dir)?.cards;
+    let CardSite {
+        rc,
+        coll_dir,
+        cards,
+        ..
+    } = card_site(state, slug, hash, owner)?;
     let card = find_card_by_hash(&cards, hash)?;
 
     let file_path = card.file_path().clone();
@@ -281,26 +397,11 @@ fn edit_post_inner(
         }
     };
 
-    // FEAT-04: every successful web edit becomes a git commit, so git sync
-    // keeps working and the collection gets versioned card history for free.
-    // When OIDC is on, the commit is attributed to the logged-in user rather
-    // than the shared configured default, so git history shows who edited
-    // what.
-    let (author_name, author_email): (&str, &str) = match &current_user {
-        Some(user) => (user.email.as_str(), user.email.as_str()),
-        None => match state.config.git.as_ref() {
-            Some(g) => (
-                g.commit_author_name.as_str(),
-                g.commit_author_email.as_str(),
-            ),
-            None => ("hashcards web edit", "hashcards@localhost"),
-        },
-    };
-    let committed = commit_edit(&file_path, author_name, author_email).map_err(|e| {
-        ErrorReport::new(format!(
-            "The edit was saved, but committing it to git failed: {e} Sync may fail until the change is committed by hand."
-        ))
-    })?;
+    // The file is written and the transaction has committed, so nothing
+    // below can fail: a live session is re-keyed onto the cards that now
+    // exist, or it is not, and there is no state left to roll back to.
+    let migration = build_card_migration(&plan, &old_cards, &new_cards);
+    let session = migrate_sessions(state, &coll_dir, &migration);
 
     Ok(EditOutcome {
         migrated: counts.renamed,
@@ -309,7 +410,7 @@ fn edit_post_inner(
         // user should hear about. A rename whose old hash had no history of
         // its own is not: there was nothing to lose.
         skipped: plan.skipped + counts.collided,
-        committed,
+        session,
     })
 }
 
@@ -436,6 +537,33 @@ pub struct MigrationPlan {
     pub skipped: usize,
 }
 
+/// Join a `MigrationPlan` with the re-parsed cards, in the terms a live
+/// session needs.
+///
+/// `plan.renames` already pairs old and new *hashes*; this looks each new
+/// hash up among the re-parsed cards so the session gets the whole card,
+/// and works out which old cards the edit removed: the ones that were
+/// neither renamed nor still present under their own hash.
+pub(crate) fn build_card_migration(
+    plan: &MigrationPlan,
+    old_cards: &[&Card],
+    new_cards: &[Card],
+) -> CardMigration {
+    let by_hash: HashMap<CardHash, &Card> = new_cards.iter().map(|c| (c.hash(), c)).collect();
+    let renamed: Vec<(CardHash, Card)> = plan
+        .renames
+        .iter()
+        .filter_map(|(old, new)| by_hash.get(new).map(|card| (*old, (*card).clone())))
+        .collect();
+    let renamed_from: HashSet<CardHash> = plan.renames.iter().map(|(old, _)| *old).collect();
+    let removed: Vec<CardHash> = old_cards
+        .iter()
+        .map(|c| c.hash())
+        .filter(|h| !by_hash.contains_key(h) && !renamed_from.contains(h))
+        .collect();
+    CardMigration { renamed, removed }
+}
+
 /// The matching key for a card: the cloze deletion's text for cloze cards
 /// (byte positions, sliced as bytes — never chars), `None` for basic cards.
 fn migration_key(card: &Card) -> Option<String> {
@@ -552,37 +680,121 @@ fn error_page(slug: &str, hash_hex: &str, msg: &str) -> (StatusCode, Html<String
 mod tests {
     use super::*;
 
-    use std::collections::HashMap;
-    use std::sync::Arc;
-
-    use parking_lot::Mutex;
-    use tokio::sync::RwLock;
-
-    use crate::cmd::serve::config::ResolvedServeConfig;
+    use crate::cmd::serve::handlers::find_collection;
     use crate::db::Database;
     use crate::types::card::CardContent;
     use crate::types::timestamp::Timestamp;
 
-    fn test_state(coll_dir: &Path) -> Fallible<AppState> {
-        let config = ResolvedServeConfig::from_directories(
-            vec![coll_dir.display().to_string()],
-            "127.0.0.1".to_string(),
-            0,
+    /// A closed set, not a caller-supplied path: a redirect target taken
+    /// from a form field is an open redirect for no benefit.
+    #[test]
+    fn return_to_is_a_closed_set() {
+        assert_eq!(
+            ReturnTo::parse(Some("collection")).target("Spanish"),
+            "/collection/Spanish"
+        );
+        assert_eq!(
+            ReturnTo::parse(Some("bookmarks")).target("Spanish"),
+            "/collection/Spanish/bookmarks"
+        );
+        // Anything else is the bookmarks page, not a 400 and not the value.
+        for raw in [
+            None,
+            Some(""),
+            Some("https://evil.example.com"),
+            Some("//x"),
+        ] {
+            assert_eq!(
+                ReturnTo::parse(raw).target("Spanish"),
+                "/collection/Spanish/bookmarks",
+                "for {raw:?}"
+            );
+        }
+    }
+
+    /// A state whose card tree holds one collection named `Deck`, with
+    /// `files` written into it and a stable id stamped so the read paths can
+    /// find it. Returns the state, the collection, and its folder.
+    fn fixture(
+        data_dir: &Path,
+        files: &[(&str, &str)],
+    ) -> Fallible<(AppState, ResolvedCollection, PathBuf)> {
+        use crate::cmd::serve::cards::CardRoot;
+        use crate::cmd::serve::cards::collection_id;
+        use crate::cmd::serve::state::test_support::state_with_data_dir;
+
+        let root = CardRoot::for_user(data_dir, None)?;
+        let folder = root.path().join("Deck");
+        std::fs::create_dir_all(&folder)?;
+        for (rel, content) in files {
+            std::fs::write(folder.join(rel), content)?;
+        }
+        std::fs::create_dir_all(data_dir.join("db"))?;
+        collection_id(&folder)?;
+
+        let state = state_with_data_dir(data_dir.to_path_buf());
+        let rc = find_collection(&state, "Deck", None)
+            .ok_or_else(|| ErrorReport::new("the collection was not discovered"))?;
+        Ok((state, rc, folder))
+    }
+
+    /// The pencil in a running drill links to the slug the *session* is
+    /// filed under, and a custom deck's session is filed under the deck's
+    /// own slug. Resolving that as a collection found nothing, so every card
+    /// edited from a deck drill answered "Unknown collection: deck-..." with
+    /// a 500. The card's home is one of the deck's members, so the members
+    /// are what get searched.
+    #[test]
+    fn a_card_is_editable_through_the_deck_it_was_drilled_under() -> Fallible<()> {
+        use crate::cmd::serve::config::DeckMember;
+        use crate::cmd::serve::decks::ResolvedCustomDeck;
+        use crate::cmd::serve::decks::slug_for_deck;
+
+        let dir = tempfile::tempdir()?;
+        let data_dir = dir.path().canonicalize()?;
+        let (state, _rc, coll_dir) = fixture(&data_dir, &[("Cards.md", "Q: One\nA: 1\n")])?;
+        let cards = parse_deck(&coll_dir)?.cards;
+        let hash_hex = cards[0].hash().to_hex();
+
+        let deck = ResolvedCustomDeck {
+            name: "Mixed".to_string(),
+            slug: slug_for_deck("Mixed", None),
+            owner: None,
+            members: vec![
+                DeckMember::parse("Deck/Cards")
+                    .ok_or_else(|| ErrorReport::new("the deck member did not parse"))?,
+            ],
+        };
+        state.custom_decks.lock().push(deck.clone());
+
+        let html = edit_get_inner(&state, &deck.slug, &hash_hex, None, ReturnTo::Collection)?;
+        assert!(
+            html.contains("Q: One"),
+            "the editor must open on the card, got: {html}"
+        );
+        // Back to the drill it was opened from, not to the home collection:
+        // the session is filed under the deck's slug.
+        assert!(
+            html.contains(&format!(r#"href="/collection/{}""#, deck.slug)),
+            "the back link must return to the deck, got: {html}"
+        );
+
+        // Saving reaches the file in the card's home collection.
+        let file = coll_dir.join("Cards.md");
+        let mtime = file_mtime_ms(&file)?;
+        edit_post_inner(
+            &state,
+            &deck.slug,
+            &hash_hex,
+            EditForm {
+                new_text: "Q: One\nA: uno".to_string(),
+                mtime_ms: mtime.to_string(),
+                return_to: Some("collection".to_string()),
+            },
+            None,
         )?;
-        Ok(AppState {
-            config: Arc::new(config),
-            collections: Arc::new(RwLock::new(Vec::new())),
-            sessions: Arc::new(Mutex::new(HashMap::new())),
-            last_synced: Arc::new(Mutex::new(None)),
-            hedgedoc_sources: Arc::new(Mutex::new(Vec::new())),
-            custom_decks: std::sync::Arc::new(parking_lot::Mutex::new(Vec::new())),
-            hedgedoc_last_synced: Arc::new(Mutex::new(None)),
-            config_path: Arc::new(Mutex::new(None)),
-            counts_refreshed_at: Arc::new(Mutex::new(None)),
-            interrupted_closed: Arc::new(Mutex::new(HashMap::new())),
-            session_key: axum_extra::extract::cookie::Key::generate(),
-            oidc: None,
-        })
+        assert!(std::fs::read_to_string(&file)?.contains("A: uno"));
+        Ok(())
     }
 
     /// Regression: an edit that makes a card identical to one that already
@@ -593,14 +805,15 @@ mod tests {
     #[test]
     fn test_edit_colliding_with_existing_card_does_not_corrupt() -> Fallible<()> {
         let dir = tempfile::tempdir()?;
-        let coll_dir = dir.path().canonicalize()?;
-        let file = coll_dir.join("Deck.md");
+        let data_dir = dir.path().canonicalize()?;
         // Two distinct cards, both with history.
-        std::fs::write(&file, "Q: One\nA: 1\n\n---\n\nQ: Two\nA: 2\n")?;
-
-        let state = test_state(&coll_dir)?;
-        let slug = state.config.collections[0].slug.clone();
-        let db_path = state.config.collections[0].db_path.clone();
+        let (state, rc, coll_dir) = fixture(
+            &data_dir,
+            &[("Deck.md", "Q: One\nA: 1\n\n---\n\nQ: Two\nA: 2\n")],
+        )?;
+        let file = coll_dir.join("Deck.md");
+        let slug = rc.slug.clone();
+        let db_path = rc.db_path.clone();
         let db_str = db_path
             .to_str()
             .ok_or_else(|| ErrorReport::new("non-utf8 db path"))?;
@@ -625,6 +838,7 @@ mod tests {
             EditForm {
                 new_text: "Q: Two\nA: 2".to_string(),
                 mtime_ms: mtime.to_string(),
+                return_to: None,
             },
             None,
         )?;
@@ -647,13 +861,14 @@ mod tests {
     #[test]
     fn test_edit_prepending_a_line_still_migrates_history() -> Fallible<()> {
         let dir = tempfile::tempdir()?;
-        let coll_dir = dir.path().canonicalize()?;
+        let data_dir = dir.path().canonicalize()?;
+        let (state, rc, coll_dir) = fixture(
+            &data_dir,
+            &[("Deck.md", "Q: Capital of France?\nA: Paris\n")],
+        )?;
         let file = coll_dir.join("Deck.md");
-        std::fs::write(&file, "Q: Capital of France?\nA: Paris\n")?;
-
-        let state = test_state(&coll_dir)?;
-        let slug = state.config.collections[0].slug.clone();
-        let db_path = state.config.collections[0].db_path.clone();
+        let slug = rc.slug.clone();
+        let db_path = rc.db_path.clone();
 
         let old_cards = parse_deck(&coll_dir)?.cards;
         assert_eq!(old_cards.len(), 1);
@@ -677,6 +892,7 @@ mod tests {
             EditForm {
                 new_text: "## Geography\nQ: Capital of France?\nA: Paris, France".to_string(),
                 mtime_ms: mtime.to_string(),
+                return_to: None,
             },
             None,
         )?;
@@ -702,13 +918,11 @@ mod tests {
     #[test]
     fn test_edit_reorder_migrates_history_by_content() -> Fallible<()> {
         let dir = tempfile::tempdir()?;
-        let coll_dir = dir.path().canonicalize()?;
+        let data_dir = dir.path().canonicalize()?;
+        let (state, rc, coll_dir) = fixture(&data_dir, &[("Deck.md", "C: A [x] B [y]\n")])?;
         let file = coll_dir.join("Deck.md");
-        std::fs::write(&file, "C: A [x] B [y]\n")?;
-
-        let state = test_state(&coll_dir)?;
-        let slug = state.config.collections[0].slug.clone();
-        let db_path = state.config.collections[0].db_path.clone();
+        let slug = rc.slug.clone();
+        let db_path = rc.db_path.clone();
 
         let old_cards = parse_deck(&coll_dir)?.cards;
         assert_eq!(old_cards.len(), 2);
@@ -734,6 +948,7 @@ mod tests {
             EditForm {
                 new_text: "C: A [y] B [x]".to_string(),
                 mtime_ms: mtime.to_string(),
+                return_to: None,
             },
             None,
         )?;
@@ -753,170 +968,6 @@ mod tests {
         for c in &old_cards {
             assert!(!db.card_exists(c.hash())?, "stale old card {}", c.hash());
         }
-        Ok(())
-    }
-
-    use std::process::Command as SyncCommand;
-
-    fn git(dir: &Path, args: &[&str]) {
-        let out = SyncCommand::new("git")
-            .args(args)
-            .current_dir(dir)
-            .output()
-            .unwrap();
-        assert!(
-            out.status.success(),
-            "git {args:?} failed: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-    }
-
-    /// Regression test for BUG-34 / FEAT-04: after a web edit in a git-backed
-    /// collection, the working tree is clean and a subsequent pull succeeds.
-    #[test]
-    fn test_edit_in_git_backed_collection_commits_and_pull_succeeds() -> Fallible<()> {
-        let dir = tempfile::tempdir()?;
-        let work = dir.path().join("work");
-        std::fs::create_dir_all(&work)?;
-        // Not canonicalized: on Windows that adds a `\\?\` verbatim prefix,
-        // which git's clone-source parser below misreads as a UNC host.
-        // `tempdir()` already returns an absolute path.
-
-        git(&work, &["init", "-b", "main"]);
-        // The per-collection DB lives in the collection dir in --directories
-        // mode; ignore it so the clean-tree assertion sees only card files.
-        std::fs::write(work.join(".gitignore"), "hashcards.db\n")?;
-        let file = work.join("Deck.md");
-        std::fs::write(&file, "Q: capital of France?\nA: Paris\n")?;
-        git(&work, &["add", "."]);
-        git(
-            &work,
-            &[
-                "-c",
-                "user.name=t",
-                "-c",
-                "user.email=t@t",
-                "commit",
-                "-m",
-                "init",
-            ],
-        );
-
-        // A bare clone acts as the remote so `git pull` has something to talk to.
-        let remote = dir.path().join("remote.git");
-        let work_str = work
-            .to_str()
-            .ok_or_else(|| ErrorReport::new("non-utf8 tempdir"))?;
-        let remote_str = remote
-            .to_str()
-            .ok_or_else(|| ErrorReport::new("non-utf8 tempdir"))?;
-        git(dir.path(), &["clone", "--bare", work_str, remote_str]);
-        git(&work, &["remote", "add", "origin", remote_str]);
-
-        let state = test_state(&work)?;
-        let slug = state.config.collections[0].slug.clone();
-        let cards = parse_deck(&work)?.cards;
-        let hash_hex = cards[0].hash().to_hex();
-        let mtime = file_mtime_ms(&file)?;
-
-        let outcome = edit_post_inner(
-            &state,
-            &slug,
-            &hash_hex,
-            EditForm {
-                new_text: "Q: capital of France?\nA: **Paris**".to_string(),
-                mtime_ms: mtime.to_string(),
-            },
-            None,
-        )?;
-        assert!(outcome.committed, "edit was not committed");
-
-        // The working tree is clean...
-        let status = SyncCommand::new("git")
-            .args(["status", "--porcelain"])
-            .current_dir(&work)
-            .output()?;
-        assert!(
-            status.stdout.is_empty(),
-            "working tree not clean after edit: {}",
-            String::from_utf8_lossy(&status.stdout)
-        );
-
-        // ...and a subsequent pull succeeds.
-        let pull = SyncCommand::new("git")
-            .args(["pull", "--ff-only", "origin", "main"])
-            .current_dir(&work)
-            .output()?;
-        assert!(
-            pull.status.success(),
-            "pull failed after edit: {}",
-            String::from_utf8_lossy(&pull.stderr)
-        );
-        Ok(())
-    }
-
-    /// When `[oidc]` is on, an in-browser edit's git commit is attributed to
-    /// the logged-in user, not the configured default — a better audit
-    /// trail than a single shared "hashcards web edit" author.
-    #[test]
-    fn test_edit_commit_uses_current_user_as_author_when_oidc_is_on() -> Fallible<()> {
-        let dir = tempfile::tempdir()?;
-        let work = dir.path().join("work");
-        std::fs::create_dir_all(&work)?;
-
-        git(&work, &["init", "-b", "main"]);
-        std::fs::write(work.join(".gitignore"), "hashcards.db\n")?;
-        let file = work.join("Deck.md");
-        std::fs::write(&file, "Q: capital of France?\nA: Paris\n")?;
-        git(&work, &["add", "."]);
-        git(
-            &work,
-            &[
-                "-c",
-                "user.name=t",
-                "-c",
-                "user.email=t@t",
-                "commit",
-                "-m",
-                "init",
-            ],
-        );
-
-        // Alice must own the collection for `find_collection` to resolve it
-        // under her session — an unowned collection would 404 for anyone
-        // authenticated, by design (see Task 8).
-        let mut state = test_state(&work)?;
-        {
-            let config = std::sync::Arc::get_mut(&mut state.config)
-                .ok_or_else(|| ErrorReport::new("config Arc unexpectedly shared"))?;
-            config.collections[0].owner = Some("alice@example.com".to_string());
-        }
-        let slug = state.config.collections[0].slug.clone();
-        let cards = parse_deck(&work)?.cards;
-        let hash_hex = cards[0].hash().to_hex();
-        let mtime = file_mtime_ms(&file)?;
-
-        let current_user = Some(CurrentUser {
-            email: "alice@example.com".to_string(),
-        });
-        let outcome = edit_post_inner(
-            &state,
-            &slug,
-            &hash_hex,
-            EditForm {
-                new_text: "Q: capital of France?\nA: **Paris**".to_string(),
-                mtime_ms: mtime.to_string(),
-            },
-            current_user,
-        )?;
-        assert!(outcome.committed, "edit was not committed");
-
-        let log = SyncCommand::new("git")
-            .args(["log", "-1", "--pretty=format:%an <%ae>"])
-            .current_dir(&work)
-            .output()?;
-        let author = String::from_utf8_lossy(&log.stdout);
-        assert_eq!(author, "alice@example.com <alice@example.com>");
         Ok(())
     }
 

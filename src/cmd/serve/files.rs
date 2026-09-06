@@ -15,8 +15,15 @@ use serde::Deserialize;
 
 use crate::cmd::run_blocking;
 use crate::cmd::serve::auth::CurrentUser;
+use crate::cmd::serve::cards::COLLECTION_META_FILE;
+use crate::cmd::serve::cards::CardRoot;
+use crate::cmd::serve::cards::IdPolicy;
+use crate::cmd::serve::cards::collection_id;
+use crate::cmd::serve::cards::discover_local_collections;
+use crate::cmd::serve::cards::existing_collection_id;
 use crate::cmd::serve::config::ResolvedCollection;
 use crate::cmd::serve::config::slugify;
+use crate::cmd::serve::edit::build_card_migration;
 use crate::cmd::serve::edit::file_mtime_ms;
 use crate::cmd::serve::edit::plan_hash_migration;
 use crate::cmd::serve::edit::revert_file;
@@ -25,13 +32,9 @@ use crate::cmd::serve::files_ui::render_editor_page;
 use crate::cmd::serve::files_ui::render_preview;
 use crate::cmd::serve::files_ui::render_tree_page;
 use crate::cmd::serve::href::encoded_path;
-use crate::cmd::serve::local::IdPolicy;
-use crate::cmd::serve::local::LOCAL_META_FILE;
-use crate::cmd::serve::local::LocalRoot;
-use crate::cmd::serve::local::collection_id;
-use crate::cmd::serve::local::discover_local_collections;
-use crate::cmd::serve::local::existing_collection_id;
 use crate::cmd::serve::state::AppState;
+use crate::cmd::serve::state::migrate_sessions;
+use crate::cmd::serve::state::sessions_touching;
 use crate::cmd::serve::upload::MEDIA_DIR;
 use crate::db::Database;
 use crate::error::Fallible;
@@ -70,7 +73,7 @@ pub struct TreeEntry {
 /// level sorted by name. Dotfiles, the per-collection metadata file and a
 /// collection's `media` folder are hidden: they are hashcards' bookkeeping,
 /// not the user's content.
-pub fn read_tree(root: &LocalRoot) -> Fallible<Vec<TreeEntry>> {
+pub fn read_tree(root: &CardRoot) -> Fallible<Vec<TreeEntry>> {
     let mut out = Vec::new();
     walk(root.path(), "", 0, &mut out)?;
     Ok(out)
@@ -85,7 +88,7 @@ fn walk(dir: &Path, prefix: &str, depth: usize, out: &mut Vec<TreeEntry>) -> Fal
             Ok(n) => n,
             Err(_) => continue,
         };
-        if name.starts_with('.') || name == LOCAL_META_FILE {
+        if name.starts_with('.') || name == COLLECTION_META_FILE {
             continue;
         }
         // `media` directly inside a collection is where pasted images are
@@ -144,8 +147,10 @@ fn validate_name(name: &str) -> Fallible<String> {
     if trimmed.is_empty() {
         return fail("Enter a name.");
     }
-    if trimmed == LOCAL_META_FILE {
-        return fail(format!("`{LOCAL_META_FILE}` is reserved by hashcards."));
+    if trimmed == COLLECTION_META_FILE {
+        return fail(format!(
+            "`{COLLECTION_META_FILE}` is reserved by hashcards."
+        ));
     }
     if trimmed.starts_with('.') {
         return fail("Names cannot start with a dot.");
@@ -217,7 +222,7 @@ fn non_empty_children(dir: &Path, is_collection_root: bool) -> Fallible<Vec<Stri
     let mut kept = Vec::new();
     for entry in read_dir(dir)? {
         let name = entry?.file_name().into_string().unwrap_or_default();
-        if name.starts_with('.') || name == LOCAL_META_FILE {
+        if name.starts_with('.') || name == COLLECTION_META_FILE {
             continue;
         }
         if is_collection_root && name == MEDIA_DIR {
@@ -230,17 +235,17 @@ fn non_empty_children(dir: &Path, is_collection_root: bool) -> Fallible<Vec<Stri
 }
 
 /// The local tree belonging to the caller, created if it is not there yet.
-pub fn user_root(state: &AppState, user: Option<&CurrentUser>) -> Fallible<LocalRoot> {
+pub fn user_root(state: &AppState, user: Option<&CurrentUser>) -> Fallible<CardRoot> {
     let data_dir = data_dir(state)?;
-    LocalRoot::for_user(&data_dir, user.map(|u| u.email.as_str()))
+    CardRoot::for_user(&data_dir, user.map(|u| u.email.as_str()))
 }
 
 /// The same tree, without creating anything. Read paths use this: serving a
 /// page must not write into the user's card folder, and must not fail on a
 /// read-only data directory.
-pub fn user_root_readonly(state: &AppState, user: Option<&CurrentUser>) -> Fallible<LocalRoot> {
+pub fn user_root_readonly(state: &AppState, user: Option<&CurrentUser>) -> Fallible<CardRoot> {
     let data_dir = data_dir(state)?;
-    LocalRoot::open(&data_dir, user.map(|u| u.email.as_str()))
+    CardRoot::open(&data_dir, user.map(|u| u.email.as_str()))
 }
 
 fn data_dir(state: &AppState) -> Fallible<PathBuf> {
@@ -331,26 +336,18 @@ fn flash_for(outcome: Fallible<String>) -> Redirect {
     }
 }
 
-/// Slugs a local folder must not take: configured collections and HedgeDoc
-/// notes belonging to the same user. `find_collection` prefers those, so a
-/// folder that matches one is unreachable however it came to exist.
+/// Slugs a card folder must not take: the caller's own saved decks. Both a
+/// deck and a collection are addressed through `/collection/{slug}`, and
+/// routing prefers the collection, so a folder that matches a deck slug
+/// makes the deck unreachable.
 fn reserved_slugs(state: &AppState, owner: Option<&str>) -> Vec<(String, String)> {
-    let mut taken: Vec<(String, String)> = state
-        .config
-        .collections
+    state
+        .custom_decks
+        .lock()
         .iter()
-        .filter(|c| c.owner.as_deref() == owner)
-        .map(|c| (c.slug.clone(), c.name.clone()))
-        .collect();
-    taken.extend(
-        state
-            .hedgedoc_sources
-            .lock()
-            .iter()
-            .filter(|s| s.collection.owner.as_deref() == owner)
-            .map(|s| (s.collection.slug.clone(), s.collection.name.clone())),
-    );
-    taken
+        .filter(|d| d.owner.as_deref() == owner)
+        .map(|d| (d.slug.clone(), d.name.clone()))
+        .collect()
 }
 
 /// The caller's owner key, as stored on a `ResolvedCollection`.
@@ -367,7 +364,7 @@ fn owner_key(user: Option<&CurrentUser>) -> Option<String> {
 fn check_collection_slug(
     state: &AppState,
     user: Option<&CurrentUser>,
-    root: &LocalRoot,
+    root: &CardRoot,
     name: &str,
     except: Option<&Path>,
 ) -> Fallible<()> {
@@ -390,7 +387,7 @@ fn check_collection_slug(
     );
     if let Some((_, other)) = taken.iter().find(|(s, _)| *s == slug) {
         return fail(format!(
-            "`{name}` maps to the URL slug `{slug}`, which the collection `{other}` already uses. Pick a different name."
+            "`{name}` maps to the URL slug `{slug}`, which `{other}` already uses. Pick a different name."
         ));
     }
     Ok(())
@@ -484,7 +481,7 @@ fn rename_entry(
     }
     // Renaming a deck rewrites nothing, but renaming its *collection* moves
     // the folder a live session is reading its cards and its database from.
-    refuse_if_drilling(state, &from_rel)?;
+    refuse_if_drilling(state, &root, &from_rel)?;
     let mut name = validate_name(&form.name)?;
     if from.is_file() && !name.ends_with(".md") {
         name.push_str(".md");
@@ -526,7 +523,7 @@ fn delete_entry(
     // its grades to the collection's database. Deleting either underneath it
     // strands those grades — the database file is unlinked while the session
     // still holds it open — so the same guard `save_file` uses applies here.
-    refuse_if_drilling(state, &rel)?;
+    refuse_if_drilling(state, &root, &rel)?;
     if target.is_dir() {
         let is_collection_root = !rel.contains('/');
         // `media` does not make a collection count as non-empty, and it is
@@ -612,7 +609,7 @@ pub const LOOSE_FILE_NEW: &str = "A card file has to live inside a collection fo
 /// A collection is a top-level folder, so a file directly under the root
 /// belongs to none: it can be neither reviewed nor given a place to keep
 /// its images, and every caller refuses it rather than inventing one.
-pub fn collection_folder(root: &LocalRoot, rel: &str) -> Fallible<PathBuf> {
+pub fn collection_folder(root: &CardRoot, rel: &str) -> Fallible<PathBuf> {
     let trimmed = rel.trim_matches('/');
     let top = match trimmed.split('/').next() {
         Some(t) if !t.is_empty() => t.to_string(),
@@ -661,45 +658,37 @@ fn parse_buffer_at(rel: &str, file_path: &Path, content: &str) -> Fallible<Parse
     Ok(parser.parse_with_duplicates(body)?)
 }
 
-/// The URL slug of the collection the local file at `rel` belongs to.
+/// The folder of the collection a normalized path belongs to, if it belongs
+/// to one.
 ///
-/// Derived exactly as `discover_local_collections` derives it, so the slug
-/// used to look for an active drill session is the one that session is
-/// keyed by.
-fn collection_slug_for(rel: &str) -> Fallible<String> {
-    match rel.trim_matches('/').split('/').next() {
-        Some(top) if !top.is_empty() && rel.trim_matches('/').contains('/') => Ok(slugify(top)),
-        _ => fail(LOOSE_FILE),
-    }
-}
-
-/// The slug of the collection a local path belongs to, if it belongs to one.
-///
-/// Unlike `collection_slug_for`, the path may *be* the collection folder:
+/// Unlike `collection_folder`, the path may *be* the collection folder:
 /// deleting or renaming a collection touches its cards just as much as
 /// editing one of them does. A loose file in the root belongs to no
 /// collection, so nothing can be drilling it.
-fn owning_collection_slug(rel: &str) -> Option<String> {
-    rel.split('/').next().filter(|t| !t.is_empty()).map(slugify)
+fn owning_collection_folder(root: &CardRoot, rel: &str) -> Option<PathBuf> {
+    let top = rel.split('/').next().filter(|t| !t.is_empty())?;
+    let folder = root.resolve(top).ok()?;
+    folder.is_dir().then_some(folder)
 }
 
 /// Refuse a change to a collection somebody is drilling right now.
 ///
-/// `rel` must already be normalized: the session is keyed by the slug
-/// `discover_local_collections` derives from the top-level folder, and a
-/// path that names that folder differently would look like a different
-/// collection and slip past the guard entirely.
-fn refuse_if_drilling(state: &AppState, rel: &str) -> Fallible<()> {
-    let slug = match owning_collection_slug(rel) {
-        Some(slug) => slug,
-        None => return Ok(()),
+/// Migration handles *edits*; it cannot handle a collection or file that
+/// stopped existing. A session cannot be re-keyed onto cards that are gone,
+/// and deleting a collection unlinks the database the session still holds
+/// open, so every grade it writes after that goes to a file nothing can
+/// read back.
+///
+/// `rel` must already be normalized, so that where the file is and which
+/// collection owns it are answered from the same string.
+fn refuse_if_drilling(state: &AppState, root: &CardRoot, rel: &str) -> Fallible<()> {
+    let Some(folder) = owning_collection_folder(root, rel) else {
+        return Ok(());
     };
-    if state.sessions.lock().contains_key(&slug) {
-        return fail(
-            "A drill session is active on this collection. End it before changing its files.",
-        );
+    if sessions_touching(state, &folder).is_empty() {
+        return Ok(());
     }
-    Ok(())
+    fail("A drill session is using this collection's cards. End it before changing its files.")
 }
 
 #[derive(Deserialize)]
@@ -822,13 +811,7 @@ fn save_file(
         return fail(format!("`{rel}` is not a file."));
     }
 
-    // A live session drills the cards it cached when it started. Rewriting
-    // their hashes underneath it strands the grades it is about to write —
-    // the same reason `edit_post_inner` refuses a card edit mid-session.
-    let slug = collection_slug_for(rel)?;
-    if state.sessions.lock().contains_key(&slug) {
-        return fail("A drill session is active on this collection. End it before editing.");
-    }
+    let coll_dir = collection_folder(&root, rel)?;
 
     if file_mtime_ms(&path)? != form.mtime {
         return fail(
@@ -860,7 +843,6 @@ fn save_file(
         None => return fail("No data directory is configured."),
     };
     ensure_dir(&db_dir, "review database directory")?;
-    let coll_dir = collection_folder(&root, rel)?;
     let db_path = db_path_for(&coll_dir, &db_dir)?;
     // `Database::new` takes a &str; a non-UTF-8 data directory cannot be
     // named to SQLite at all, so say so rather than lossily converting.
@@ -912,14 +894,27 @@ fn save_file(
     // nobody has drilled, every card is "unmatched" and saying so is noise.
     let skipped = plan.skipped + counts.collided;
     let worth_reporting = skipped > 0 && any_card_has_history(db_path_str, &old_cards)?;
-    if worth_reporting {
-        Ok(format!(
+    let mut message = if worth_reporting {
+        format!(
             "Saved {} cards. {skipped} could not be matched to their old review history and start fresh.",
             new_cards.len()
-        ))
+        )
     } else {
-        Ok(format!("Saved {} cards.", new_cards.len()))
+        format!("Saved {} cards.", new_cards.len())
+    };
+
+    // Written and committed: from here the session is re-keyed onto the
+    // cards that now exist, and nothing left can fail.
+    let old_refs: Vec<&Card> = old_cards.iter().collect();
+    let migration = build_card_migration(&plan, &old_refs, &new_cards);
+    let session = migrate_sessions(state, &coll_dir, &migration);
+    if session.renamed > 0 || session.dropped > 0 {
+        message.push_str(" Your running session was updated.");
     }
+    if session.session_finished {
+        message.push_str(" It has no cards left, so it is finished.");
+    }
+    Ok(message)
 }
 
 #[derive(Deserialize)]
@@ -976,7 +971,7 @@ fn any_card_has_history(db_path: &str, cards: &[Card]) -> Fallible<bool> {
 /// a directory listing is cheap next to the count refresh that follows it.
 /// Discovery failures are logged and treated as "no local collections"
 /// rather than taken down the whole page.
-pub fn local_collections_for(
+pub fn collections_for_user(
     state: &AppState,
     user: Option<&CurrentUser>,
 ) -> Vec<ResolvedCollection> {
@@ -988,7 +983,7 @@ pub fn local_collections_for(
 /// Read paths use this: a folder that has no id yet is skipped rather than
 /// given one, so looking a collection up never writes into the user's tree
 /// (and never blocks the async executor on creating it).
-pub fn existing_local_collections_for(
+pub fn existing_collections_for_user(
     state: &AppState,
     user: Option<&CurrentUser>,
 ) -> Vec<ResolvedCollection> {
@@ -1016,45 +1011,29 @@ fn collections_for(
         }
     };
     let owner = user.map(|u| u.email.as_str());
-    let mut found = match discover_local_collections(&root, &data_dir.join("db"), owner, policy) {
+    match discover_local_collections(&root, &data_dir.join("db"), owner, policy) {
         Ok(found) => found,
         Err(e) => {
             log::error!("Cannot list local collections: {e}");
-            return Vec::new();
+            Vec::new()
         }
-    };
-    // A folder can come to shadow a configured collection or a HedgeDoc note
-    // — the collection may be added later, or the folder dropped in by hand.
-    // Routing prefers those, so serving the folder anyway would list a row
-    // that leads somewhere else. Drop it with a warning instead.
-    let reserved = reserved_slugs(state, owner_key(user).as_deref());
-    found.retain(|c| match reserved.iter().find(|(slug, _)| *slug == c.slug) {
-        Some((slug, other)) => {
-            log::warn!(
-                "Local card folder `{}` is not served: `{other}` already uses the URL slug `{slug}`.",
-                c.name
-            );
-            false
-        }
-        None => true,
-    });
-    found
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cmd::serve::local::LocalRoot;
+    use crate::cmd::serve::cards::CardRoot;
     use crate::helper::create_tmp_directory;
 
     #[test]
     fn tree_lists_folders_before_files_depth_first() -> Fallible<()> {
         let dir = create_tmp_directory()?;
-        let root = LocalRoot::for_user(&dir, None)?;
+        let root = CardRoot::for_user(&dir, None)?;
         std::fs::create_dir_all(root.path().join("Spanish"))?;
         std::fs::write(root.path().join("Spanish").join("verbs.md"), "Q: a\nA: b\n")?;
         std::fs::write(
-            root.path().join("Spanish").join(LOCAL_META_FILE),
+            root.path().join("Spanish").join(COLLECTION_META_FILE),
             "id = \"x\"\n",
         )?;
 
@@ -1069,8 +1048,8 @@ mod tests {
     #[test]
     fn tree_hides_the_metadata_file_and_dotfiles() -> Fallible<()> {
         let dir = create_tmp_directory()?;
-        let root = LocalRoot::for_user(&dir, None)?;
-        std::fs::write(root.path().join(LOCAL_META_FILE), "id = \"x\"\n")?;
+        let root = CardRoot::for_user(&dir, None)?;
+        std::fs::write(root.path().join(COLLECTION_META_FILE), "id = \"x\"\n")?;
         std::fs::write(root.path().join(".hidden"), "")?;
 
         assert!(read_tree(&root)?.is_empty());
@@ -1096,18 +1075,18 @@ mod tests {
         assert!(validate_name("a/b").is_err());
         assert!(validate_name("..").is_err());
         assert!(validate_name("").is_err());
-        assert!(validate_name(LOCAL_META_FILE).is_err());
+        assert!(validate_name(COLLECTION_META_FILE).is_err());
     }
 
     #[test]
     fn a_non_empty_folder_is_not_deleted() -> Fallible<()> {
         let dir = create_tmp_directory()?;
-        let root = LocalRoot::for_user(&dir, None)?;
+        let root = CardRoot::for_user(&dir, None)?;
         let folder = root.path().join("Spanish");
         std::fs::create_dir_all(&folder)?;
         std::fs::write(folder.join("verbs.md"), "Q: a\nA: b\n")?;
         // The metadata file alone must not count as "non-empty".
-        std::fs::write(folder.join(LOCAL_META_FILE), "id = \"x\"\n")?;
+        std::fs::write(folder.join(COLLECTION_META_FILE), "id = \"x\"\n")?;
 
         assert_eq!(
             non_empty_children(&folder, true)?,
@@ -1124,7 +1103,7 @@ mod tests {
         // The local root must not sit under the directory that git and
         // source sync own, or a pull could overwrite user writing.
         let dir = create_tmp_directory()?;
-        let root = LocalRoot::for_user(&dir, None)?;
+        let root = CardRoot::for_user(&dir, None)?;
         assert!(!root.path().starts_with(dir.join("repo")));
         Ok(())
     }
@@ -1132,11 +1111,11 @@ mod tests {
     #[test]
     fn db_path_comes_from_the_top_level_folder_id() -> Fallible<()> {
         let dir = create_tmp_directory()?;
-        let root = LocalRoot::for_user(&dir, None)?;
+        let root = CardRoot::for_user(&dir, None)?;
         let folder = root.path().join("Spanish");
         std::fs::create_dir_all(&folder)?;
         std::fs::write(folder.join("verbs.md"), "Q: a\nA: b\n")?;
-        let id = crate::cmd::serve::local::collection_id(&folder)?;
+        let id = crate::cmd::serve::cards::collection_id(&folder)?;
 
         let db_dir = dir.join("db");
         let path = db_path_for(&collection_folder(&root, "Spanish/verbs.md")?, &db_dir)?;
@@ -1147,7 +1126,7 @@ mod tests {
     #[test]
     fn a_file_outside_any_collection_folder_is_rejected() -> Fallible<()> {
         let dir = create_tmp_directory()?;
-        let root = LocalRoot::for_user(&dir, None)?;
+        let root = CardRoot::for_user(&dir, None)?;
         std::fs::write(root.path().join("loose.md"), "Q: a\nA: b\n")?;
         assert!(collection_folder(&root, "loose.md").is_err());
         Ok(())
@@ -1172,7 +1151,7 @@ mod tests {
     #[test]
     fn preview_of_valid_markdown_lists_every_card() -> Fallible<()> {
         let dir = create_tmp_directory()?;
-        let root = LocalRoot::for_user(&dir, None)?;
+        let root = CardRoot::for_user(&dir, None)?;
         std::fs::create_dir_all(root.path().join("Spanish"))?;
         let html = crate::cmd::serve::files_ui::render_preview(
             &root,
@@ -1188,7 +1167,7 @@ mod tests {
     #[test]
     fn preview_of_broken_markdown_reports_the_parse_error() -> Fallible<()> {
         let dir = create_tmp_directory()?;
-        let root = LocalRoot::for_user(&dir, None)?;
+        let root = CardRoot::for_user(&dir, None)?;
         std::fs::create_dir_all(root.path().join("Spanish"))?;
         let html = crate::cmd::serve::files_ui::render_preview(
             &root,
@@ -1241,43 +1220,50 @@ mod tests {
         Ok(())
     }
 
-    /// An `AppState` whose local trees live under `data_dir` and which
-    /// serves `collections` as configured ones.
-    fn state_for(data_dir: &Path, collections: Vec<ResolvedCollection>) -> AppState {
-        crate::cmd::serve::state::test_support::state_with_data_dir(
-            data_dir.to_path_buf(),
-            collections,
-        )
+    /// An `AppState` whose card trees live under `data_dir`.
+    fn state_for(data_dir: &Path) -> AppState {
+        crate::cmd::serve::state::test_support::state_with_data_dir(data_dir.to_path_buf())
     }
 
-    fn configured(name: &str, slug: &str) -> ResolvedCollection {
-        ResolvedCollection {
+    /// Put a saved deck in `state` and return its URL slug.
+    ///
+    /// A deck slug is the one name a card folder may not take: both are
+    /// addressed through `/collection/{slug}` and routing prefers the
+    /// collection, so a folder that matched one would make the deck
+    /// unreachable.
+    fn reserve_deck(state: &AppState, name: &str) -> String {
+        use crate::cmd::serve::decks::ResolvedCustomDeck;
+        use crate::cmd::serve::decks::slug_for_deck;
+
+        let slug = slug_for_deck(name, None);
+        state.custom_decks.lock().push(ResolvedCustomDeck {
             name: name.to_string(),
-            slug: slug.to_string(),
-            coll_dir: PathBuf::from("/nonexistent"),
-            db_path: PathBuf::from("/nonexistent/x.db"),
+            slug: slug.clone(),
             owner: None,
-        }
+            members: Vec::new(),
+        });
+        slug
     }
 
     #[test]
-    fn a_new_folder_may_not_shadow_a_configured_collection() -> Fallible<()> {
-        // Routing prefers configured collections, so a folder named after
-        // one would be undrillable while still showing up as its own row.
+    fn a_new_folder_may_not_shadow_a_saved_deck() -> Fallible<()> {
+        // Routing prefers collections, so a folder named after a deck would
+        // make the deck unreachable while showing up as its own row.
         let dir = create_tmp_directory()?;
-        let state = state_for(&dir, vec![configured("Spanish", "Spanish")]);
+        let state = state_for(&dir);
+        let taken = reserve_deck(&state, "Exam revision");
         let form = NewEntryForm {
             parent: String::new(),
-            name: "Spanish".to_string(),
+            name: taken.clone(),
         };
 
         let error = match create_entry(&state, None, &form, true) {
             Ok(_) => return fail("expected a slug collision error"),
             Err(e) => e.to_string(),
         };
-        assert!(error.contains("Spanish"), "got: {error}");
+        assert!(error.contains(&taken), "got: {error}");
         assert!(
-            !user_root(&state, None)?.path().join("Spanish").exists(),
+            !user_root(&state, None)?.path().join(&taken).exists(),
             "the folder must not be created"
         );
         Ok(())
@@ -1286,7 +1272,7 @@ mod tests {
     #[test]
     fn a_new_folder_may_not_shadow_another_local_folder_slug() -> Fallible<()> {
         let dir = create_tmp_directory()?;
-        let state = state_for(&dir, Vec::new());
+        let state = state_for(&dir);
         let first = NewEntryForm {
             parent: String::new(),
             name: "Verbs 1".to_string(),
@@ -1306,7 +1292,8 @@ mod tests {
         // Only top-level folders are collections, so nothing below the root
         // shares the slug namespace.
         let dir = create_tmp_directory()?;
-        let state = state_for(&dir, vec![configured("Spanish", "Spanish")]);
+        let state = state_for(&dir);
+        let taken = reserve_deck(&state, "Exam revision");
         create_entry(
             &state,
             None,
@@ -1321,7 +1308,7 @@ mod tests {
             None,
             &NewEntryForm {
                 parent: "Languages".to_string(),
-                name: "Spanish".to_string(),
+                name: taken,
             },
             true,
         )?;
@@ -1331,7 +1318,8 @@ mod tests {
     #[test]
     fn renaming_a_folder_onto_a_taken_slug_is_refused() -> Fallible<()> {
         let dir = create_tmp_directory()?;
-        let state = state_for(&dir, vec![configured("Spanish", "Spanish")]);
+        let state = state_for(&dir);
+        let taken = reserve_deck(&state, "Exam revision");
         create_entry(
             &state,
             None,
@@ -1344,7 +1332,7 @@ mod tests {
 
         let form = RenameForm {
             path: "Espanol".to_string(),
-            name: "Spanish".to_string(),
+            name: taken,
         };
         assert!(rename_entry(&state, None, &form).is_err());
         // Renaming a folder to its own name is not a collision with itself.
@@ -1356,27 +1344,12 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn a_local_folder_shadowing_a_configured_slug_is_not_listed() -> Fallible<()> {
-        // The folder can predate the collection, or be dropped in by hand.
-        let dir = create_tmp_directory()?;
-        let state = state_for(&dir, vec![configured("Spanish", "Spanish")]);
-        let root = user_root(&state, None)?;
-        std::fs::create_dir_all(root.path().join("Spanish"))?;
-        std::fs::create_dir_all(root.path().join("Medicine"))?;
-
-        let found = local_collections_for(&state, None);
-        let names: Vec<&str> = found.iter().map(|c| c.name.as_str()).collect();
-        assert_eq!(names, vec!["Medicine"]);
-        Ok(())
-    }
-
     /// A save that cannot be completed must leave the file as it was: the
     /// flash says "not saved", and the disk has to agree.
     #[test]
     fn a_save_outside_any_collection_folder_leaves_the_file_alone() -> Fallible<()> {
         let dir = create_tmp_directory()?;
-        let state = state_for(&dir, Vec::new());
+        let state = state_for(&dir);
         let root = user_root(&state, None)?;
         let path = root.path().join("loose.md");
         std::fs::write(&path, "Q: a\nA: b\n")?;
@@ -1395,7 +1368,7 @@ mod tests {
     #[test]
     fn a_file_whose_content_does_not_parse_can_still_be_repaired() -> Fallible<()> {
         let dir = create_tmp_directory()?;
-        let state = state_for(&dir, Vec::new());
+        let state = state_for(&dir);
         let root = user_root(&state, None)?;
         std::fs::create_dir_all(root.path().join("Spanish"))?;
         let path = root.path().join("Spanish").join("verbs.md");
@@ -1416,7 +1389,7 @@ mod tests {
         // Otherwise `{id}.db` is orphaned in `db/` while a folder recreated
         // under the same name silently starts its history over.
         let dir = create_tmp_directory()?;
-        let state = state_for(&dir, Vec::new());
+        let state = state_for(&dir);
         create_entry(
             &state,
             None,
@@ -1455,6 +1428,7 @@ mod tests {
         use crate::cmd::drill::state::MutableState;
         use crate::cmd::drill::state::SessionDbs;
         use crate::cmd::serve::state::DrillSession;
+        use crate::cmd::serve::state::SessionKey;
         use crate::rng::TinyRng;
         use crate::types::performance::Jitter;
 
@@ -1482,33 +1456,165 @@ mod tests {
             AnswerControls::Full,
             mutable,
         )));
-        state.sessions.lock().insert(slug.to_string(), session);
+        state
+            .sessions
+            .lock()
+            .insert(SessionKey::new(None, slug), session);
         Ok(())
     }
 
+    /// Start a session keyed by `deck_slug` that draws its cards from
+    /// `folder` — the shape a custom-deck drill has. `SessionDb.source`
+    /// carries the collection, which is the only place that fact is
+    /// recorded: the sessions map is keyed by the deck's own slug.
+    fn start_deck_session(
+        state: &AppState,
+        data_dir: &Path,
+        folder: &Path,
+        deck_slug: &str,
+    ) -> Fallible<()> {
+        use crate::cmd::drill::render::AnswerControls;
+        use crate::cmd::drill::state::MutableState;
+        use crate::cmd::drill::state::SessionDb;
+        use crate::cmd::drill::state::SessionDbs;
+        use crate::cmd::drill::state::SessionSource;
+        use crate::cmd::serve::state::DrillSession;
+        use crate::cmd::serve::state::SessionKey;
+        use crate::rng::TinyRng;
+        use crate::types::performance::Jitter;
+
+        let db_dir = data_dir.join("db");
+        ensure_dir(&db_dir, "review database directory")?;
+        let db_path = db_path_for(folder, &db_dir)?;
+        let db_str = match db_path.to_str() {
+            Some(p) => p,
+            None => return fail("temp path is not UTF-8"),
+        };
+        let started_at = Timestamp::now();
+        let db = Database::new(db_str)?;
+        let session_id = db.create_session(started_at)?;
+        let dbs = SessionDbs::routed(
+            vec![SessionDb {
+                db,
+                session_id,
+                source: Some(SessionSource {
+                    coll_dir: folder.to_path_buf(),
+                    file_url_prefix: format!("/collection/{deck_slug}/file"),
+                }),
+            }],
+            std::collections::HashMap::new(),
+        );
+        let mutable = MutableState::new(
+            dbs,
+            crate::cmd::drill::cache::Cache::new(),
+            Vec::new(),
+            Jitter::none(),
+            TinyRng::from_seed(1),
+        );
+        let session = std::sync::Arc::new(parking_lot::Mutex::new(DrillSession::new(
+            // A deck session's own directory is not any one collection's.
+            data_dir.to_path_buf(),
+            Vec::new(),
+            started_at,
+            AnswerControls::Full,
+            mutable,
+        )));
+        state
+            .sessions
+            .lock()
+            .insert(SessionKey::new(None, deck_slug), session);
+        Ok(())
+    }
+
+    /// A custom-deck session is keyed by the deck's slug, not the
+    /// collection's, so the guard that looked the collection slug up in the
+    /// sessions map never saw it: deleting the collection unlinked the
+    /// database that session still held open.
     #[test]
-    fn a_save_is_refused_while_a_session_drills_the_collection() -> Fallible<()> {
+    fn a_delete_is_refused_while_a_custom_deck_session_uses_the_collection() -> Fallible<()> {
         let dir = create_tmp_directory()?;
-        let state = state_for(&dir, Vec::new());
+        let state = state_for(&dir);
+        let root = user_root(&state, None)?;
+        // Emptied of cards, so a folder that still holds files is not what
+        // refuses the delete: only the running session can.
+        let folder = root.path().join("Spanish");
+        std::fs::create_dir_all(&folder)?;
+        collection_id(&folder)?;
+
+        start_deck_session(&state, &dir, &folder, "deck-exam-0badc0de")?;
+
+        assert!(
+            delete_entry(
+                &state,
+                None,
+                &DeleteForm {
+                    path: "Spanish".to_string(),
+                },
+            )
+            .is_err(),
+            "a deck session drawing on this collection must block the delete"
+        );
+        assert!(folder.exists());
+        Ok(())
+    }
+
+    /// Same bug, same shape, on the rename path.
+    #[test]
+    fn a_rename_is_refused_while_a_custom_deck_session_uses_the_collection() -> Fallible<()> {
+        let dir = create_tmp_directory()?;
+        let state = state_for(&dir);
+        let root = user_root(&state, None)?;
+        let folder = root.path().join("Spanish");
+        std::fs::create_dir_all(&folder)?;
+        std::fs::write(folder.join("verbs.md"), "Q: the cat\nA: el gato\n")?;
+
+        start_deck_session(&state, &dir, &folder, "deck-exam-0badc0de")?;
+
+        assert!(
+            rename_entry(
+                &state,
+                None,
+                &RenameForm {
+                    path: "Spanish".to_string(),
+                    name: "Espanol".to_string(),
+                },
+            )
+            .is_err(),
+            "a deck session drawing on this collection must block the rename"
+        );
+        assert!(folder.exists());
+        Ok(())
+    }
+
+    /// The whole-file editor refused to save while a session was running,
+    /// for the same reason the card editor did. It now re-keys the session
+    /// onto the rewritten file instead.
+    #[test]
+    fn a_save_migrates_a_running_session_instead_of_refusing() -> Fallible<()> {
+        let dir = create_tmp_directory()?;
+        let state = state_for(&dir);
         let root = user_root(&state, None)?;
         let folder = root.path().join("Spanish");
         std::fs::create_dir_all(&folder)?;
         let path = folder.join("verbs.md");
-        let original = "Q: the cat\nA: el gato\n";
-        std::fs::write(&path, original)?;
+        std::fs::write(&path, "Q: the cat\nA: el gato\n")?;
 
         start_session(&state, &dir, &folder, "Spanish")?;
 
-        let form = SaveForm {
-            content: "Q: the dog\nA: el perro\n".to_string(),
-            mtime: file_mtime_ms(&path)?,
-        };
-        let error = match save_file(&state, None, "Spanish/verbs.md", &form) {
-            Ok(_) => return fail("expected an active session to refuse the save"),
-            Err(e) => e.to_string(),
-        };
-        assert!(error.contains("drill session"), "got: {error}");
-        assert_eq!(std::fs::read_to_string(&path)?, original);
+        let saved = save_file(
+            &state,
+            None,
+            "Spanish/verbs.md",
+            &SaveForm {
+                content: "Q: the cat\nA: el gato (masc.)\n".to_string(),
+                mtime: file_mtime_ms(&path)?,
+            },
+        )?;
+        assert!(saved.starts_with("Saved"), "got: {saved}");
+        assert!(
+            std::fs::read_to_string(&path)?.contains("masc."),
+            "the edit is not on disk"
+        );
         Ok(())
     }
 
@@ -1520,7 +1626,7 @@ mod tests {
     #[test]
     fn a_save_naming_an_image_that_is_not_there_is_refused() -> Fallible<()> {
         let dir = create_tmp_directory()?;
-        let state = state_for(&dir, Vec::new());
+        let state = state_for(&dir);
         let root = user_root(&state, None)?;
         let folder = root.path().join("Spanish");
         std::fs::create_dir_all(&folder)?;
@@ -1556,7 +1662,7 @@ mod tests {
     #[tokio::test]
     async fn a_refused_save_answers_with_the_buffer_that_was_submitted() -> Fallible<()> {
         let dir = create_tmp_directory()?;
-        let state = state_for(&dir, Vec::new());
+        let state = state_for(&dir);
         let root = user_root(&state, None)?;
         std::fs::create_dir_all(root.path().join("Spanish"))?;
         let path = root.path().join("Spanish").join("verbs.md");
@@ -1595,18 +1701,19 @@ mod tests {
     #[test]
     fn creating_a_file_may_not_conjure_a_shadowing_collection() -> Fallible<()> {
         let dir = create_tmp_directory()?;
-        let state = state_for(&dir, vec![configured("Spanish", "Spanish")]);
+        let state = state_for(&dir);
+        let taken = reserve_deck(&state, "Exam revision");
 
         let form = NewEntryForm {
-            parent: "Spanish".to_string(),
+            parent: taken.clone(),
             name: "verbs".to_string(),
         };
         assert!(create_entry(&state, None, &form, false).is_err());
-        assert!(!user_root(&state, None)?.path().join("Spanish").exists());
+        assert!(!user_root(&state, None)?.path().join(&taken).exists());
 
         // Nested folders are checked by their top-level ancestor too.
         let nested = NewEntryForm {
-            parent: "Spanish/Unit 2".to_string(),
+            parent: format!("{taken}/Unit 2"),
             name: "verbs".to_string(),
         };
         assert!(create_entry(&state, None, &nested, false).is_err());
@@ -1618,7 +1725,7 @@ mod tests {
     #[test]
     fn a_file_creates_its_collection_with_an_id() -> Fallible<()> {
         let dir = create_tmp_directory()?;
-        let state = state_for(&dir, Vec::new());
+        let state = state_for(&dir);
         create_entry(
             &state,
             None,
@@ -1640,7 +1747,7 @@ mod tests {
     #[test]
     fn the_editor_refuses_a_file_outside_any_collection() -> Fallible<()> {
         let dir = create_tmp_directory()?;
-        let state = state_for(&dir, Vec::new());
+        let state = state_for(&dir);
         let root = user_root(&state, None)?;
         std::fs::write(root.path().join("loose.md"), "Q: a\nA: b\n")?;
         assert!(load_for_edit(&state, None, "loose.md").is_err());
@@ -1650,12 +1757,18 @@ mod tests {
     /// The database is removed only once the folder actually is. Removing
     /// it first threw the review history away whenever `remove_dir_all`
     /// failed — leaving the collection on disk, silently starting over.
+    ///
+    /// Unix only: the failure is staged by making the parent directory
+    /// read-only, which Windows permissions do not express — the mode bits
+    /// this needs are not in `std` there, so the test would not even
+    /// compile.
+    #[cfg(unix)]
     #[test]
     fn a_failed_folder_removal_keeps_the_review_database() -> Fallible<()> {
         use std::os::unix::fs::PermissionsExt;
 
         let dir = create_tmp_directory()?;
-        let state = state_for(&dir, Vec::new());
+        let state = state_for(&dir);
         create_entry(
             &state,
             None,
@@ -1705,7 +1818,7 @@ mod tests {
     #[test]
     fn the_media_folder_is_hidden_inside_a_collection() -> Fallible<()> {
         let dir = create_tmp_directory()?;
-        let root = LocalRoot::for_user(&dir, None)?;
+        let root = CardRoot::for_user(&dir, None)?;
         std::fs::create_dir_all(root.path().join("Spanish").join("media"))?;
         std::fs::write(root.path().join("Spanish").join("media").join("a.png"), "x")?;
         std::fs::write(root.path().join("Spanish").join("verbs.md"), "Q: a\nA: b\n")?;
@@ -1727,7 +1840,7 @@ mod tests {
     #[test]
     fn a_user_folder_inside_a_collection_may_not_be_called_media() -> Fallible<()> {
         let dir = create_tmp_directory()?;
-        let state = state_for(&dir, Vec::new());
+        let state = state_for(&dir);
         create_entry(
             &state,
             None,
@@ -1799,7 +1912,7 @@ mod tests {
     #[test]
     fn a_collection_whose_media_folder_holds_decks_is_not_deleted() -> Fallible<()> {
         let dir = create_tmp_directory()?;
-        let state = state_for(&dir, Vec::new());
+        let state = state_for(&dir);
         create_entry(
             &state,
             None,
@@ -1836,7 +1949,7 @@ mod tests {
     #[test]
     fn a_collection_is_not_deleted_or_renamed_while_a_session_drills_it() -> Fallible<()> {
         let dir = create_tmp_directory()?;
-        let state = state_for(&dir, Vec::new());
+        let state = state_for(&dir);
         create_entry(
             &state,
             None,
@@ -1909,7 +2022,7 @@ mod tests {
     #[test]
     fn a_card_file_cannot_be_created_directly_in_the_root() -> Fallible<()> {
         let dir = create_tmp_directory()?;
-        let state = state_for(&dir, Vec::new());
+        let state = state_for(&dir);
         let form = NewEntryForm {
             parent: String::new(),
             name: "notes".to_string(),
@@ -1926,13 +2039,13 @@ mod tests {
         Ok(())
     }
 
-    /// `LocalRoot::resolve` normalizes a path while the collection checks
+    /// `CardRoot::resolve` normalizes a path while the collection checks
     /// used to split the raw one, so `./Spanish` was deleted as if it were
     /// nested: no id read, and `{id}.db` left orphaned in `db/`.
     #[test]
     fn a_dotted_path_is_still_recognized_as_a_collection_root() -> Fallible<()> {
         let dir = create_tmp_directory()?;
-        let state = state_for(&dir, Vec::new());
+        let state = state_for(&dir);
         create_entry(
             &state,
             None,
@@ -1978,7 +2091,7 @@ mod tests {
     #[test]
     fn a_collection_holding_only_pasted_images_can_still_be_deleted() -> Fallible<()> {
         let dir = create_tmp_directory()?;
-        let state = state_for(&dir, Vec::new());
+        let state = state_for(&dir);
         create_entry(
             &state,
             None,

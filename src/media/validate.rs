@@ -76,7 +76,7 @@ pub fn validate_media_files(cards: &[Card], base_dir: &Path) -> Fallible<()> {
                 use crate::media::resolve::ResolveError;
                 match resolver.resolve(&path) {
                     Ok(_) => {}
-                    // External URLs are intentional (e.g. HedgeDoc image uploads);
+                    // External URLs are intentional;
                     // the browser fetches them directly, so they are never "missing".
                     Err(ResolveError::ExternalUrl) => {}
                     Err(_) => {
@@ -214,7 +214,7 @@ mod tests {
 
     #[test]
     fn test_validate_media_files_with_external_urls() -> Fallible<()> {
-        // External image URLs (e.g. from HedgeDoc uploads) must not be treated
+        // External image URLs must not be treated
         // as missing local files — the browser fetches them directly.
         let test_dir = crate::helper::create_tmp_directory()?;
 

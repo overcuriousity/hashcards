@@ -103,7 +103,7 @@ mod tests {
     }
 
     /// Running with no config at all used to start an unauthenticated
-    /// HedgeDoc-only server in a temp directory. It must now fail loudly,
+    /// unconfigured server in a temp directory. It must now fail loudly,
     /// naming the file it looked for.
     #[test]
     fn test_missing_default_config_is_an_error() -> Fallible<()> {

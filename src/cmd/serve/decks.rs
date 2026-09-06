@@ -24,7 +24,7 @@ use maud::html;
 
 use crate::cmd::drill::template::page_template;
 use crate::cmd::serve::auth::CurrentUser;
-use crate::cmd::serve::files::local_collections_for;
+use crate::cmd::serve::files::collections_for_user;
 use crate::cmd::serve::handlers::current_user_for;
 use crate::cmd::serve::state::AppState;
 use crate::collection::Collection;
@@ -45,7 +45,7 @@ pub struct ResolvedCustomDeck {
 ///
 /// Keyed by (owner, name) so two users may each have a deck called
 /// "Exam revision" without colliding, and prefixed `deck-` so a custom deck
-/// can never be confused with a collection or a HedgeDoc note.
+/// can never be confused with a collection.
 pub fn slug_for_deck(name: &str, owner: Option<&str>) -> String {
     let stem = slugify(name);
     let stem = if stem.is_empty() {
@@ -243,7 +243,7 @@ pub(super) fn render_decks_page(
             h1 { "Decks" }
             p { a.back-link href="/" { "\u{2190} Back to collections" } }
             p.empty {
-                "A deck is a saved selection of decks from any of your collections, drilled \
+                "A deck is a saved selection of topics from any of your collections, drilled \
                  together. Reviews still count towards each card's own collection, so a card \
                  in several decks keeps one schedule."
             }
@@ -256,7 +256,7 @@ pub(super) fn render_decks_page(
             } @else {
                 h2 { "New deck" }
                 @if choices.is_empty() {
-                    p.empty { "No collections with decks to choose from yet." }
+                    p.empty { "No collections with topics to choose from yet." }
                 } @else {
                     form action="/decks/add" method="post" {
                         div.add-source-row {
@@ -311,28 +311,14 @@ pub(super) fn render_decks_page(
 }
 
 /// Every collection `owner` can put in a custom deck: configured ones,
-/// their HedgeDoc and git sources, and their own local card folders.
+/// their own card folders.
 ///
 /// One list for the picker and for the ownership check, so a collection can
 /// never be offered on `/decks` and then refused when it is chosen.
 ///
 /// Blocking: local collections are discovered by reading the tree.
 fn owned_collections(state: &AppState, owner: Option<&str>) -> Vec<ResolvedCollection> {
-    let configured = state
-        .config
-        .collections
-        .iter()
-        .filter(|c| c.owner.as_deref() == owner)
-        .cloned();
-    let hedgedoc: Vec<ResolvedCollection> = state
-        .hedgedoc_sources
-        .lock()
-        .iter()
-        .filter(|s| s.collection.owner.as_deref() == owner)
-        .map(|s| s.collection.clone())
-        .collect();
-    let local = local_collections_for(state, current_user_for(owner).as_ref());
-    configured.chain(hedgedoc).chain(local).collect()
+    collections_for_user(state, current_user_for(owner).as_ref())
 }
 
 // ---- HTTP handlers ----
@@ -474,10 +460,12 @@ pub async fn deck_add_handler(
     };
 
     // Duplicate check, mutation and persist under one lock, so concurrent
-    // adds cannot write a config missing each other's decks (as BUG-39 did
-    // for HedgeDoc sources).
+    // adds cannot write a config missing each other's decks (BUG-39).
     let decks_arc = state.custom_decks.clone();
-    let collections = state.config.collections.clone();
+    // Checked against the caller's own collections, discovered a moment ago
+    // above: a deck slug carries a `deck-` prefix and a hash, so a collision
+    // means a folder deliberately named after a deck.
+    let collections = owned;
     let persisted = tokio::task::spawn_blocking(move || {
         let mut guard = decks_arc.lock();
         if guard
@@ -570,8 +558,7 @@ mod tests {
     #[test]
     fn local_collections_can_be_put_in_a_custom_deck() -> Fallible<()> {
         let dir = crate::helper::create_tmp_directory()?;
-        let state =
-            crate::cmd::serve::state::test_support::state_with_data_dir(dir.clone(), Vec::new());
+        let state = crate::cmd::serve::state::test_support::state_with_data_dir(dir.clone());
         let root = crate::cmd::serve::files::user_root(&state, None)?;
         std::fs::create_dir_all(root.path().join("Spanish"))?;
         std::fs::write(root.path().join("Spanish").join("verbs.md"), "Q: a\nA: b\n")?;

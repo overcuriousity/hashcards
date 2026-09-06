@@ -7,27 +7,16 @@ use axum::response::Html;
 use maud::Markup;
 use maud::html;
 
-use chrono::Duration;
-
 use crate::cmd::drill::template::page_template;
 use crate::cmd::serve::auth::CurrentUser;
-use crate::cmd::serve::files::local_collections_for;
-use crate::cmd::serve::git::refresh_collection_info;
-use crate::cmd::serve::hedgedoc::build_combined_infos;
+use crate::cmd::serve::counts::refresh_collection_info;
+use crate::cmd::serve::decks::ResolvedCustomDeck;
+use crate::cmd::serve::files::collections_for_user;
+use crate::cmd::serve::handlers::deck_card_counts;
+use crate::cmd::serve::handlers::deck_sources;
 use crate::cmd::serve::state::AppState;
 use crate::cmd::serve::state::CollectionInfo;
 use crate::flash::Flash;
-use crate::types::timestamp::Timestamp;
-
-/// True when the cached collection counts are older than the poll interval.
-pub fn counts_are_stale(last: Option<Timestamp>, now: Timestamp, interval_minutes: u64) -> bool {
-    match last {
-        None => true,
-        Some(last) => {
-            now.into_inner() - last.into_inner() >= Duration::minutes(interval_minutes as i64)
-        }
-    }
-}
 
 pub async fn landing_handler(
     State(state): State<AppState>,
@@ -37,41 +26,14 @@ pub async fn landing_handler(
     let flash = Flash::from_query(&query);
     let owner = current_user.as_ref().map(|u| u.email.clone());
 
-    // BUG-45: recompute counts when they are older than the poll interval.
-    let interval_minutes = state
-        .config
-        .git
-        .as_ref()
-        .map(|g| g.poll_interval_minutes)
-        .unwrap_or(30);
-    let stale = {
-        let last = state.counts_refreshed_at.lock();
-        counts_are_stale(*last, Timestamp::now(), interval_minutes)
-    };
-    if stale && interval_minutes > 0 {
-        let static_collections = state.config.collections.clone();
-        let sources_snapshot = state.hedgedoc_sources.lock().clone();
-        match tokio::task::spawn_blocking(move || {
-            build_combined_infos(&static_collections, &sources_snapshot)
-        })
-        .await
-        {
-            Ok(combined) => {
-                *state.collections.write().await = combined;
-                *state.counts_refreshed_at.lock() = Some(Timestamp::now());
-            }
-            Err(e) => log::error!("Failed to refresh collection counts: {e}"),
-        }
-    }
-
-    // Local collections are discovered per request rather than read from the
-    // cached list: a folder created a moment ago must appear at once, and it
-    // is the user's own writing, not a remote that syncs on a timer.
+    // Collections are discovered per request: a folder created a moment ago
+    // must appear at once, and reading a directory is cheap next to the
+    // count refresh that follows it.
     let local_infos = {
         let state = state.clone();
         let user = current_user.clone();
         match tokio::task::spawn_blocking(move || {
-            refresh_collection_info(&local_collections_for(&state, user.as_ref()))
+            refresh_collection_info(&collections_for_user(&state, user.as_ref()))
         })
         .await
         {
@@ -83,199 +45,268 @@ pub async fn landing_handler(
         }
     };
 
-    let all_collections = state.collections.read().await;
-    let collections: Vec<&CollectionInfo> = all_collections
+    let collections: Vec<&CollectionInfo> = local_infos
         .iter()
-        .chain(local_infos.iter())
         .filter(|c| c.owner.as_deref() == owner.as_deref())
         .collect();
-    let last_synced = *state.last_synced.lock();
-    let hedgedoc_last_synced = *state.hedgedoc_last_synced.lock();
-    let git_enabled = state.config.git.is_some();
-    let hedgedoc_count = state
-        .hedgedoc_sources
-        .lock()
-        .iter()
-        .filter(|s| s.collection.owner.as_deref() == owner.as_deref())
-        .count();
     let config_available = state.config.data_dir.is_some();
-    let custom_decks: Vec<(String, String)> = state
+    let custom_decks: Vec<ResolvedCustomDeck> = state
         .custom_decks
         .lock()
         .iter()
         .filter(|d| d.owner.as_deref() == owner.as_deref())
-        .map(|d| (d.name.clone(), d.slug.clone()))
+        .cloned()
         .collect();
     // FEAT-03: surface running sessions so they can be resumed rather than
-    // silently restarted.
+    // silently restarted. Only the caller's own: another user's session may
+    // be filed under the same slug, and it is not this page's to offer.
     let resume: HashMap<String, usize> = {
         let sessions = state.sessions.lock();
         sessions
             .iter()
-            .filter_map(|(slug, s)| {
+            .filter(|(key, _)| key.owner() == owner.as_deref())
+            .filter_map(|(key, s)| {
                 let session = s.lock();
                 if session.mutable.finished_at.is_none() {
-                    Some((slug.clone(), session.mutable.cards.len()))
+                    Some((key.slug().to_string(), session.mutable.cards.len()))
                 } else {
                     None
                 }
             })
             .collect()
     };
+
+    // Collections and decks are both things you sit down and drill, so they
+    // share one list. A deck's counts are not cached anywhere — they are a
+    // selection over collections — so they are computed here.
+    let mut rows: Vec<DrillRow> = collections
+        .iter()
+        .map(|c| DrillRow {
+            name: c.name.clone(),
+            slug: c.slug.clone(),
+            counts: Some(RowCounts {
+                due_today: c.due_today,
+                total_cards: c.total_cards,
+            }),
+            is_deck: false,
+        })
+        .collect();
+    for deck in custom_decks {
+        let state = state.clone();
+        let user = current_user.clone();
+        // The counting closure takes the deck and hands it back on success;
+        // the error arms need its name and slug either way.
+        let uncounted = deck.clone();
+        let counts = tokio::task::spawn_blocking(move || {
+            let sources = deck_sources(&state, &deck, user.as_ref().map(|u| u.email.as_str()));
+            deck_card_counts(&sources).map(|(due, total)| (deck, due, total))
+        })
+        .await;
+        // Counting can fail either way — the collection would not load, or
+        // the blocking task did not finish — and the row is the same either
+        // way, so the two are flattened to one message.
+        let counted = match counts {
+            Ok(inner) => inner.map_err(|e| e.to_string()),
+            Err(e) => Err(e.to_string()),
+        };
+        // A deck whose members cannot be read must not take the page down
+        // with it, and must not vanish from it either: a deck the user saved
+        // and can still open is listed, uncounted, and says so.
+        match counted {
+            Ok((deck, due_today, total_cards)) => rows.push(DrillRow {
+                name: deck.name.clone(),
+                slug: deck.slug.clone(),
+                counts: Some(RowCounts {
+                    due_today,
+                    total_cards,
+                }),
+                is_deck: true,
+            }),
+            Err(e) => {
+                log::error!("Failed to count the deck '{}': {e}", uncounted.name);
+                rows.push(uncounted_row(&uncounted));
+            }
+        }
+    }
+
     let status = LandingStatus {
-        last_synced,
-        git_enabled,
-        hedgedoc_count,
-        hedgedoc_last_synced,
         config_available,
         signed_in_as: owner.clone(),
     };
-    let html = render_landing_page(&collections, &custom_decks, &resume, &status, flash);
+    let html = render_landing_page(&rows, &resume, &status, flash);
     (StatusCode::OK, Html(html.into_string()))
 }
 
-/// The server-status details shown under the collection list: whether git
-/// and the config file are in play, and when each source last synced.
+/// The server-status details shown under the collection list: whether the
+/// config file is in play, how the sources stand, and who is signed in.
 struct LandingStatus {
-    last_synced: Option<Timestamp>,
-    git_enabled: bool,
-    hedgedoc_count: usize,
-    hedgedoc_last_synced: Option<Timestamp>,
     config_available: bool,
     /// The logged-in user's email, when `[oidc]` is configured. Drives the
     /// only logout control in the UI.
     signed_in_as: Option<String>,
 }
 
+/// One row of the list: a collection or a saved deck. Both are things you
+/// sit down and drill, so the list does not separate them; only the tag on a
+/// deck row says which is which.
+struct DrillRow {
+    name: String,
+    slug: String,
+    /// `None` when the counts could not be computed — a deck whose member
+    /// collection has stopped parsing, say. The row still appears: it is
+    /// something the user saved and can still open, and the page it opens
+    /// is where the failure is explained.
+    counts: Option<RowCounts>,
+    is_deck: bool,
+}
+
+/// What a row says about its cards, when it could be worked out.
+struct RowCounts {
+    due_today: usize,
+    total_cards: usize,
+}
+
+/// A deck that could not be counted, as a row.
+fn uncounted_row(deck: &ResolvedCustomDeck) -> DrillRow {
+    DrillRow {
+        name: deck.name.clone(),
+        slug: deck.slug.clone(),
+        counts: None,
+        is_deck: true,
+    }
+}
+
+/// A row with nothing to do is dimmed, so the list reads as "these are the
+/// ones waiting for you" at a glance.
+fn row_class(row: &DrillRow, resume: &HashMap<String, usize>) -> &'static str {
+    let nothing_due = matches!(row.counts, Some(RowCounts { due_today: 0, .. }));
+    // A row whose counts failed is not dimmed: "nothing to do" is exactly
+    // what is not known about it.
+    if nothing_due && !resume.contains_key(&row.slug) {
+        "drill-row muted"
+    } else {
+        "drill-row"
+    }
+}
+
+/// "36 due · 36 cards", or "Nothing due · 11 cards" — and, when the
+/// counts could not be computed at all, the fact that they could not.
+fn row_meta(counts: &Option<RowCounts>) -> Markup {
+    let Some(RowCounts {
+        due_today,
+        total_cards,
+    }) = counts
+    else {
+        return html! {
+            span.row-total.muted { "Counts unavailable" }
+        };
+    };
+    html! {
+        @if *due_today > 0 {
+            span.row-due { (format!("{due_today} due")) }
+        } @else {
+            span.row-due.muted { "Nothing due" }
+        }
+        span.row-sep { "\u{00b7}" }
+        span.row-total {
+            (format!("{total_cards} card{}", if *total_cards == 1 { "" } else { "s" }))
+        }
+    }
+}
+
+/// The one status line under the title: where the cards came from and when
+/// they last arrived. It replaced a stack of full-width bars, each of which
+/// announced a background detail as loudly as the list itself.
+fn status_line(status: &LandingStatus) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(email) = &status.signed_in_as {
+        parts.push(email.clone());
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(" \u{00b7} "))
+    }
+}
+
 fn render_landing_page(
-    collections: &[&CollectionInfo],
-    custom_decks: &[(String, String)],
+    rows: &[DrillRow],
     resume: &HashMap<String, usize>,
     status: &LandingStatus,
     flash: Option<Flash>,
 ) -> Markup {
     let LandingStatus {
-        last_synced,
-        git_enabled,
-        hedgedoc_count,
-        hedgedoc_last_synced,
         config_available,
         ref signed_in_as,
+        ..
     } = *status;
+    let line = status_line(status);
     page_template(html! {
         @if let Some(f) = &flash { (f.render()) }
         div.landing {
-            h1 { "hashcards-web" }
-            @if let Some(email) = signed_in_as {
-                div.sync-bar {
-                    span.sync-status { (format!("Signed in as {email}")) }
-                    // POST, so a third-party page cannot log the user out by
-                    // embedding the URL.
-                    form action="/auth/logout" method="post" style="display:inline" {
-                        input .sync-button.btn.btn-secondary type="submit" value="Log out";
+            // Title, then everything that is not the list, on one line each.
+            // The list is what the page is for; the rest is upkeep.
+            header.app-bar {
+                h1 { "hashcards-web" }
+                nav.app-nav {
+                    @if config_available {
+                        a.nav-link href="/files" { "My cards" }
                     }
-                }
-            }
-            @if git_enabled {
-                div.sync-bar {
-                    span.sync-status {
-                        @if let Some(ts) = last_synced {
-                            (format!("Last synced: {}", ts.into_inner().format("%Y-%m-%d %H:%M:%S")))
-                        } @else {
-                            "Not yet synced"
-                        }
-                    }
-                    form action="/sync" method="post" style="display:inline" {
-                        input .sync-button.btn.btn-secondary type="submit" value="Sync Now";
-                    }
-                }
-            }
-            @if config_available {
-                div.sync-bar {
-                    span.sync-status {
-                        @if custom_decks.is_empty() {
-                            "No decks"
-                        } @else {
-                            (format!("{} deck(s)", custom_decks.len()))
-                        }
-                    }
-                    form action="/decks" method="get" style="display:inline" {
-                        input .sync-button.btn.btn-secondary type="submit" value="Manage Decks";
-                    }
-                }
-            }
-            @if !custom_decks.is_empty() {
-                h2 { "Decks" }
-                table.collection-table {
-                    tbody {
-                        @for (name, slug) in custom_decks {
-                            tr {
-                                td { (name) }
-                                td {
-                                    a.drill-link.btn.btn-primary href=(format!("/collection/{slug}")) {
-                                        "Open"
-                                    }
-                                }
-                            }
+                    @if signed_in_as.is_some() {
+                        // POST, so a third-party page cannot log the user out
+                        // by embedding the URL.
+                        form action="/auth/logout" method="post" {
+                            button.nav-link type="submit" { "Log out" }
                         }
                     }
                 }
             }
-            @if config_available {
-                div.sync-bar {
-                    span.sync-status {
-                        @if hedgedoc_count > 0 {
-                            @if let Some(ts) = hedgedoc_last_synced {
-                                (format!("HedgeDoc synced: {}", ts.into_inner().format("%Y-%m-%d %H:%M:%S")))
-                            } @else {
-                                (format!("{hedgedoc_count} HedgeDoc source(s) — not yet synced"))
-                            }
-                        } @else {
-                            "No sources"
-                        }
-                    }
-                    form action="/sources" method="get" style="display:inline" {
-                        input .sync-button.btn.btn-secondary type="submit" value="Manage sources";
-                    }
-                    form action="/files" method="get" style="display:inline" {
-                        input .sync-button.btn.btn-secondary type="submit" value="My Cards";
-                    }
-                }
+            @if let Some(line) = line {
+                p.app-status { (line) }
             }
-            @if collections.is_empty() {
+
+            @if rows.is_empty() {
                 p.empty { "No collections configured." }
             } @else {
-                table.collection-table {
-                    thead {
-                        tr {
-                            th { "Collection" }
-                            th { "Due Today" }
-                            th { "Total Cards" }
-                            th { "" }
-                        }
-                    }
-                    tbody {
-                        @for coll in collections {
-                            tr class=@if coll.due_today == 0 && !resume.contains_key(&coll.slug) { "muted" } {
-                                td { (coll.name.clone()) }
-                                td.num { (coll.due_today) }
-                                td.num { (coll.total_cards) }
-                                td {
-                                    @if let Some(remaining) = resume.get(&coll.slug) {
-                                        a.drill-link.btn.btn-primary href=(format!("/collection/{}", coll.slug)) {
-                                            (format!("Resume session ({remaining} cards remaining)"))
-                                        }
-                                    } @else if coll.due_today > 0 {
-                                        a.drill-link.btn.btn-primary href=(format!("/collection/{}", coll.slug)) {
-                                            "Drill"
-                                        }
-                                    } @else {
-                                        span.no-cards { "Nothing due" }
+                ul.drill-list {
+                    @for row in rows {
+                        // One `class` attribute: two would be emitted verbatim
+                        // and the browser would keep only the first.
+                        li class=(row_class(row, resume)) {
+                            div.drill-row-main {
+                                // The name opens the collection: topics,
+                                // stats, bookmarks, export. The button skips
+                                // all of it and starts drilling.
+                                a.drill-row-name href=(format!("/collection/{}", row.slug)) {
+                                    (row.name)
+                                    @if row.is_deck { span.row-tag { "deck" } }
+                                }
+                                div.drill-row-meta { (row_meta(&row.counts)) }
+                            }
+                            div.drill-row-action {
+                                @if let Some(remaining) = resume.get(&row.slug) {
+                                    a.btn.btn-primary href=(format!("/collection/{}", row.slug)) {
+                                        (format!("Resume ({remaining} left)"))
+                                    }
+                                } @else if row.counts.as_ref().is_some_and(|c| c.due_today > 0) {
+                                    // One tap into card one. Every topic, no
+                                    // limit — the choices live behind the name
+                                    // for the sessions that want them.
+                                    form action=(format!("/collection/{}/start", row.slug)) method="post" {
+                                        input type="hidden" name="all_topics" value="1";
+                                        input .btn.btn-primary type="submit" value="Drill";
                                     }
                                 }
                             }
                         }
                     }
+                }
+            }
+            @if config_available {
+                p.list-foot {
+                    a href="/decks" { "Decks \u{2192}" }
+                    span.row-sep { "\u{00b7}" }
+                    "a deck is a saved selection of topics from any of your collections"
                 }
             }
         }
@@ -285,18 +316,53 @@ fn render_landing_page(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cmd::serve::config::DeckMember;
+    use crate::cmd::serve::decks::slug_for_deck;
     use crate::error::Fallible;
 
-    /// BUG-45: counts older than the poll interval are stale; missing
-    /// counts are always stale.
-    #[test]
-    fn test_counts_are_stale() -> Fallible<()> {
-        let t0 = Timestamp::try_from("2026-01-01T10:00:00.000".to_string())?;
-        let t29 = Timestamp::try_from("2026-01-01T10:29:00.000".to_string())?;
-        let t30 = Timestamp::try_from("2026-01-01T10:30:00.000".to_string())?;
-        assert!(counts_are_stale(None, t0, 30));
-        assert!(!counts_are_stale(Some(t0), t29, 30));
-        assert!(counts_are_stale(Some(t0), t30, 30));
+    /// A deck the user saved must stay on the list even when its counts
+    /// cannot be worked out. It used to be logged and dropped, so a deck
+    /// whose member collection had stopped loading — a missing image is
+    /// enough — silently disappeared from the one page that lists it, with
+    /// nothing on screen to say anything had gone wrong.
+    #[tokio::test]
+    async fn a_deck_that_cannot_be_counted_is_still_listed() -> Fallible<()> {
+        use crate::cmd::serve::cards::CardRoot;
+        use crate::cmd::serve::cards::collection_id;
+        use crate::cmd::serve::state::test_support::state_with_data_dir;
+
+        let dir = tempfile::tempdir()?;
+        let data_dir = dir.path().to_path_buf();
+        let root = CardRoot::for_user(&data_dir, None)?;
+        let folder = root.path().join("Spanish");
+        std::fs::create_dir_all(&folder)?;
+        // The image does not exist, so loading the collection fails.
+        std::fs::write(folder.join("Verbs.md"), "Q: One\nA: ![](gone.png)\n")?;
+        std::fs::create_dir_all(data_dir.join("db"))?;
+        collection_id(&folder)?;
+
+        let state = state_with_data_dir(data_dir);
+        state.custom_decks.lock().push(ResolvedCustomDeck {
+            name: "Exam".to_string(),
+            slug: slug_for_deck("Exam", None),
+            owner: None,
+            members: vec![
+                DeckMember::parse("Spanish/Verbs")
+                    .ok_or_else(|| crate::error::ErrorReport::new("the member did not parse"))?,
+            ],
+        });
+
+        let (status, html) = landing_handler(State(state), Query(HashMap::new()), None).await;
+        assert_eq!(status, StatusCode::OK);
+        let html = html.0;
+        assert!(
+            html.contains("Exam"),
+            "the deck must still be listed: {html}"
+        );
+        assert!(
+            html.contains("Counts unavailable"),
+            "and must say why it has no counts: {html}"
+        );
         Ok(())
     }
 }

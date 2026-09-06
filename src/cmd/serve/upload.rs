@@ -4,9 +4,9 @@ use axum::extract::State;
 use axum::http::StatusCode;
 
 use crate::cmd::serve::auth::CurrentUser;
+use crate::cmd::serve::cards::CardRoot;
 use crate::cmd::serve::files::collection_folder;
 use crate::cmd::serve::files::user_root;
-use crate::cmd::serve::local::LocalRoot;
 use crate::cmd::serve::state::AppState;
 use crate::error::Fallible;
 use crate::error::fail;
@@ -54,7 +54,7 @@ pub fn sniff_image(bytes: &[u8]) -> Fallible<&'static str> {
 /// reaches the disk. The file goes in the *collection's* media folder and
 /// the returned path is collection-relative (`@/`), so a deck nested in a
 /// subfolder resolves it exactly as one at the top does.
-pub fn store_pasted_image(root: &LocalRoot, rel: &str, bytes: &[u8]) -> Fallible<String> {
+pub fn store_pasted_image(root: &CardRoot, rel: &str, bytes: &[u8]) -> Fallible<String> {
     if bytes.len() > MAX_UPLOAD_BYTES {
         return fail(format!(
             "That image is {} — the limit is 10 MB.",
@@ -129,9 +129,9 @@ mod tests {
         v
     }
 
-    fn fixture() -> Fallible<(std::path::PathBuf, LocalRoot)> {
+    fn fixture() -> Fallible<(std::path::PathBuf, CardRoot)> {
         let dir = create_tmp_directory()?;
-        let root = LocalRoot::for_user(&dir, None)?;
+        let root = CardRoot::for_user(&dir, None)?;
         std::fs::create_dir_all(root.path().join("Spanish"))?;
         std::fs::write(root.path().join("Spanish").join("verbs.md"), "Q: a\nA: b\n")?;
         Ok((dir, root))

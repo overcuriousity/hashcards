@@ -17,17 +17,16 @@ use crate::error::Fallible;
 use crate::error::fail;
 use crate::utils::ensure_dir;
 
-/// One user's writable markdown tree, at `{data_dir}/local/{user}`.
+/// One user's markdown tree, at `{data_dir}/cards/{user}`.
 ///
-/// Deliberately outside `{data_dir}/repo`: `clone_or_pull` may hard-update
-/// that directory and source sync overwrites the files it owns, so keeping
-/// user writing in a separate root makes "sync cannot clobber your work" a
-/// property of the layout rather than a rule to remember.
-pub struct LocalRoot {
+/// Every collection lives in one of these: a collection is a top-level
+/// folder here, discovered by reading the directory rather than declared in
+/// the config file, and owned by whoever the tree belongs to.
+pub struct CardRoot {
     root: PathBuf,
 }
 
-impl LocalRoot {
+impl CardRoot {
     /// The tree belonging to `owner`, creating it if absent. `None` is the
     /// shared `default` tree used when `[oidc]` is not configured.
     pub fn for_user(data_dir: &Path, owner: Option<&str>) -> Fallible<Self> {
@@ -142,23 +141,36 @@ pub struct ResolvedEntry {
 }
 
 /// Where `owner`'s tree lives, whether or not it exists yet.
+///
+/// The folder is named for the email, and then disambiguated by eight hex
+/// characters of its hash. The slug alone is not injective — `slugify` maps
+/// every character outside `[A-Za-z0-9._-]` to `-`, so `me+work@example.com`
+/// and `me-work@example.com` name the same folder — and which tree a
+/// collection sits in *is* who owns it: two identities sharing a tree would
+/// share every collection in it, every file in the file manager, and every
+/// review database. The slug is kept in front of the hash so that the
+/// directory is still recognisable to whoever administers the server.
 fn root_path(data_dir: &Path, owner: Option<&str>) -> Fallible<PathBuf> {
     let who = match owner {
-        Some(email) => slugify(&email.to_lowercase()),
+        Some(email) => {
+            let email = email.trim().to_lowercase();
+            if email.is_empty() {
+                return fail("Cannot open a local card folder: the owner name is empty.");
+            }
+            let digest = blake3::hash(email.as_bytes()).to_hex();
+            format!("{}-{}", slugify(&email), &digest[..8])
+        }
         None => "default".to_string(),
     };
-    if who.is_empty() {
-        return fail("Cannot open a local card folder: the owner name is empty.");
-    }
-    Ok(data_dir.join("local").join(who))
+    Ok(data_dir.join("cards").join(who))
 }
 
 /// Per-collection metadata file. Skipped by the parser (it is not `.md`)
 /// and hidden from the file manager.
-pub const LOCAL_META_FILE: &str = ".hashcards.toml";
+pub const COLLECTION_META_FILE: &str = ".hashcards.toml";
 
 #[derive(Deserialize, Serialize)]
-struct LocalMeta {
+struct CollectionMeta {
     id: String,
 }
 
@@ -172,9 +184,9 @@ pub fn collection_id(folder: &Path) -> Fallible<String> {
     if let Some(id) = existing_collection_id(folder)? {
         return Ok(id);
     }
-    let meta_path = folder.join(LOCAL_META_FILE);
+    let meta_path = folder.join(COLLECTION_META_FILE);
     let id = fresh_id(folder)?;
-    let meta = LocalMeta { id: id.clone() };
+    let meta = CollectionMeta { id: id.clone() };
     write(&meta_path, toml::to_string(&meta)?)?;
     Ok(id)
 }
@@ -203,12 +215,12 @@ pub enum IdPolicy {
 
 /// The id already recorded for `folder`, if any. Never writes.
 pub fn existing_collection_id(folder: &Path) -> Fallible<Option<String>> {
-    let meta_path = folder.join(LOCAL_META_FILE);
+    let meta_path = folder.join(COLLECTION_META_FILE);
     if !meta_path.exists() {
         return Ok(None);
     }
     let text = read_to_string(&meta_path)?;
-    let meta: LocalMeta = toml::from_str(&text)?;
+    let meta: CollectionMeta = toml::from_str(&text)?;
     if meta.id.is_empty() {
         return Ok(None);
     }
@@ -226,7 +238,7 @@ pub fn existing_collection_id(folder: &Path) -> Fallible<Option<String>> {
 /// visited in name order, so which of two names that slugify alike wins does
 /// not depend on the order the filesystem happened to list them in.
 pub fn discover_local_collections(
-    root: &LocalRoot,
+    root: &CardRoot,
     db_dir: &Path,
     owner: Option<&str>,
     policy: IdPolicy,
@@ -278,6 +290,39 @@ pub fn discover_local_collections(
     Ok(collections)
 }
 
+/// Every collection in every user's tree under `{data_dir}/cards`.
+///
+/// For startup-time work that must touch each review database once — the
+/// dangling-session sweep — and nothing else. `owner` is always `None`: a
+/// tree's directory name is a *slug* of an email, which no request can be
+/// matched against, so a collection from here must never be routed to.
+/// Every read path goes through `find_collection` instead.
+///
+/// `ExistingOnly`, so startup never writes an id into a user's tree: a
+/// folder with no id has no database either, and nothing to sweep.
+pub fn discover_all_collections(data_dir: &Path) -> Vec<ResolvedCollection> {
+    let trees_dir = data_dir.join("cards");
+    let db_dir = data_dir.join("db");
+    let entries = match read_dir(&trees_dir) {
+        Ok(entries) => entries,
+        // No tree yet is the ordinary state of a fresh install.
+        Err(_) => return Vec::new(),
+    };
+    let mut all = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() || path.is_symlink() {
+            continue;
+        }
+        let root = CardRoot { root: path };
+        match discover_local_collections(&root, &db_dir, None, IdPolicy::ExistingOnly) {
+            Ok(found) => all.extend(found),
+            Err(e) => log::warn!("Skipping the card tree at {}: {e}", root.path().display()),
+        }
+    }
+    all
+}
+
 /// The id of one folder under `policy`. `None` means "no id yet, and this
 /// caller may not create one".
 fn folder_id(path: &Path, policy: IdPolicy) -> Fallible<Option<String>> {
@@ -293,9 +338,9 @@ mod tests {
     use crate::helper::create_tmp_directory;
 
     /// `create_tmp_directory` returns a `PathBuf`, not a `TempDir`.
-    fn fixture() -> Fallible<(PathBuf, LocalRoot)> {
+    fn fixture() -> Fallible<(PathBuf, CardRoot)> {
         let dir = create_tmp_directory()?;
-        let root = LocalRoot::for_user(&dir, Some("Me@Example.com"))?;
+        let root = CardRoot::for_user(&dir, Some("Me@Example.com"))?;
         Ok((dir, root))
     }
 
@@ -326,15 +371,40 @@ mod tests {
     #[test]
     fn user_dir_is_slugified_and_lowercased() -> Fallible<()> {
         let (dir, root) = fixture()?;
-        assert_eq!(root.path(), dir.join("local").join("me-example.com"));
+        let expected = dir
+            .join("cards")
+            .join(format!("me-example.com-{}", digest_of("me@example.com")));
+        assert_eq!(root.path(), expected);
         Ok(())
+    }
+
+    /// Two emails that slugify alike must not share a tree. The tree a
+    /// collection sits in is who owns it, so a shared one would hand both
+    /// identities the same collections, the same files and the same review
+    /// databases.
+    #[test]
+    fn users_whose_emails_slugify_alike_get_separate_trees() -> Fallible<()> {
+        let dir = create_tmp_directory()?;
+        let plus = CardRoot::for_user(&dir, Some("me+work@example.com"))?;
+        let dash = CardRoot::for_user(&dir, Some("me-work@example.com"))?;
+        assert_ne!(plus.path(), dash.path());
+        // Case and surrounding space are still the same identity.
+        let upper = CardRoot::for_user(&dir, Some("  Me+Work@Example.com "))?;
+        assert_eq!(plus.path(), upper.path());
+        Ok(())
+    }
+
+    /// The eight hex characters `root_path` appends, for tests that spell
+    /// out the expected folder name.
+    fn digest_of(email: &str) -> String {
+        blake3::hash(email.as_bytes()).to_hex()[..8].to_string()
     }
 
     #[test]
     fn anonymous_user_gets_the_default_tree() -> Fallible<()> {
         let dir = create_tmp_directory()?;
-        let root = LocalRoot::for_user(&dir, None)?;
-        assert_eq!(root.path(), dir.join("local").join("default"));
+        let root = CardRoot::for_user(&dir, None)?;
+        assert_eq!(root.path(), dir.join("cards").join("default"));
         Ok(())
     }
 
@@ -404,7 +474,7 @@ mod tests {
         let second = collection_id(&folder)?;
         assert_eq!(first, second);
         assert_eq!(first.len(), 8);
-        assert!(folder.join(LOCAL_META_FILE).exists());
+        assert!(folder.join(COLLECTION_META_FILE).exists());
         Ok(())
     }
 
@@ -476,7 +546,7 @@ mod tests {
         let (dir, root) = fixture()?;
         let broken = root.path().join("Spanish");
         std::fs::create_dir_all(&broken)?;
-        std::fs::write(broken.join(LOCAL_META_FILE), "this is not toml {{{")?;
+        std::fs::write(broken.join(COLLECTION_META_FILE), "this is not toml {{{")?;
         std::fs::create_dir_all(root.path().join("Medicine"))?;
 
         let found =
@@ -495,7 +565,10 @@ mod tests {
         let found =
             discover_local_collections(&root, &dir.join("db"), None, IdPolicy::ExistingOnly)?;
         assert!(found.is_empty(), "a folder with no id yet must be skipped");
-        assert!(!folder.join(LOCAL_META_FILE).exists(), "read path wrote");
+        assert!(
+            !folder.join(COLLECTION_META_FILE).exists(),
+            "read path wrote"
+        );
         Ok(())
     }
 
@@ -520,7 +593,7 @@ mod tests {
     #[test]
     fn opening_a_tree_does_not_create_it() -> Fallible<()> {
         let dir = create_tmp_directory()?;
-        let root = LocalRoot::open(&dir, Some("me@example.com"))?;
+        let root = CardRoot::open(&dir, Some("me@example.com"))?;
         assert!(!root.path().exists());
         Ok(())
     }
