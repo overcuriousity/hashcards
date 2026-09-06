@@ -32,6 +32,7 @@ use crate::cmd::serve::files_ui::render_preview;
 use crate::cmd::serve::files_ui::render_tree_page;
 use crate::cmd::serve::href::encoded_path;
 use crate::cmd::serve::state::AppState;
+use crate::cmd::serve::state::sessions_touching;
 use crate::cmd::serve::upload::MEDIA_DIR;
 use crate::db::Database;
 use crate::error::Fallible;
@@ -478,7 +479,7 @@ fn rename_entry(
     }
     // Renaming a deck rewrites nothing, but renaming its *collection* moves
     // the folder a live session is reading its cards and its database from.
-    refuse_if_drilling(state, &from_rel)?;
+    refuse_if_drilling(state, &root, &from_rel)?;
     let mut name = validate_name(&form.name)?;
     if from.is_file() && !name.ends_with(".md") {
         name.push_str(".md");
@@ -520,7 +521,7 @@ fn delete_entry(
     // its grades to the collection's database. Deleting either underneath it
     // strands those grades — the database file is unlinked while the session
     // still holds it open — so the same guard `save_file` uses applies here.
-    refuse_if_drilling(state, &rel)?;
+    refuse_if_drilling(state, &root, &rel)?;
     if target.is_dir() {
         let is_collection_root = !rel.contains('/');
         // `media` does not make a collection count as non-empty, and it is
@@ -655,45 +656,37 @@ fn parse_buffer_at(rel: &str, file_path: &Path, content: &str) -> Fallible<Parse
     Ok(parser.parse_with_duplicates(body)?)
 }
 
-/// The URL slug of the collection the local file at `rel` belongs to.
+/// The folder of the collection a normalized path belongs to, if it belongs
+/// to one.
 ///
-/// Derived exactly as `discover_local_collections` derives it, so the slug
-/// used to look for an active drill session is the one that session is
-/// keyed by.
-fn collection_slug_for(rel: &str) -> Fallible<String> {
-    match rel.trim_matches('/').split('/').next() {
-        Some(top) if !top.is_empty() && rel.trim_matches('/').contains('/') => Ok(slugify(top)),
-        _ => fail(LOOSE_FILE),
-    }
-}
-
-/// The slug of the collection a local path belongs to, if it belongs to one.
-///
-/// Unlike `collection_slug_for`, the path may *be* the collection folder:
+/// Unlike `collection_folder`, the path may *be* the collection folder:
 /// deleting or renaming a collection touches its cards just as much as
 /// editing one of them does. A loose file in the root belongs to no
 /// collection, so nothing can be drilling it.
-fn owning_collection_slug(rel: &str) -> Option<String> {
-    rel.split('/').next().filter(|t| !t.is_empty()).map(slugify)
+fn owning_collection_folder(root: &CardRoot, rel: &str) -> Option<PathBuf> {
+    let top = rel.split('/').next().filter(|t| !t.is_empty())?;
+    let folder = root.resolve(top).ok()?;
+    folder.is_dir().then_some(folder)
 }
 
 /// Refuse a change to a collection somebody is drilling right now.
 ///
-/// `rel` must already be normalized: the session is keyed by the slug
-/// `discover_local_collections` derives from the top-level folder, and a
-/// path that names that folder differently would look like a different
-/// collection and slip past the guard entirely.
-fn refuse_if_drilling(state: &AppState, rel: &str) -> Fallible<()> {
-    let slug = match owning_collection_slug(rel) {
-        Some(slug) => slug,
-        None => return Ok(()),
+/// Migration handles *edits*; it cannot handle a collection or file that
+/// stopped existing. A session cannot be re-keyed onto cards that are gone,
+/// and deleting a collection unlinks the database the session still holds
+/// open, so every grade it writes after that goes to a file nothing can
+/// read back.
+///
+/// `rel` must already be normalized, so that where the file is and which
+/// collection owns it are answered from the same string.
+fn refuse_if_drilling(state: &AppState, root: &CardRoot, rel: &str) -> Fallible<()> {
+    let Some(folder) = owning_collection_folder(root, rel) else {
+        return Ok(());
     };
-    if state.sessions.lock().contains_key(&slug) {
-        return fail(
-            "A drill session is active on this collection. End it before changing its files.",
-        );
+    if sessions_touching(state, &folder).is_empty() {
+        return Ok(());
     }
-    Ok(())
+    fail("A drill session is using this collection's cards. End it before changing its files.")
 }
 
 #[derive(Deserialize)]
@@ -819,8 +812,8 @@ fn save_file(
     // A live session drills the cards it cached when it started. Rewriting
     // their hashes underneath it strands the grades it is about to write —
     // the same reason `edit_post_inner` refuses a card edit mid-session.
-    let slug = collection_slug_for(rel)?;
-    if state.sessions.lock().contains_key(&slug) {
+    let coll_dir = collection_folder(&root, rel)?;
+    if !sessions_touching(state, &coll_dir).is_empty() {
         return fail("A drill session is active on this collection. End it before editing.");
     }
 
@@ -854,7 +847,6 @@ fn save_file(
         None => return fail("No data directory is configured."),
     };
     ensure_dir(&db_dir, "review database directory")?;
-    let coll_dir = collection_folder(&root, rel)?;
     let db_path = db_path_for(&coll_dir, &db_dir)?;
     // `Database::new` takes a &str; a non-UTF-8 data directory cannot be
     // named to SQLite at all, so say so rather than lossily converting.
@@ -1455,6 +1447,125 @@ mod tests {
             mutable,
         )));
         state.sessions.lock().insert(slug.to_string(), session);
+        Ok(())
+    }
+
+    /// Start a session keyed by `deck_slug` that draws its cards from
+    /// `folder` — the shape a custom-deck drill has. `SessionDb.source`
+    /// carries the collection, which is the only place that fact is
+    /// recorded: the sessions map is keyed by the deck's own slug.
+    fn start_deck_session(
+        state: &AppState,
+        data_dir: &Path,
+        folder: &Path,
+        deck_slug: &str,
+    ) -> Fallible<()> {
+        use crate::cmd::drill::render::AnswerControls;
+        use crate::cmd::drill::state::MutableState;
+        use crate::cmd::drill::state::SessionDb;
+        use crate::cmd::drill::state::SessionDbs;
+        use crate::cmd::drill::state::SessionSource;
+        use crate::cmd::serve::state::DrillSession;
+        use crate::rng::TinyRng;
+        use crate::types::performance::Jitter;
+
+        let db_dir = data_dir.join("db");
+        ensure_dir(&db_dir, "review database directory")?;
+        let db_path = db_path_for(folder, &db_dir)?;
+        let db_str = match db_path.to_str() {
+            Some(p) => p,
+            None => return fail("temp path is not UTF-8"),
+        };
+        let started_at = Timestamp::now();
+        let db = Database::new(db_str)?;
+        let session_id = db.create_session(started_at)?;
+        let dbs = SessionDbs::routed(
+            vec![SessionDb {
+                db,
+                session_id,
+                source: Some(SessionSource {
+                    coll_dir: folder.to_path_buf(),
+                    file_url_prefix: format!("/collection/{deck_slug}/file"),
+                }),
+            }],
+            std::collections::HashMap::new(),
+        );
+        let mutable = MutableState::new(
+            dbs,
+            crate::cmd::drill::cache::Cache::new(),
+            Vec::new(),
+            Jitter::none(),
+            TinyRng::from_seed(1),
+        );
+        let session = std::sync::Arc::new(parking_lot::Mutex::new(DrillSession::new(
+            // A deck session's own directory is not any one collection's.
+            data_dir.to_path_buf(),
+            Vec::new(),
+            started_at,
+            AnswerControls::Full,
+            mutable,
+        )));
+        state.sessions.lock().insert(deck_slug.to_string(), session);
+        Ok(())
+    }
+
+    /// A custom-deck session is keyed by the deck's slug, not the
+    /// collection's, so the guard that looked the collection slug up in the
+    /// sessions map never saw it: deleting the collection unlinked the
+    /// database that session still held open.
+    #[test]
+    fn a_delete_is_refused_while_a_custom_deck_session_uses_the_collection() -> Fallible<()> {
+        let dir = create_tmp_directory()?;
+        let state = state_for(&dir);
+        let root = user_root(&state, None)?;
+        // Emptied of cards, so a folder that still holds files is not what
+        // refuses the delete: only the running session can.
+        let folder = root.path().join("Spanish");
+        std::fs::create_dir_all(&folder)?;
+        collection_id(&folder)?;
+
+        start_deck_session(&state, &dir, &folder, "deck-exam-0badc0de")?;
+
+        assert!(
+            delete_entry(
+                &state,
+                None,
+                &DeleteForm {
+                    path: "Spanish".to_string(),
+                },
+            )
+            .is_err(),
+            "a deck session drawing on this collection must block the delete"
+        );
+        assert!(folder.exists());
+        Ok(())
+    }
+
+    /// Same bug, same shape, on the rename path.
+    #[test]
+    fn a_rename_is_refused_while_a_custom_deck_session_uses_the_collection() -> Fallible<()> {
+        let dir = create_tmp_directory()?;
+        let state = state_for(&dir);
+        let root = user_root(&state, None)?;
+        let folder = root.path().join("Spanish");
+        std::fs::create_dir_all(&folder)?;
+        std::fs::write(folder.join("verbs.md"), "Q: the cat\nA: el gato\n")?;
+
+        start_deck_session(&state, &dir, &folder, "deck-exam-0badc0de")?;
+
+        assert!(
+            rename_entry(
+                &state,
+                None,
+                &RenameForm {
+                    path: "Spanish".to_string(),
+                    name: "Espanol".to_string(),
+                },
+            )
+            .is_err(),
+            "a deck session drawing on this collection must block the rename"
+        );
+        assert!(folder.exists());
         Ok(())
     }
 

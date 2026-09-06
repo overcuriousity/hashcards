@@ -19,6 +19,7 @@ use crate::cmd::run_blocking;
 use crate::cmd::serve::auth::CurrentUser;
 use crate::cmd::serve::handlers::find_collection;
 use crate::cmd::serve::state::AppState;
+use crate::cmd::serve::state::sessions_touching;
 use crate::db::Database;
 use crate::error::ErrorReport;
 use crate::error::Fallible;
@@ -73,7 +74,7 @@ fn edit_get_inner(
         .display()
         .to_string();
 
-    let active_session = state.sessions.lock().contains_key(slug);
+    let active_session = !sessions_touching(state, &coll_dir).is_empty();
     let html = render_edit_form(
         &rc.name,
         slug,
@@ -194,12 +195,11 @@ fn edit_post_inner(
     let rc = find_collection(state, slug, owner)
         .ok_or_else(|| ErrorReport::new(format!("Unknown collection: {slug}")))?;
 
-    if state.sessions.lock().contains_key(slug) {
-        return fail("A drill session is active. End it before editing.");
-    }
-
     let hash = CardHash::from_hex(hash_hex)?;
     let coll_dir = rc.coll_dir.canonicalize()?;
+    if !sessions_touching(state, &coll_dir).is_empty() {
+        return fail("A drill session is active. End it before editing.");
+    }
     let cards = parse_deck(&coll_dir)?.cards;
     let card = find_card_by_hash(&cards, hash)?;
 

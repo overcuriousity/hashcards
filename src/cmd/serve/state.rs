@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -159,6 +160,58 @@ pub fn evict_idle_sessions(
         evicted.push(slug);
     }
     evicted
+}
+
+/// Every live session drawing cards from `coll_dir`.
+///
+/// Answered from the sessions themselves rather than from deck
+/// configuration: a session holds what it actually loaded when it started,
+/// which is the question being asked, and the configuration may have moved
+/// since. It also closes a bug at its root — sessions are keyed by slug and
+/// a custom deck has its own slug, so looking the *collection's* slug up in
+/// the map misses a running deck session that includes it.
+///
+/// A session drawing on several collections records each one in its
+/// `SessionDb.source`. A single-collection session leaves every `source` as
+/// `None` and is identified by its own directory instead.
+///
+/// Follows the map-then-session lock order: the map lock is released before
+/// any session lock is taken.
+pub fn sessions_touching(state: &AppState, coll_dir: &Path) -> Vec<SharedSession> {
+    let candidates: Vec<SharedSession> = state.sessions.lock().values().cloned().collect();
+    candidates
+        .into_iter()
+        .filter(|shared| {
+            let session = shared.lock();
+            if session.is_detached() {
+                return false;
+            }
+            let mut routed = false;
+            for entry in session.mutable.dbs.all() {
+                if let Some(source) = &entry.source {
+                    routed = true;
+                    if same_dir(&source.coll_dir, coll_dir) {
+                        return true;
+                    }
+                }
+            }
+            !routed && same_dir(&session.directory, coll_dir)
+        })
+        .collect()
+}
+
+/// Whether two paths name the same directory.
+///
+/// Canonicalized first: one caller has the path the collection was
+/// discovered at and another has it after `canonicalize`, and a symlinked
+/// or `..`-bearing spelling of the same directory must not read as a
+/// different collection. A path that cannot be canonicalized — it was just
+/// deleted, say — falls back to a literal comparison.
+fn same_dir(a: &Path, b: &Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    }
 }
 
 /// Test-only constructor for `AppState`.
