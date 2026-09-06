@@ -11,7 +11,6 @@ use tokio::sync::RwLock;
 use crate::cmd::drill::render::AnswerControls;
 use crate::cmd::drill::state::MutableState;
 use crate::cmd::serve::auth::OidcRuntime;
-use crate::cmd::serve::config::ResolvedCollection;
 use crate::cmd::serve::config::ResolvedServeConfig;
 use crate::cmd::serve::decks::ResolvedCustomDeck;
 use crate::types::timestamp::Timestamp;
@@ -27,13 +26,11 @@ pub struct AppState {
     pub config: Arc<ResolvedServeConfig>,
     pub collections: Arc<RwLock<Vec<CollectionInfo>>>,
     pub sessions: Arc<Mutex<HashMap<String, SharedSession>>>,
-    pub hedgedoc_sources: Arc<Mutex<Vec<HedgedocSource>>>,
     /// User-assembled cross-collection decks, resolved at startup and
     /// refreshed whenever one is added or deleted. A `parking_lot` mutex
-    /// like `hedgedoc_sources`: these are read from the blocking drill
+    /// rather than an async one: these are read from the blocking drill
     /// paths, not only from async handlers.
     pub custom_decks: Arc<Mutex<Vec<ResolvedCustomDeck>>>,
-    pub hedgedoc_last_synced: Arc<Mutex<Option<Timestamp>>>,
     pub config_path: Arc<Mutex<Option<PathBuf>>>,
     /// When the collection counts were last recomputed (BUG-45).
     pub counts_refreshed_at: Arc<Mutex<Option<Timestamp>>>,
@@ -67,28 +64,6 @@ pub struct CollectionInfo {
     pub total_cards: usize,
     pub due_today: usize,
     pub owner: Option<String>,
-}
-
-/// A single HedgeDoc note, used as a collection of its own.
-///
-/// Notes are deliberately *not* grouped by HedgeDoc host. Grouping made the
-/// host's first-seen `owner` the owner of every note on it, so on a shared
-/// HedgeDoc instance one user's note landed in another user's collection.
-/// One note, one collection, one database, one owner.
-#[derive(Clone)]
-pub struct HedgedocSource {
-    /// The scheme/host/port the note lives on. Display only.
-    pub source_uri: String,
-    pub collection: ResolvedCollection,
-    pub note: HedgedocNote,
-}
-
-#[derive(Clone)]
-pub struct HedgedocNote {
-    pub url: String,
-    pub deck_name: String,
-    pub file_name: String,
-    pub last_error: Option<String>,
 }
 
 pub struct DrillSession {
@@ -200,7 +175,7 @@ pub mod test_support {
     use crate::cmd::serve::config::ResolvedServeConfig;
 
     /// An `AppState` serving exactly `collections`, with no git remote, no
-    /// HedgeDoc sources, and no OIDC runtime.
+    /// and no OIDC runtime.
     pub fn state_with_collections(collections: Vec<ResolvedCollection>) -> AppState {
         state_with_config(ResolvedServeConfig {
             host: "127.0.0.1".to_string(),
@@ -209,7 +184,6 @@ pub mod test_support {
             collections,
             data_dir: None,
             config_path: None,
-            hedgedoc_entries: Vec::new(),
             custom_decks: Vec::new(),
             session_timeout_minutes: 1440,
             oidc: None,
@@ -229,7 +203,6 @@ pub mod test_support {
             collections,
             data_dir: Some(data_dir),
             config_path: None,
-            hedgedoc_entries: Vec::new(),
             custom_decks: Vec::new(),
             session_timeout_minutes: 1440,
             oidc: None,
@@ -240,19 +213,17 @@ pub mod test_support {
     ///
     /// `config_path` is taken from the config rather than left empty, so a
     /// test that passes a config recording where it was loaded from gets a
-    /// state that agrees with it. `hedgedoc_sources` and `custom_decks`
-    /// stay empty: the config holds *entries*, which the real startup path
-    /// turns into sources and resolved decks by fetching notes and reading
-    /// collections. A test needing those must build them itself.
+    /// state that agrees with it. `custom_decks` stays empty: the config
+    /// holds *entries*, which the real startup path turns into resolved
+    /// decks by reading collections. A test needing those must build them
+    /// itself.
     pub fn state_with_config(config: ResolvedServeConfig) -> AppState {
         let config_path = config.config_path.clone();
         AppState {
             config: Arc::new(config),
             collections: Arc::new(RwLock::new(Vec::new())),
             sessions: Arc::new(Mutex::new(HashMap::new())),
-            hedgedoc_sources: Arc::new(Mutex::new(Vec::new())),
             custom_decks: Arc::new(Mutex::new(Vec::new())),
-            hedgedoc_last_synced: Arc::new(Mutex::new(None)),
             config_path: Arc::new(Mutex::new(config_path)),
             counts_refreshed_at: Arc::new(Mutex::new(None)),
             interrupted_closed: Arc::new(Mutex::new(HashMap::new())),

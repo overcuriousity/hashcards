@@ -45,7 +45,7 @@ pub struct ResolvedCustomDeck {
 ///
 /// Keyed by (owner, name) so two users may each have a deck called
 /// "Exam revision" without colliding, and prefixed `deck-` so a custom deck
-/// can never be confused with a collection or a HedgeDoc note.
+/// can never be confused with a collection.
 pub fn slug_for_deck(name: &str, owner: Option<&str>) -> String {
     let stem = slugify(name);
     let stem = if stem.is_empty() {
@@ -311,7 +311,7 @@ pub(super) fn render_decks_page(
 }
 
 /// Every collection `owner` can put in a custom deck: configured ones,
-/// their HedgeDoc and git sources, and their own local card folders.
+/// their own card folders.
 ///
 /// One list for the picker and for the ownership check, so a collection can
 /// never be offered on `/decks` and then refused when it is chosen.
@@ -324,15 +324,8 @@ fn owned_collections(state: &AppState, owner: Option<&str>) -> Vec<ResolvedColle
         .iter()
         .filter(|c| c.owner.as_deref() == owner)
         .cloned();
-    let hedgedoc: Vec<ResolvedCollection> = state
-        .hedgedoc_sources
-        .lock()
-        .iter()
-        .filter(|s| s.collection.owner.as_deref() == owner)
-        .map(|s| s.collection.clone())
-        .collect();
     let local = local_collections_for(state, current_user_for(owner).as_ref());
-    configured.chain(hedgedoc).chain(local).collect()
+    configured.chain(local).collect()
 }
 
 // ---- HTTP handlers ----
@@ -474,8 +467,7 @@ pub async fn deck_add_handler(
     };
 
     // Duplicate check, mutation and persist under one lock, so concurrent
-    // adds cannot write a config missing each other's decks (as BUG-39 did
-    // for HedgeDoc sources).
+    // adds cannot write a config missing each other's decks (BUG-39).
     let decks_arc = state.custom_decks.clone();
     let collections = state.config.collections.clone();
     let persisted = tokio::task::spawn_blocking(move || {

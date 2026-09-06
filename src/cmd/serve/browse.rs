@@ -7,7 +7,6 @@ use maud::Markup;
 use maud::html;
 
 use crate::cmd::drill::template::page_template;
-use crate::cmd::serve::href::safe_href;
 use crate::collection::Collection;
 use crate::error::Fallible;
 use crate::flash::Flash;
@@ -192,13 +191,10 @@ fn duplicates_summary(count: usize) -> String {
 /// The list page drills a collection in one tap, so this page is no longer a
 /// gate on the way in — it is where you come to drill part of a collection,
 /// or to look at what is in it.
-/// `hedge_urls` maps topic name to the original HedgeDoc note URL, for collections
-/// backed by HedgeDoc. Pass an empty map for file-based collections.
 pub fn render_browse_page(
     collection_name: &str,
     slug: &str,
     browse: &BrowseData,
-    hedge_urls: &HashMap<String, String>,
     bookmark_count: usize,
     interrupted_sessions_closed: usize,
     flash: Option<Flash>,
@@ -240,7 +236,7 @@ pub fn render_browse_page(
                 form action=(format!("/collection/{slug}/start")) method="post" {
                     div.deck-tree {
                         @for child in &tree.children {
-                            (render_deck_node(child, 0, hedge_urls))
+                            (render_deck_node(child, 0))
                         }
                     }
                     div.browse-controls {
@@ -288,16 +284,10 @@ pub fn render_browse_page(
     })
 }
 
-fn render_deck_node(node: &DeckNode, depth: usize, hedge_urls: &HashMap<String, String>) -> Markup {
+fn render_deck_node(node: &DeckNode, depth: usize) -> Markup {
     let total = node.total_cards_recursive();
     let due = node.due_today_recursive();
     let has_children = !node.children.is_empty();
-    let edit_url = if !has_children {
-        hedge_urls.get(&node.path).and_then(|url| safe_href(url))
-    } else {
-        None
-    };
-
     html! {
         div.deck-node {
             div.deck-row style=(format!("padding-left: {}px", depth * 24)) {
@@ -331,14 +321,11 @@ fn render_deck_node(node: &DeckNode, depth: usize, hedge_urls: &HashMap<String, 
                     " / "
                     span.deck-total { (total) }
                 }
-                @if let Some(url) = edit_url {
-                    a.edit-link href=(url) target="_blank" rel="noopener noreferrer" { "Edit \u{2197}" }
-                }
             }
             @if has_children {
                 div.deck-children {
                     @for child in &node.children {
-                        (render_deck_node(child, depth + 1, hedge_urls))
+                        (render_deck_node(child, depth + 1))
                     }
                 }
             }
@@ -418,37 +405,6 @@ mod tests {
     use super::*;
     use crate::helper::create_tmp_directory;
 
-    #[test]
-    fn browse_page_never_links_unsafe_edit_urls() {
-        // Regression test for BUG-24 (render-time guard on edit links).
-        let tree = DeckNode {
-            name: String::new(),
-            path: String::new(),
-            total_cards: 0,
-            due_today: 0,
-            children: vec![DeckNode {
-                name: "deck".to_string(),
-                path: "deck".to_string(),
-                total_cards: 1,
-                due_today: 1,
-                children: vec![],
-            }],
-        };
-        let mut hedge_urls: HashMap<String, String> = HashMap::new();
-        hedge_urls.insert("deck".to_string(), "javascript:alert(1)".to_string());
-        let browse = BrowseData {
-            tree,
-            duplicates: Vec::new(),
-            coll_dir: PathBuf::new(),
-        };
-        let html =
-            render_browse_page("Coll", "coll", &browse, &hedge_urls, 0, 0, None).into_string();
-        assert!(
-            !html.contains(r#"href="javascript:"#),
-            "unsafe scheme must not become an edit link: {html}"
-        );
-    }
-
     /// Byte-identical cards are silently deduplicated at load time, so one
     /// copy's review history is the one that counts. The drill CLI warned
     /// about that on stderr; with the CLI gone the browse page is the only
@@ -467,8 +423,7 @@ mod tests {
             "the two identical cards must be reported as one duplicate"
         );
 
-        let html =
-            render_browse_page("Coll", "coll", &browse, &HashMap::new(), 0, 0, None).into_string();
+        let html = render_browse_page("Coll", "coll", &browse, 0, 0, None).into_string();
         assert!(
             html.contains("duplicate card"),
             "the duplicate must be named on the page: {html}"
@@ -511,8 +466,7 @@ mod tests {
             duplicates: Vec::new(),
             coll_dir: PathBuf::new(),
         };
-        let html =
-            render_browse_page("Coll", "coll", &browse, &HashMap::new(), 0, 0, None).into_string();
+        let html = render_browse_page("Coll", "coll", &browse, 0, 0, None).into_string();
         assert!(
             html.contains(r#"class="deck-due muted""#),
             "a topic with nothing due must be dimmed: {html}"
@@ -553,8 +507,7 @@ mod tests {
             duplicates: Vec::new(),
             coll_dir: PathBuf::new(),
         };
-        let html =
-            render_browse_page("Coll", "coll", &browse, &HashMap::new(), 0, 0, None).into_string();
+        let html = render_browse_page("Coll", "coll", &browse, 0, 0, None).into_string();
         assert!(!html.contains("duplicate"), "html: {html}");
     }
 }

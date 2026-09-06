@@ -24,34 +24,8 @@ pub struct ServeConfig {
     pub oidc: Option<OidcSection>,
     #[serde(rename = "collection", default)]
     pub collections: Vec<CollectionEntry>,
-    #[serde(rename = "source", default)]
-    pub sources: Vec<SourceEntry>,
-    /// Deprecated spelling of `[[source]]`, still accepted so existing
-    /// config files keep working. New entries are written as `[[source]]`.
-    #[serde(rename = "hedgedoc", default)]
-    pub hedgedoc: Vec<SourceEntry>,
     #[serde(rename = "deck", default)]
     pub decks: Vec<CustomDeckEntry>,
-}
-
-/// One remote markdown document drilled as its own collection: a HedgeDoc
-/// note or a file in a git repository. Which of the two is re-derived from
-/// the URL at load time, never stored.
-#[derive(Deserialize, Serialize, Clone)]
-pub struct SourceEntry {
-    pub url: String,
-    #[serde(default)]
-    pub owner: Option<String>,
-}
-
-impl ServeConfig {
-    /// Every configured remote source, from both the current `[[source]]`
-    /// spelling and the deprecated `[[hedgedoc]]` one.
-    pub fn source_entries(&self) -> Vec<SourceEntry> {
-        let mut entries = self.sources.clone();
-        entries.extend(self.hedgedoc.iter().cloned());
-        entries
-    }
 }
 
 /// A user-assembled deck: a named selection of decks drawn from any of the
@@ -258,8 +232,6 @@ pub struct ResolvedServeConfig {
     pub data_dir: Option<PathBuf>,
     /// Config file path; needed to persist UI changes back to disk.
     pub config_path: Option<PathBuf>,
-    /// Remote source URLs loaded from the config file.
-    pub hedgedoc_entries: Vec<SourceEntry>,
     /// User-assembled cross-collection decks loaded from the config file.
     pub custom_decks: Vec<CustomDeckEntry>,
     /// Idle drill sessions are evicted after this many minutes (0 = never).
@@ -299,9 +271,6 @@ impl ResolvedServeConfig {
         };
         let repo_dir = data_dir.join("repo");
         let db_dir = data_dir.join("db");
-
-        // Read before the `[oidc]` match below partially moves `config`.
-        let configured_sources = config.source_entries();
 
         let collections = config
             .collections
@@ -384,16 +353,6 @@ impl ResolvedServeConfig {
             }
         };
 
-        // Source owners are matched against the lowercased email claim just
-        // like collection owners, so they are normalized the same way.
-        let hedgedoc_entries: Vec<SourceEntry> = configured_sources
-            .iter()
-            .map(|h| SourceEntry {
-                url: h.url.clone(),
-                owner: h.owner.as_ref().map(|o| o.to_lowercase()),
-            })
-            .collect();
-
         let custom_decks: Vec<CustomDeckEntry> = config
             .decks
             .iter()
@@ -428,15 +387,6 @@ impl ResolvedServeConfig {
                     ));
                 }
             }
-            for h in &hedgedoc_entries {
-                if h.owner.is_none() {
-                    return fail(format!(
-                        "configuration error: [oidc] is enabled, so every [[hedgedoc]] entry \
-                         must declare an `owner`, but the entry for '{}' has none",
-                        h.url
-                    ));
-                }
-            }
             for d in &custom_decks {
                 if d.owner.is_none() {
                     return fail(format!(
@@ -466,14 +416,6 @@ impl ResolvedServeConfig {
                     d.name
                 ));
             }
-            if let Some(h) = hedgedoc_entries.iter().find(|h| h.owner.is_some()) {
-                return fail(format!(
-                    "configuration error: the [[hedgedoc]] entry for '{}' declares an `owner`, \
-                     but [oidc] is not configured, so nobody is ever logged in and the note \
-                     would be unreachable. Add an [oidc] section or remove the `owner`",
-                    h.url
-                ));
-            }
         }
 
         Ok(Self {
@@ -483,7 +425,6 @@ impl ResolvedServeConfig {
             collections,
             data_dir: Some(data_dir),
             config_path: None,
-            hedgedoc_entries,
             custom_decks,
             session_timeout_minutes: config.server.session_timeout_minutes,
             oidc,
@@ -496,7 +437,7 @@ impl ResolvedServeConfig {
     }
 
     /// Build a config that serves `directories` directly, with no git
-    /// remote, no HedgeDoc sources and no owners.
+    /// remote and no owners.
     ///
     /// Test-only: the server requires a config file, so there is no
     /// production path that reaches this. It survives because most serve
@@ -539,7 +480,6 @@ impl ResolvedServeConfig {
             collections,
             data_dir: None,
             config_path: None,
-            hedgedoc_entries: Vec::new(),
             custom_decks: Vec::new(),
             session_timeout_minutes: default_session_timeout_minutes(),
             oidc: None,
@@ -552,25 +492,6 @@ mod tests {
     use super::*;
     use crate::error::ErrorReport;
     use crate::error::Fallible;
-
-    #[test]
-    fn source_and_hedgedoc_arrays_both_parse() {
-        let toml_text = r#"
-            [server]
-            data_dir = "/tmp/hc"
-
-            [[source]]
-            url = "https://github.com/me/cards/blob/main/a.md"
-
-            [[hedgedoc]]
-            url = "https://notes.example.com/abc123"
-        "#;
-        let parsed: ServeConfig = toml::from_str(toml_text).unwrap();
-        let entries = parsed.source_entries();
-        assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].url, "https://github.com/me/cards/blob/main/a.md");
-        assert_eq!(entries[1].url, "https://notes.example.com/abc123");
-    }
 
     /// Regression test for BUG-47: with no `host` key in the config, the
     /// server must bind to localhost, not to all interfaces.
@@ -860,33 +781,6 @@ path = "beta"
         Ok(())
     }
 
-    /// `[[hedgedoc]]` owners are lowercased just like collection owners, so a
-    /// config written with mixed case still matches the OIDC email claim.
-    #[test]
-    fn test_hedgedoc_owner_is_lowercased() -> Fallible<()> {
-        let data_dir = current_dir()?.join("var-lib-hashcards-hedgedoc-owner-case-test");
-        let toml_str = format!(
-            "[server]\ndata_dir = {:?}\n\n\
-             [oidc]\n\
-             issuer_url = \"https://idp.example.com\"\n\
-             client_id = \"abc\"\n\
-             client_secret = \"secret\"\n\
-             external_url = \"https://hashcards.example.com\"\n\
-             session_secret = \"a-very-long-random-session-secret-value\"\n\n\
-             [[hedgedoc]]\n\
-             url = \"https://pad.example.com/abc\"\n\
-             owner = \"Me@Example.com\"\n",
-            data_dir
-        );
-        let config: ServeConfig = toml::from_str(&toml_str)?;
-        let resolved = ResolvedServeConfig::from_toml(config)?;
-        assert_eq!(
-            resolved.hedgedoc_entries[0].owner.as_deref(),
-            Some("me@example.com")
-        );
-        Ok(())
-    }
-
     /// Windows CI regression: `data_dir` is interpolated into TOML with
     /// `{:?}`, not `{}`, so a path containing backslashes stays a valid TOML
     /// basic string. Formatting it raw produced `data_dir = "D:\a\..."`,
@@ -930,7 +824,7 @@ path = "beta"
     }
 
     /// With `[oidc]` on, every deck needs an owner, exactly like collections
-    /// and HedgeDoc notes.
+    /// do.
     #[test]
     fn test_oidc_requires_owner_on_every_deck() -> Fallible<()> {
         let data_dir = current_dir()?.join("var-lib-hashcards-deck-owner-test");

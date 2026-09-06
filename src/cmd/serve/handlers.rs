@@ -40,20 +40,10 @@ use crate::cmd::serve::auth::CurrentUser;
 use crate::cmd::serve::browse::build_deck_tree;
 use crate::cmd::serve::browse::render_browse_page;
 use crate::cmd::serve::config::ResolvedCollection;
+use crate::cmd::serve::counts::refresh_collection_info;
 use crate::cmd::serve::decks::ResolvedCustomDeck;
 use crate::cmd::serve::decks::find_custom_deck;
 use crate::cmd::serve::files::existing_local_collections_for;
-use crate::cmd::serve::hedgedoc::apply_sync_result;
-use crate::cmd::serve::hedgedoc::build_combined_infos;
-use crate::cmd::serve::hedgedoc::build_source;
-use crate::cmd::serve::hedgedoc::cleanup_after_delete;
-use crate::cmd::serve::hedgedoc::commit_add;
-use crate::cmd::serve::hedgedoc::commit_delete;
-use crate::cmd::serve::hedgedoc::find_slug_collision;
-use crate::cmd::serve::hedgedoc::normalize_hedgedoc_url;
-use crate::cmd::serve::hedgedoc::slug_for_note;
-use crate::cmd::serve::hedgedoc::source_uri_from_url;
-use crate::cmd::serve::hedgedoc::sync_source;
 use crate::cmd::serve::state::AppState;
 use crate::cmd::serve::state::DrillSession;
 use crate::cmd::serve::state::SharedSession;
@@ -75,7 +65,7 @@ use crate::types::timestamp::Timestamp;
 ///
 /// Serve handlers parse collections from disk and touch SQLite; doing that
 /// on the async executor stalls every other request (BUG-44). Pattern as in
-/// `git.rs` (`spawn_blocking` in `spawn_sync_task`).
+/// the counting paths (`spawn_blocking` in the landing handler).
 pub async fn collection_get_handler(
     State(state): State<AppState>,
     Path(slug): Path<String>,
@@ -153,22 +143,6 @@ fn collection_get_inner(
         let rc = find_collection(state, slug, owner)
             .ok_or_else(|| crate::error::ErrorReport::new(format!("Unknown collection: {slug}")))?;
         let browse = build_deck_tree(&rc.coll_dir, &rc.db_path)?;
-        // Build a deck-name → HedgeDoc URL map so the browse page can show
-        // edit links. A HedgeDoc collection is exactly one note, so this is
-        // at most one entry. All URLs were validated as HTTPS when added.
-        let hedge_urls: std::collections::HashMap<String, String> = {
-            let sources = state.hedgedoc_sources.lock();
-            sources
-                .iter()
-                .find(|s| s.collection.slug == slug)
-                .map(|s| {
-                    std::collections::HashMap::from([(
-                        s.note.deck_name.clone(),
-                        s.note.url.clone(),
-                    )])
-                })
-                .unwrap_or_default()
-        };
         let db_path = rc.db_path.to_str().ok_or_else(|| {
             crate::error::ErrorReport::new(format!(
                 "Database path is not valid UTF-8: {}",
@@ -188,7 +162,6 @@ fn collection_get_inner(
             &rc.name,
             slug,
             &browse,
-            &hedge_urls,
             bookmark_count,
             interrupted_closed,
             flash,
@@ -230,8 +203,8 @@ fn collection_get_inner(
     Ok(html.into_string())
 }
 
-/// Every slug that can be drilled: a configured collection (or HedgeDoc
-/// note, which is one too) or a user-assembled cross-collection deck.
+/// Every slug that can be drilled: a collection or a user-assembled
+/// cross-collection deck.
 pub(super) enum DrillTarget {
     Collection(ResolvedCollection),
     Deck(ResolvedCustomDeck),
@@ -297,17 +270,9 @@ pub(super) fn find_collection(
     {
         return Some(rc.clone());
     }
-    if let Some(rc) = existing_local_collections_for(state, current_user_for(owner).as_ref())
+    existing_local_collections_for(state, current_user_for(owner).as_ref())
         .into_iter()
         .find(|c| c.slug == slug && c.owner.as_deref() == owner)
-    {
-        return Some(rc);
-    }
-    let sources = state.hedgedoc_sources.lock();
-    sources
-        .iter()
-        .find(|s| s.collection.slug == slug && s.collection.owner.as_deref() == owner)
-        .map(|s| s.collection.clone())
 }
 
 /// `find_collection`, off the async executor.
@@ -833,15 +798,12 @@ fn collection_post_inner(
         }
 
         // Snapshot inputs, then compute + update in background (don't block response).
-        let sources_snapshot = state.hedgedoc_sources.lock().clone();
         let static_collections = state.config.collections.clone();
         let collections_clone = state.collections.clone();
         let counts_refreshed_at = state.counts_refreshed_at.clone();
         tokio::spawn(async move {
-            match tokio::task::spawn_blocking(move || {
-                build_combined_infos(&static_collections, &sources_snapshot)
-            })
-            .await
+            match tokio::task::spawn_blocking(move || refresh_collection_info(&static_collections))
+                .await
             {
                 Ok(combined) => {
                     *collections_clone.write().await = combined;
@@ -894,15 +856,12 @@ fn collection_post_inner(
     // BUG-45: a finished session changes due counts; refresh them in the
     // background so the landing page is up to date.
     if matches!(result, ActionResult::SessionFinished) {
-        let sources_snapshot = state.hedgedoc_sources.lock().clone();
         let static_collections = state.config.collections.clone();
         let collections_clone = state.collections.clone();
         let counts_refreshed_at = state.counts_refreshed_at.clone();
         tokio::spawn(async move {
-            match tokio::task::spawn_blocking(move || {
-                build_combined_infos(&static_collections, &sources_snapshot)
-            })
-            .await
+            match tokio::task::spawn_blocking(move || refresh_collection_info(&static_collections))
+                .await
             {
                 Ok(combined) => {
                     *collections_clone.write().await = combined;
@@ -1030,295 +989,6 @@ pub async fn collection_script_handler(
     )
 }
 
-// ---- HedgeDoc management handlers ----
-
-/// Render the HedgeDoc source management page.
-pub async fn hedgedoc_manage_handler(
-    State(state): State<AppState>,
-    Query(query): Query<HashMap<String, String>>,
-    current_user: Option<CurrentUser>,
-) -> (StatusCode, Html<String>) {
-    use crate::cmd::serve::hedgedoc_ui::render_manage_page;
-    let flash = Flash::from_query(&query);
-    let owner = current_user.map(|u| u.email);
-    let all_sources = state.hedgedoc_sources.lock();
-    let sources: Vec<crate::cmd::serve::state::HedgedocSource> = all_sources
-        .iter()
-        .filter(|s| s.collection.owner == owner)
-        .cloned()
-        .collect();
-    let last_synced = *state.hedgedoc_last_synced.lock();
-    let config_available = state.config.data_dir.is_some();
-    let html = render_manage_page(&sources, last_synced, config_available, flash);
-    (StatusCode::OK, Html(html.into_string()))
-}
-
-#[derive(serde::Deserialize)]
-pub struct AddHedgedocForm {
-    pub url: String,
-}
-
-/// Add a new HedgeDoc source URL.
-pub async fn hedgedoc_add_handler(
-    State(state): State<AppState>,
-    current_user: Option<CurrentUser>,
-    Form(form): Form<AddHedgedocForm>,
-) -> Redirect {
-    let owner = current_user.map(|u| u.email);
-    // Normalize and validate the URL at storage time (BUG-24): strip
-    // query/fragment/trailing slash so equivalent URLs dedupe, and reject
-    // anything that is not a well-formed HTTPS URL so no raw string is
-    // ever persisted or rendered into an href.
-    if form.url.trim().is_empty() {
-        return Flash::error("Enter a HedgeDoc note or git file URL.").redirect("/sources");
-    }
-    let url = match normalize_hedgedoc_url(&form.url) {
-        Ok(url) => url,
-        Err(e) => return Flash::error(e.to_string()).redirect("/sources"),
-    };
-
-    let data_dir = match &state.config.data_dir {
-        Some(d) => d.clone(),
-        None => {
-            log::error!("Cannot add HedgeDoc source: no data_dir configured");
-            return Flash::error(
-                "Cannot add HedgeDoc source: no data directory is configured. Start hashcards-web with --config.",
-            )
-            .redirect("/sources");
-        }
-    };
-
-    // Check for duplicate URL, scoped to the caller: two users may each add
-    // the same public note, and they get separate collections.
-    {
-        let sources = state.hedgedoc_sources.lock();
-        if sources
-            .iter()
-            .any(|s| s.note.url == url && s.collection.owner == owner)
-        {
-            return Flash::error("This note is already added.").redirect("/sources");
-        }
-    }
-
-    if source_uri_from_url(&url).is_none() {
-        log::error!("Failed to parse HedgeDoc source URI from {url}");
-        return Flash::error(format!("Could not parse a HedgeDoc note URL from: {url}"))
-            .redirect("/sources");
-    }
-
-    // BUG-43: refuse to create a source whose slug collides with a configured
-    // collection; find_collection would route it to the wrong database.
-    let new_slug = slug_for_note(&url, owner.as_deref());
-    if let Some(existing) = find_slug_collision(&new_slug, &state.config.collections) {
-        return Flash::error(format!(
-            "Cannot add this HedgeDoc source: its collection slug '{new_slug}' collides with the configured collection '{}'. Rename that collection or use a different source.",
-            existing.name
-        ))
-        .redirect("/sources");
-    }
-
-    let new_source = match build_source(&url, &data_dir, owner.clone()).await {
-        Ok(source) => source,
-        Err(e) => {
-            log::error!("Failed to add HedgeDoc source {url}: {e}");
-            return Flash::error(format!("Failed to add HedgeDoc source: {e}"))
-                .redirect("/sources");
-        }
-    };
-
-    // A config file is mandatory, so the server cannot reach this point
-    // without one. Adding a note has nowhere to be persisted otherwise.
-    let config_path = match state.config_path.lock().clone() {
-        Some(p) => p,
-        None => {
-            log::error!("Cannot persist a HedgeDoc source: the server has no config file path");
-            return Flash::error(
-                "Cannot save this HedgeDoc source: the server was started without a \
-                 configuration file to write it back to.",
-            )
-            .redirect("/sources");
-        }
-    };
-
-    // BUG-39: duplicate check + mutation + persist under ONE lock, persisting
-    // from the post-mutation state. spawn_blocking because commit_add writes
-    // the config file while holding the lock.
-    let sources_arc = state.hedgedoc_sources.clone();
-    let config_path_owned = config_path.clone();
-    let url_owned = url.clone();
-    let owner_owned = owner.clone();
-    let snapshot = match tokio::task::spawn_blocking(move || {
-        commit_add(
-            &sources_arc,
-            Some(config_path_owned.as_path()),
-            &url_owned,
-            owner_owned.as_deref(),
-            new_source,
-        )
-    })
-    .await
-    .map_err(|e| ErrorReport::new(format!("HedgeDoc add task panicked: {e}")))
-    .and_then(|r| r)
-    {
-        Ok(snapshot) => snapshot,
-        Err(e) => {
-            log::error!("Failed to add HedgeDoc source {url}: {e}");
-            return Flash::error(e.to_string()).redirect("/sources");
-        }
-    };
-
-    // Refresh combined collection infos from the committed snapshot.
-    let static_collections = state.config.collections.clone();
-    let snapshot_for_counts = snapshot.clone();
-    match tokio::task::spawn_blocking(move || {
-        build_combined_infos(&static_collections, &snapshot_for_counts)
-    })
-    .await
-    {
-        Ok(combined) => *state.collections.write().await = combined,
-        Err(e) => log::error!("Failed to compute collection counts: {e}"),
-    }
-
-    // Update last synced time if the newly added note fetched without error.
-    if snapshot
-        .iter()
-        .any(|s| s.note.url == url && s.collection.owner == owner && s.note.last_error.is_none())
-    {
-        *state.hedgedoc_last_synced.lock() = Some(Timestamp::now());
-    }
-
-    Flash::success("Source added.").redirect("/sources")
-}
-
-#[derive(serde::Deserialize)]
-pub struct DeleteHedgedocForm {
-    pub url: String,
-}
-
-/// Remove a HedgeDoc source by URL.
-pub async fn hedgedoc_delete_handler(
-    State(state): State<AppState>,
-    current_user: Option<CurrentUser>,
-    Form(form): Form<DeleteHedgedocForm>,
-) -> Redirect {
-    let owner = current_user.map(|u| u.email);
-    let owns_url = state
-        .hedgedoc_sources
-        .lock()
-        .iter()
-        .any(|s| s.note.url == form.url && s.collection.owner == owner);
-    if !owns_url {
-        return Flash::error("No HedgeDoc source with this URL: ".to_string() + &form.url)
-            .redirect("/sources");
-    }
-    let maybe_config_path: Option<PathBuf> = state.config_path.lock().clone();
-    let sources_arc = state.hedgedoc_sources.clone();
-    let url = form.url.clone();
-    let owner_owned = owner.clone();
-    // BUG-39: mutation + persist under one lock (see commit_delete).
-    // BUG-42: on-disk cleanup runs in the same blocking task.
-    let (snapshot, message) = match tokio::task::spawn_blocking(move || {
-        let outcome = commit_delete(
-            &sources_arc,
-            maybe_config_path.as_deref(),
-            &url,
-            owner_owned.as_deref(),
-        )?;
-        let message = cleanup_after_delete(&outcome);
-        Ok::<_, ErrorReport>((outcome.snapshot, message))
-    })
-    .await
-    .map_err(|e| ErrorReport::new(format!("HedgeDoc delete task panicked: {e}")))
-    .and_then(|r| r)
-    {
-        Ok(pair) => pair,
-        Err(e) => {
-            log::error!("Failed to delete HedgeDoc source {}: {e}", form.url);
-            return Flash::error(e.to_string()).redirect("/sources");
-        }
-    };
-
-    let static_collections = state.config.collections.clone();
-    let snapshot_for_counts = snapshot.clone();
-    match tokio::task::spawn_blocking(move || {
-        build_combined_infos(&static_collections, &snapshot_for_counts)
-    })
-    .await
-    {
-        Ok(combined) => *state.collections.write().await = combined,
-        Err(e) => log::error!("Failed to compute collection counts: {e}"),
-    }
-
-    Flash::success(message).redirect("/sources")
-}
-
-/// Manually re-sync all HedgeDoc sources.
-pub async fn hedgedoc_sync_now_handler(
-    State(state): State<AppState>,
-    current_user: Option<CurrentUser>,
-) -> Redirect {
-    let owner = current_user.map(|u| u.email);
-    if state.config.data_dir.is_none() {
-        return Flash::error("HedgeDoc sync is not available: no data directory is configured.")
-            .redirect("/sources");
-    }
-
-    // Collect URLs to sync (release lock before awaiting). Only the caller's
-    // own notes: a manual sync must not do IO on other users' notes, nor
-    // name their note URLs in this user's error banner.
-    let entries: Vec<(String, ResolvedCollection)> = {
-        let sources = state.hedgedoc_sources.lock();
-        sources
-            .iter()
-            .filter(|s| s.collection.owner == owner)
-            .map(|s| (s.note.url.clone(), s.collection.clone()))
-            .collect()
-    };
-
-    let mut any_success = false;
-
-    for (url, rc) in &entries {
-        match sync_source(url, rc).await {
-            Ok((deck_name, file_name)) => {
-                any_success = true;
-                let mut sources = state.hedgedoc_sources.lock();
-                if let Some(src) = sources.iter_mut().find(|s| s.collection.slug == rc.slug) {
-                    apply_sync_result(src, deck_name, file_name);
-                }
-            }
-            Err(e) => {
-                let msg = e.to_string();
-                log::error!("Manual HedgeDoc sync failed for {url}: {msg}");
-                let mut sources = state.hedgedoc_sources.lock();
-                if let Some(src) = sources.iter_mut().find(|s| s.collection.slug == rc.slug) {
-                    src.note.last_error = Some(msg);
-                }
-            }
-        }
-    }
-
-    let sources_snapshot = state.hedgedoc_sources.lock().clone();
-    let static_collections = state.config.collections.clone();
-    match tokio::task::spawn_blocking(move || {
-        build_combined_infos(&static_collections, &sources_snapshot)
-    })
-    .await
-    {
-        Ok(combined) => *state.collections.write().await = combined,
-        Err(e) => log::error!("Failed to compute collection counts: {e}"),
-    }
-    if any_success {
-        *state.hedgedoc_last_synced.lock() = Some(Timestamp::now());
-    }
-
-    if any_success || entries.is_empty() {
-        Flash::success("Source sync finished.").redirect("/sources")
-    } else {
-        Flash::error("HedgeDoc sync failed for all notes; see the statuses below.")
-            .redirect("/sources")
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -1401,7 +1071,6 @@ mod tests {
             collections,
             data_dir: None,
             config_path: None,
-            hedgedoc_entries: Vec::new(),
             custom_decks: Vec::new(),
             session_timeout_minutes: 1440,
             oidc: None,
@@ -1410,9 +1079,7 @@ mod tests {
             config: std::sync::Arc::new(config),
             collections: std::sync::Arc::new(tokio::sync::RwLock::new(Vec::new())),
             sessions: std::sync::Arc::new(parking_lot::Mutex::new(HashMap::new())),
-            hedgedoc_sources: std::sync::Arc::new(parking_lot::Mutex::new(Vec::new())),
             custom_decks: std::sync::Arc::new(parking_lot::Mutex::new(Vec::new())),
-            hedgedoc_last_synced: std::sync::Arc::new(parking_lot::Mutex::new(None)),
             config_path: std::sync::Arc::new(parking_lot::Mutex::new(None)),
             counts_refreshed_at: std::sync::Arc::new(parking_lot::Mutex::new(None)),
             interrupted_closed: std::sync::Arc::new(parking_lot::Mutex::new(HashMap::new())),
@@ -1440,9 +1107,7 @@ mod tests {
             config: std::sync::Arc::new(config),
             collections: std::sync::Arc::new(tokio::sync::RwLock::new(Vec::new())),
             sessions: std::sync::Arc::new(parking_lot::Mutex::new(HashMap::new())),
-            hedgedoc_sources: std::sync::Arc::new(parking_lot::Mutex::new(Vec::new())),
             custom_decks: std::sync::Arc::new(parking_lot::Mutex::new(Vec::new())),
-            hedgedoc_last_synced: std::sync::Arc::new(parking_lot::Mutex::new(None)),
             config_path: std::sync::Arc::new(parking_lot::Mutex::new(None)),
             counts_refreshed_at: std::sync::Arc::new(parking_lot::Mutex::new(None)),
             interrupted_closed: std::sync::Arc::new(parking_lot::Mutex::new(HashMap::new())),

@@ -39,6 +39,7 @@ use crate::cmd::serve::config::MIN_SESSION_SECRET_BYTES;
 use crate::cmd::serve::config::ResolvedCollection;
 use crate::cmd::serve::config::ResolvedOidc;
 use crate::cmd::serve::config::ResolvedServeConfig;
+use crate::cmd::serve::counts::refresh_collection_info;
 use crate::cmd::serve::decks::check_deck_slug_collisions;
 use crate::cmd::serve::decks::deck_add_handler;
 use crate::cmd::serve::decks::deck_delete_handler;
@@ -47,8 +48,6 @@ use crate::cmd::serve::decks::resolve_custom_decks;
 use crate::cmd::serve::edit::edit_get_handler;
 use crate::cmd::serve::edit::edit_post_handler;
 use crate::cmd::serve::export::collection_export_handler;
-use axum::response::Redirect;
-
 use crate::cmd::serve::files::editor_get_handler;
 use crate::cmd::serve::files::editor_post_handler;
 use crate::cmd::serve::files::files_delete_handler;
@@ -62,17 +61,8 @@ use crate::cmd::serve::handlers::collection_get_handler;
 use crate::cmd::serve::handlers::collection_post_handler;
 use crate::cmd::serve::handlers::collection_script_handler;
 use crate::cmd::serve::handlers::collection_start_handler;
-use crate::cmd::serve::handlers::hedgedoc_add_handler;
-use crate::cmd::serve::handlers::hedgedoc_delete_handler;
-use crate::cmd::serve::handlers::hedgedoc_manage_handler;
-use crate::cmd::serve::handlers::hedgedoc_sync_now_handler;
-use crate::cmd::serve::hedgedoc::build_combined_infos;
-use crate::cmd::serve::hedgedoc::build_source_lossless;
-use crate::cmd::serve::hedgedoc::check_startup_slug_collisions;
-use crate::cmd::serve::hedgedoc::spawn_hedgedoc_sync_task;
 use crate::cmd::serve::landing::landing_handler;
 use crate::cmd::serve::state::AppState;
-use crate::cmd::serve::state::HedgedocSource;
 use crate::cmd::serve::state::SharedSession;
 use crate::cmd::serve::state::evict_idle_sessions;
 use crate::cmd::serve::stats::collection_stats_handler;
@@ -95,9 +85,6 @@ use crate::utils::ensure_dir;
 /// window. Accepted tradeoff — any fixed cutoff has some such window.
 const SESSION_STALE_MINUTES: i64 = 60;
 
-/// How often HedgeDoc notes are re-fetched, in minutes.
-const HEDGEDOC_POLL_MINUTES: u64 = 30;
-
 /// Close session rows left dangling by a crash or restart, across every
 /// collection this server serves, and return the per-slug counts so the deck
 /// browser can report them once.
@@ -110,19 +97,12 @@ const HEDGEDOC_POLL_MINUTES: u64 = 30;
 /// threads rather than one after another: a server with many collections
 /// would otherwise have its startup delayed in proportion to how many it
 /// serves.
-fn sweep_dangling_sessions(
-    config: &ResolvedServeConfig,
-    hedgedoc_sources: &[HedgedocSource],
-) -> HashMap<String, usize> {
+fn sweep_dangling_sessions(config: &ResolvedServeConfig) -> HashMap<String, usize> {
     // Only sessions whose heartbeat has been silent this long are presumed
     // dead. A CLI `drill` sharing the database stamps its heartbeat as the
     // user works, so a live session is never swept out from under it.
     let stale_before = Timestamp::now().minus_minutes(SESSION_STALE_MINUTES);
-    let collections: Vec<&ResolvedCollection> = config
-        .collections
-        .iter()
-        .chain(hedgedoc_sources.iter().map(|s| &s.collection))
-        .collect();
+    let collections: Vec<&ResolvedCollection> = config.collections.iter().collect();
 
     let results: Vec<(String, Fallible<usize>)> = std::thread::scope(|scope| {
         let handles: Vec<_> = collections
@@ -197,87 +177,34 @@ pub async fn start_serve(config: ResolvedServeConfig) -> Fallible<()> {
     // `/var/lib/hashcards`, which on a systemd deployment only exists, and is
     // only owned by the service user, when the unit declares
     // `StateDirectory=hashcards`. Without that nothing created it, and the
-    // first attempt to write -- adding a HedgeDoc note, minutes or restarts
+    // first attempt to write -- creating a card folder, minutes or restarts
     // later -- failed with a bare "Permission denied (os error 13)" naming no
     // path at all.
     if let Some(data_dir) = &config.data_dir {
         ensure_dir(data_dir, "data directory")?;
         ensure_dir(&data_dir.join("db"), "review database directory")?;
-        ensure_dir(&data_dir.join("hedgedoc"), "HedgeDoc note directory")?;
     }
 
-    // Ensure DB parent directories exist for all collections (in git mode these
-    // are already created above; in non-git TOML mode they may not exist yet).
+    // A configured collection's database may live outside `{data_dir}/db`.
     for rc in &config.collections {
         if let Some(parent) = rc.db_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
     }
 
-    // Build initial HedgeDoc sources (fetch markdown, write to disk).
-    let data_dir: Option<PathBuf> = config.data_dir.clone();
-
-    let hedgedoc_sources_init = if let Some(ref dd) = data_dir {
-        // One source per `[[hedgedoc]]` entry: notes are never grouped by
-        // host, so an entry can never inherit another entry's owner.
-        // build_source_lossless never drops an entry (BUG-40).
-        let mut sources: Vec<HedgedocSource> = Vec::new();
-        for entry in &config.hedgedoc_entries {
-            sources.push(build_source_lossless(&entry.url, dd, entry.owner.clone()).await);
-        }
-        sources
-    } else {
-        Vec::new()
-    };
-
-    // Build combined collection info (static + hedgedoc)
-    let collection_infos = build_combined_infos(&config.collections, &hedgedoc_sources_init);
+    let collection_infos = refresh_collection_info(&config.collections);
     log::debug!("Loaded {} collections", collection_infos.len());
-
-    let sync_collections: Vec<ResolvedCollection> = config
-        .collections
-        .iter()
-        .map(|c| ResolvedCollection {
-            name: c.name.clone(),
-            slug: c.slug.clone(),
-            coll_dir: c.coll_dir.clone(),
-            db_path: c.db_path.clone(),
-            owner: c.owner.clone(),
-        })
-        .collect();
-
-    // HedgeDoc notes used to inherit the git poll interval. With no git
-    // remote left there is nothing to inherit from, so the old fallback is
-    // now simply the interval.
-    let hedgedoc_poll_minutes = HEDGEDOC_POLL_MINUTES;
 
     let config_path: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(config.config_path.clone()));
     let bind = format!("{}:{}", config.host, config.port);
 
     let config = Arc::new(config);
-    // Mark initial sync time only if at least one note was fetched without error.
-    let hedgedoc_last_synced_init = if hedgedoc_sources_init
-        .iter()
-        .any(|s| s.note.last_error.is_none())
-    {
-        Some(Timestamp::now())
-    } else {
-        None
-    };
-    // BUG-43: refuse to start if two collections share a URL slug. Routing
-    // prefers configured collections, so a collision silently addresses the
-    // wrong database rather than failing visibly.
-    check_startup_slug_collisions(&config.collections, &hedgedoc_sources_init)?;
-
     // FEAT-03: close session rows left open by a crash or restart, once, at
     // startup. They cannot be resumed (the card queue lives only in memory),
     // so they are closed with all persisted reviews kept. This must not run
     // per request: the predicate cannot distinguish a crashed session from a
     // live one, and a CLI `drill` may be running against the same database.
-    let interrupted_closed = sweep_dangling_sessions(&config, &hedgedoc_sources_init);
-
-    let hedgedoc_sources = Arc::new(Mutex::new(hedgedoc_sources_init));
-    let hedgedoc_last_synced = Arc::new(Mutex::new(hedgedoc_last_synced_init));
+    let interrupted_closed = sweep_dangling_sessions(&config);
 
     // Discovery happens once at startup, not lazily on the first login
     // attempt, so a broken [oidc] config fails fast with a clear error.
@@ -289,23 +216,13 @@ pub async fn start_serve(config: ResolvedServeConfig) -> Fallible<()> {
     // User-assembled decks are resolved once here; adds and deletes refresh
     // the list in place.
     let custom_decks = resolve_custom_decks(&config.custom_decks);
-    // Decks must not collide with a HedgeDoc note's slug either, since both
-    // are addressed through `/collection/{slug}`.
-    let all_slugged: Vec<ResolvedCollection> = config
-        .collections
-        .iter()
-        .cloned()
-        .chain(hedgedoc_sources.lock().iter().map(|s| s.collection.clone()))
-        .collect();
-    check_deck_slug_collisions(&custom_decks, &all_slugged)?;
+    check_deck_slug_collisions(&custom_decks, &config.collections)?;
 
     let state = AppState {
         config: config.clone(),
         collections: Arc::new(RwLock::new(collection_infos)),
         sessions: Arc::new(Mutex::new(HashMap::new())),
-        hedgedoc_sources: hedgedoc_sources.clone(),
         custom_decks: Arc::new(Mutex::new(custom_decks)),
-        hedgedoc_last_synced: hedgedoc_last_synced.clone(),
         config_path,
         // Counts were just computed above, so the stamp starts fresh.
         counts_refreshed_at: Arc::new(Mutex::new(Some(Timestamp::now()))),
@@ -315,17 +232,6 @@ pub async fn start_serve(config: ResolvedServeConfig) -> Fallible<()> {
     };
 
     spawn_session_eviction_task(state.sessions.clone(), config.session_timeout_minutes);
-
-    // Spawn background HedgeDoc sync task (only when data_dir is available)
-    if data_dir.is_some() {
-        spawn_hedgedoc_sync_task(
-            hedgedoc_sources,
-            state.collections.clone(),
-            hedgedoc_last_synced,
-            sync_collections,
-            hedgedoc_poll_minutes,
-        );
-    }
 
     let app = Router::new()
         .route("/", get(landing_handler))
@@ -343,15 +249,6 @@ pub async fn start_serve(config: ResolvedServeConfig) -> Fallible<()> {
         .route(
             "/files/media/{*path}",
             post(media_upload_handler).layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES)),
-        )
-        .route("/sources", get(hedgedoc_manage_handler))
-        .route("/sources/add", post(hedgedoc_add_handler))
-        .route("/sources/delete", post(hedgedoc_delete_handler))
-        .route("/sources/sync", post(hedgedoc_sync_now_handler))
-        // Kept so bookmarks from before the rename keep working.
-        .route(
-            "/hedgedoc",
-            get(|| async { Redirect::permanent("/sources") }),
         )
         .route("/decks", get(decks_manage_handler))
         .route("/decks/add", post(deck_add_handler))

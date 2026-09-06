@@ -9,13 +9,10 @@ pub mod export;
 mod files;
 mod files_ui;
 mod handlers;
-mod hedgedoc;
-mod hedgedoc_ui;
 mod href;
 mod landing;
 mod local;
 pub mod server;
-mod source;
 mod state;
 mod upload;
 
@@ -23,7 +20,6 @@ pub mod stats;
 
 #[cfg(test)]
 mod tests {
-    use std::fs::read_to_string;
     use std::fs::write;
     use std::path::PathBuf;
 
@@ -59,7 +55,6 @@ mod tests {
             }],
             data_dir: None,
             config_path: None,
-            hedgedoc_entries: Vec::new(),
             custom_decks: Vec::new(),
             session_timeout_minutes: 1440,
             oidc: None,
@@ -221,7 +216,6 @@ mod tests {
             collections: Vec::new(),
             data_dir: Some(data_dir.clone()),
             config_path: None,
-            hedgedoc_entries: Vec::new(),
             custom_decks: Vec::new(),
             session_timeout_minutes: 1440,
             oidc: None,
@@ -288,7 +282,6 @@ mod tests {
             }],
             data_dir: None,
             config_path: None,
-            hedgedoc_entries: Vec::new(),
             custom_decks: Vec::new(),
             session_timeout_minutes: 1440,
             oidc: None,
@@ -412,82 +405,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_hedgedoc_add_empty_url_is_surfaced_as_flash() -> Fallible<()> {
-        let dir = tempdir()?;
-        let coll_dir = dir.path().to_path_buf();
-        write(coll_dir.join("Alpha.md"), "Q: What is 1+1?\nA: 2\n")?;
-        let port = spawn_test_server(coll_dir, "test-collection").await?;
-
-        let response = reqwest::Client::new()
-            .post(format!("http://{TEST_HOST}:{port}/sources/add"))
-            .body("url=")
-            .header("content-type", "application/x-www-form-urlencoded")
-            .send()
-            .await?;
-        let body = response.text().await?;
-        assert!(
-            body.contains("Enter a HedgeDoc note or git file URL"),
-            "body: {body}"
-        );
-        assert!(body.contains("flash-error"));
-        Ok(())
-    }
-
-    /// Regression test (BUG-38): an http:// HedgeDoc URL must be rejected with
-    /// a flash message before anything is persisted, not stored with a
-    /// permanent "Error" status.
-    #[tokio::test]
-    async fn test_hedgedoc_add_rejects_http_url_before_persisting() -> Fallible<()> {
-        let port = pick_unused_port().unwrap();
-        let dir = tempdir()?;
-        let data_dir = dir.path().to_path_buf();
-        let config_path = data_dir.join("hashcards.toml");
-        write(
-            &config_path,
-            format!("[server]\ndata_dir = {:?}\n", data_dir.to_string_lossy()),
-        )?;
-
-        let config = ResolvedServeConfig {
-            host: TEST_HOST.to_string(),
-            port,
-            defaults: DefaultsSection::default(),
-            collections: vec![],
-            data_dir: Some(data_dir.clone()),
-            config_path: Some(config_path.clone()),
-            hedgedoc_entries: Vec::new(),
-            custom_decks: Vec::new(),
-            session_timeout_minutes: 1440,
-            oidc: None,
-        };
-        spawn(async move { start_serve(config).await });
-        wait_for_server(TEST_HOST, port).await?;
-
-        // reqwest follows the 303 redirect, so `response` is the /sources
-        // manage page rendered with the flash query params.
-        let response = reqwest::Client::new()
-            .post(format!("http://{TEST_HOST}:{port}/sources/add"))
-            .form(&[("url", "http://notes.example.com/abc123")])
-            .send()
-            .await?;
-        assert!(response.status().is_success());
-        let body = response.text().await?;
-        assert!(
-            body.contains("HTTPS"),
-            "expected the HTTPS validation error on the manage page, got: {body}"
-        );
-
-        // Nothing may have been persisted to the config file.
-        let config_content = read_to_string(&config_path)?;
-        assert!(
-            !config_content.contains("notes.example.com"),
-            "rejected URL was persisted: {config_content}"
-        );
-        Ok(())
-    }
-
-    /// BUG-45 regression: after a session finishes, the landing page must
-    /// show refreshed due counts without a manual sync or Home action.
-    #[tokio::test]
     async fn test_landing_counts_refresh_after_session_finish() -> Fallible<()> {
         let port = pick_unused_port().unwrap();
         let dir = tempdir()?;
@@ -508,7 +425,6 @@ mod tests {
             }],
             data_dir: None,
             config_path: None,
-            hedgedoc_entries: Vec::new(),
             custom_decks: Vec::new(),
             session_timeout_minutes: 1440,
             oidc: None,
@@ -586,7 +502,6 @@ mod tests {
             }],
             data_dir: None,
             config_path: None,
-            hedgedoc_entries: Vec::new(),
             custom_decks: Vec::new(),
             session_timeout_minutes: 1440,
             oidc: None,
@@ -661,7 +576,6 @@ mod tests {
             }],
             data_dir: None,
             config_path: None,
-            hedgedoc_entries: Vec::new(),
             custom_decks: Vec::new(),
             session_timeout_minutes: 1440,
             oidc: None,
@@ -718,7 +632,6 @@ mod tests {
             }],
             data_dir: None,
             config_path: None,
-            hedgedoc_entries: Vec::new(),
             custom_decks: Vec::new(),
             session_timeout_minutes: 1440,
             oidc: None,
@@ -790,7 +703,6 @@ mod tests {
             collections: Vec::new(),
             data_dir: Some(data_dir.clone()),
             config_path: None,
-            hedgedoc_entries: Vec::new(),
             custom_decks: Vec::new(),
             session_timeout_minutes: 1440,
             oidc: None,
@@ -838,7 +750,6 @@ mod tests {
             collections: Vec::new(),
             data_dir: Some(data_dir.clone()),
             config_path: None,
-            hedgedoc_entries: Vec::new(),
             custom_decks: Vec::new(),
             session_timeout_minutes: 1440,
             oidc: None,

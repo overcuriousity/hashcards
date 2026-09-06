@@ -331,26 +331,18 @@ fn flash_for(outcome: Fallible<String>) -> Redirect {
     }
 }
 
-/// Slugs a local folder must not take: configured collections and HedgeDoc
-/// notes belonging to the same user. `find_collection` prefers those, so a
-/// folder that matches one is unreachable however it came to exist.
+/// Slugs a card folder must not take: the caller's own saved decks. Both a
+/// deck and a collection are addressed through `/collection/{slug}`, and
+/// routing prefers the collection, so a folder that matches a deck slug
+/// makes the deck unreachable.
 fn reserved_slugs(state: &AppState, owner: Option<&str>) -> Vec<(String, String)> {
-    let mut taken: Vec<(String, String)> = state
-        .config
-        .collections
+    state
+        .custom_decks
+        .lock()
         .iter()
-        .filter(|c| c.owner.as_deref() == owner)
-        .map(|c| (c.slug.clone(), c.name.clone()))
-        .collect();
-    taken.extend(
-        state
-            .hedgedoc_sources
-            .lock()
-            .iter()
-            .filter(|s| s.collection.owner.as_deref() == owner)
-            .map(|s| (s.collection.slug.clone(), s.collection.name.clone())),
-    );
-    taken
+        .filter(|d| d.owner.as_deref() == owner)
+        .map(|d| (d.slug.clone(), d.name.clone()))
+        .collect()
 }
 
 /// The caller's owner key, as stored on a `ResolvedCollection`.
@@ -390,7 +382,7 @@ fn check_collection_slug(
     );
     if let Some((_, other)) = taken.iter().find(|(s, _)| *s == slug) {
         return fail(format!(
-            "`{name}` maps to the URL slug `{slug}`, which the collection `{other}` already uses. Pick a different name."
+            "`{name}` maps to the URL slug `{slug}`, which `{other}` already uses. Pick a different name."
         ));
     }
     Ok(())
@@ -1016,29 +1008,13 @@ fn collections_for(
         }
     };
     let owner = user.map(|u| u.email.as_str());
-    let mut found = match discover_local_collections(&root, &data_dir.join("db"), owner, policy) {
+    match discover_local_collections(&root, &data_dir.join("db"), owner, policy) {
         Ok(found) => found,
         Err(e) => {
             log::error!("Cannot list local collections: {e}");
-            return Vec::new();
+            Vec::new()
         }
-    };
-    // A folder can come to shadow a configured collection or a HedgeDoc note
-    // — the collection may be added later, or the folder dropped in by hand.
-    // Routing prefers those, so serving the folder anyway would list a row
-    // that leads somewhere else. Drop it with a warning instead.
-    let reserved = reserved_slugs(state, owner_key(user).as_deref());
-    found.retain(|c| match reserved.iter().find(|(slug, _)| *slug == c.slug) {
-        Some((slug, other)) => {
-            log::warn!(
-                "Local card folder `{}` is not served: `{other}` already uses the URL slug `{slug}`.",
-                c.name
-            );
-            false
-        }
-        None => true,
-    });
-    found
+    }
 }
 
 #[cfg(test)]
@@ -1250,34 +1226,45 @@ mod tests {
         )
     }
 
-    fn configured(name: &str, slug: &str) -> ResolvedCollection {
-        ResolvedCollection {
+    /// Put a saved deck in `state` and return its URL slug.
+    ///
+    /// A deck slug is the one name a card folder may not take: both are
+    /// addressed through `/collection/{slug}` and routing prefers the
+    /// collection, so a folder that matched one would make the deck
+    /// unreachable.
+    fn reserve_deck(state: &AppState, name: &str) -> String {
+        use crate::cmd::serve::decks::ResolvedCustomDeck;
+        use crate::cmd::serve::decks::slug_for_deck;
+
+        let slug = slug_for_deck(name, None);
+        state.custom_decks.lock().push(ResolvedCustomDeck {
             name: name.to_string(),
-            slug: slug.to_string(),
-            coll_dir: PathBuf::from("/nonexistent"),
-            db_path: PathBuf::from("/nonexistent/x.db"),
+            slug: slug.clone(),
             owner: None,
-        }
+            members: Vec::new(),
+        });
+        slug
     }
 
     #[test]
-    fn a_new_folder_may_not_shadow_a_configured_collection() -> Fallible<()> {
-        // Routing prefers configured collections, so a folder named after
-        // one would be undrillable while still showing up as its own row.
+    fn a_new_folder_may_not_shadow_a_saved_deck() -> Fallible<()> {
+        // Routing prefers collections, so a folder named after a deck would
+        // make the deck unreachable while showing up as its own row.
         let dir = create_tmp_directory()?;
-        let state = state_for(&dir, vec![configured("Spanish", "Spanish")]);
+        let state = state_for(&dir, Vec::new());
+        let taken = reserve_deck(&state, "Exam revision");
         let form = NewEntryForm {
             parent: String::new(),
-            name: "Spanish".to_string(),
+            name: taken.clone(),
         };
 
         let error = match create_entry(&state, None, &form, true) {
             Ok(_) => return fail("expected a slug collision error"),
             Err(e) => e.to_string(),
         };
-        assert!(error.contains("Spanish"), "got: {error}");
+        assert!(error.contains(&taken), "got: {error}");
         assert!(
-            !user_root(&state, None)?.path().join("Spanish").exists(),
+            !user_root(&state, None)?.path().join(&taken).exists(),
             "the folder must not be created"
         );
         Ok(())
@@ -1306,7 +1293,8 @@ mod tests {
         // Only top-level folders are collections, so nothing below the root
         // shares the slug namespace.
         let dir = create_tmp_directory()?;
-        let state = state_for(&dir, vec![configured("Spanish", "Spanish")]);
+        let state = state_for(&dir, Vec::new());
+        let taken = reserve_deck(&state, "Exam revision");
         create_entry(
             &state,
             None,
@@ -1321,7 +1309,7 @@ mod tests {
             None,
             &NewEntryForm {
                 parent: "Languages".to_string(),
-                name: "Spanish".to_string(),
+                name: taken,
             },
             true,
         )?;
@@ -1331,7 +1319,8 @@ mod tests {
     #[test]
     fn renaming_a_folder_onto_a_taken_slug_is_refused() -> Fallible<()> {
         let dir = create_tmp_directory()?;
-        let state = state_for(&dir, vec![configured("Spanish", "Spanish")]);
+        let state = state_for(&dir, Vec::new());
+        let taken = reserve_deck(&state, "Exam revision");
         create_entry(
             &state,
             None,
@@ -1344,7 +1333,7 @@ mod tests {
 
         let form = RenameForm {
             path: "Espanol".to_string(),
-            name: "Spanish".to_string(),
+            name: taken,
         };
         assert!(rename_entry(&state, None, &form).is_err());
         // Renaming a folder to its own name is not a collision with itself.
@@ -1353,21 +1342,6 @@ mod tests {
             name: "Espanol".to_string(),
         };
         assert!(rename_entry(&state, None, &same).is_err(), "already exists");
-        Ok(())
-    }
-
-    #[test]
-    fn a_local_folder_shadowing_a_configured_slug_is_not_listed() -> Fallible<()> {
-        // The folder can predate the collection, or be dropped in by hand.
-        let dir = create_tmp_directory()?;
-        let state = state_for(&dir, vec![configured("Spanish", "Spanish")]);
-        let root = user_root(&state, None)?;
-        std::fs::create_dir_all(root.path().join("Spanish"))?;
-        std::fs::create_dir_all(root.path().join("Medicine"))?;
-
-        let found = local_collections_for(&state, None);
-        let names: Vec<&str> = found.iter().map(|c| c.name.as_str()).collect();
-        assert_eq!(names, vec!["Medicine"]);
         Ok(())
     }
 
@@ -1595,18 +1569,19 @@ mod tests {
     #[test]
     fn creating_a_file_may_not_conjure_a_shadowing_collection() -> Fallible<()> {
         let dir = create_tmp_directory()?;
-        let state = state_for(&dir, vec![configured("Spanish", "Spanish")]);
+        let state = state_for(&dir, Vec::new());
+        let taken = reserve_deck(&state, "Exam revision");
 
         let form = NewEntryForm {
-            parent: "Spanish".to_string(),
+            parent: taken.clone(),
             name: "verbs".to_string(),
         };
         assert!(create_entry(&state, None, &form, false).is_err());
-        assert!(!user_root(&state, None)?.path().join("Spanish").exists());
+        assert!(!user_root(&state, None)?.path().join(&taken).exists());
 
         // Nested folders are checked by their top-level ancestor too.
         let nested = NewEntryForm {
-            parent: "Spanish/Unit 2".to_string(),
+            parent: format!("{taken}/Unit 2"),
             name: "verbs".to_string(),
         };
         assert!(create_entry(&state, None, &nested, false).is_err());

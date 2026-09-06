@@ -16,7 +16,6 @@ use crate::cmd::serve::decks::ResolvedCustomDeck;
 use crate::cmd::serve::files::local_collections_for;
 use crate::cmd::serve::handlers::deck_card_counts;
 use crate::cmd::serve::handlers::deck_sources;
-use crate::cmd::serve::hedgedoc::build_combined_infos;
 use crate::cmd::serve::state::AppState;
 use crate::cmd::serve::state::CollectionInfo;
 use crate::flash::Flash;
@@ -53,11 +52,8 @@ pub async fn landing_handler(
     };
     if stale && interval_minutes > 0 {
         let static_collections = state.config.collections.clone();
-        let sources_snapshot = state.hedgedoc_sources.lock().clone();
-        match tokio::task::spawn_blocking(move || {
-            build_combined_infos(&static_collections, &sources_snapshot)
-        })
-        .await
+        match tokio::task::spawn_blocking(move || refresh_collection_info(&static_collections))
+            .await
         {
             Ok(combined) => {
                 *state.collections.write().await = combined;
@@ -92,13 +88,6 @@ pub async fn landing_handler(
         .chain(local_infos.iter())
         .filter(|c| c.owner.as_deref() == owner.as_deref())
         .collect();
-    let hedgedoc_last_synced = *state.hedgedoc_last_synced.lock();
-    let hedgedoc_count = state
-        .hedgedoc_sources
-        .lock()
-        .iter()
-        .filter(|s| s.collection.owner.as_deref() == owner.as_deref())
-        .count();
     let config_available = state.config.data_dir.is_some();
     let custom_decks: Vec<ResolvedCustomDeck> = state
         .custom_decks
@@ -162,8 +151,6 @@ pub async fn landing_handler(
     }
 
     let status = LandingStatus {
-        hedgedoc_count,
-        hedgedoc_last_synced,
         config_available,
         signed_in_as: owner.clone(),
     };
@@ -174,8 +161,6 @@ pub async fn landing_handler(
 /// The server-status details shown under the collection list: whether the
 /// config file is in play, how the sources stand, and who is signed in.
 struct LandingStatus {
-    hedgedoc_count: usize,
-    hedgedoc_last_synced: Option<Timestamp>,
     config_available: bool,
     /// The logged-in user's email, when `[oidc]` is configured. Drives the
     /// only logout control in the UI.
@@ -223,19 +208,6 @@ fn row_meta(due_today: usize, total_cards: usize) -> Markup {
 /// announced a background detail as loudly as the list itself.
 fn status_line(status: &LandingStatus) -> Option<String> {
     let mut parts: Vec<String> = Vec::new();
-    if status.hedgedoc_count > 0 {
-        parts.push(match status.hedgedoc_last_synced {
-            Some(ts) => format!(
-                "{} HedgeDoc source(s), {}",
-                status.hedgedoc_count,
-                ts.into_inner().format("%H:%M")
-            ),
-            None => format!(
-                "{} HedgeDoc source(s), not yet synced",
-                status.hedgedoc_count
-            ),
-        });
-    }
     if let Some(email) = &status.signed_in_as {
         parts.push(email.clone());
     }
@@ -268,7 +240,6 @@ fn render_landing_page(
                 nav.app-nav {
                     @if config_available {
                         a.nav-link href="/files" { "My cards" }
-                        a.nav-link href="/sources" { "Sources" }
                     }
                     @if signed_in_as.is_some() {
                         // POST, so a third-party page cannot log the user out

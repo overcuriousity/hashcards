@@ -821,20 +821,10 @@ body:has(.root) .theme-toggle { display: none; }
 .landing h2 { margin: 2rem 0 0.75rem; }
 .landing h2:first-of-type { margin-top: 0; }
 
-.sync-bar {
-  display: flex; align-items: center; gap: 1rem;
-  margin-bottom: 2rem;
-  padding: 0.75rem 1rem;
-  background: var(--color-bg-surface);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-}
-.sync-status { flex: 1; font-size: var(--text-xs); color: var(--color-fg-muted); }
-
-/* The verb on a management row: sync, add, delete. It is written without
-   `.btn` in the templates, so it carries the whole button here rather than
-   only its size — which is what left the HedgeDoc and Decks pages showing
-   the browser's own grey submit buttons. */
+/* The verb on a management row: add, delete. It is written without `.btn`
+   in the templates, so it carries the whole button here rather than only
+   its size — which is what left the Decks page showing the browser's own
+   grey submit button. */
 .sync-button {
   -webkit-appearance: none; appearance: none;
   display: inline-flex; align-items: center; justify-content: center;
@@ -877,22 +867,6 @@ fieldset label {
    submit, so the row is the top of a stack rather than the whole of one. */
 .add-source-row + fieldset { margin-top: 0.75rem; }
 .add-source-url { flex: 1; }
-.source-url-cell { font-size: var(--text-xs); font-family: var(--font-mono); word-break: break-all; }
-
-/* Which kind of source a row is: a quiet label beside the name, not a
-   second heading. Sized to the shortest word it ever holds so `git` and
-   `hedgedoc` line up down the column. */
-.source-kind {
-  display: inline-block; min-width: 4.5rem;
-  padding: 0.125rem 0.5rem;
-  font-size: var(--text-xs); font-family: var(--font-mono);
-  text-align: center; letter-spacing: 0.02em;
-  color: var(--color-fg-secondary);
-  background: var(--color-bg-surface);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
-}
-
 /* The starter template, folded away until it is wanted: someone who already
    knows the syntax should not have to scroll past it to reach the table. */
 .template-block {
@@ -1336,7 +1310,6 @@ a.file-name:hover { text-decoration: underline; }
   .file-row { flex-direction: column; align-items: stretch; gap: 0.5rem; }
   .input-sm { width: 100%; }
 
-  .sync-bar { flex-wrap: wrap; }
   .add-source-row { flex-direction: column; align-items: stretch; }
 }
 

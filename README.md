@@ -24,8 +24,8 @@ scheduling reviews with [FSRS] and keeping every user's history in SQLite.
 This is a fork of [hashcards] by [Fernando Borretti][fb], which is a local
 command-line tool. The card format, the parser, the FSRS implementation and
 the review schema are all his work; see [Prior Art](#prior-art). This fork
-removed the command-line interface and grew the server: HedgeDoc note
-sources, cross-collection decks, in-browser editing, and OIDC login.
+removed the command-line interface and grew the server: cross-collection
+decks, in-browser card writing and editing, and OIDC login.
 
 ## Quick start
 
@@ -88,9 +88,8 @@ data_dir = "/var/lib/hashcards"     # required
 session_timeout_minutes = 1440      # 0 disables eviction
 ```
 
-`data_dir` is where the server keeps the card trees (`{data_dir}/local`), the
-review databases (`{data_dir}/db`) and any HedgeDoc notes
-(`{data_dir}/hedgedoc`).
+`data_dir` is where the server keeps the card trees (`{data_dir}/local`) and
+the review databases (`{data_dir}/db`).
 
 The server creates all of these at startup, and refuses to start with a message
 naming the directory if it cannot. **It must be writable by the user the server
@@ -134,48 +133,6 @@ its own review database at `{data_dir}/db/{slug}.db`. The slug is derived from
 paths produce the same slug are rejected at startup rather than silently
 sharing a database.
 
-### `[[source]]`
-
-```toml
-[[source]]
-url = "https://notes.example.com/q1QcHIRvQFiTxzwnF-_L3g"
-# owner = "me@example.com"
-
-[[source]]
-url = "https://github.com/me/cards/blob/main/spanish.md"
-# owner = "me@example.com"
-```
-
-A Markdown document fetched over HTTPS and served as a collection of its own.
-Either a [HedgeDoc] note or a file in a git repository — hashcards works out
-which from the URL, so there is nothing to declare.
-
-Recognised git URL shapes:
-
-| Pasted | Fetched from |
-|---|---|
-| `github.com/{owner}/{repo}/blob/{ref}/{path}` | `raw.githubusercontent.com/{owner}/{repo}/{ref}/{path}` |
-| `gitlab.com/{owner}/{repo}/-/blob/{ref}/{path}` | the same host, `/-/raw/` |
-| Gitea and Forgejo `/src/branch/{branch}/{path}` | the same host, `/raw/branch/` |
-| any URL whose path ends in `.md` | unchanged — it is already raw |
-
-Anything else is treated as a HedgeDoc note, whose raw Markdown comes from
-`{url}/download`. Note ids never carry an extension, so the two cannot be
-confused. Private repositories are not supported: the file must be reachable
-without authentication.
-
-The collection name comes from the document title, and sources are re-fetched
-on the same interval as git. Sources can also be added and removed from the web
-interface, which writes them back to this file.
-
-Each source is its own collection, owned by that entry's owner alone. Notes are
-never grouped by host, so several people can take notes from one shared
-HedgeDoc instance — including the same note — without sharing a collection or a
-review database.
-
-`[[hedgedoc]]` is still accepted as a deprecated spelling of `[[source]]`.
-Sources added through the web interface are written as `[[source]]`.
-
 ## My Cards
 
 Cards do not have to come from anywhere else. **My Cards** (`/files`) is a
@@ -192,7 +149,7 @@ Renaming a folder is safe. Each one keeps a `.hashcards.toml` holding a stable
 id, and review databases are named from that id rather than from the folder
 name, so your history follows the rename.
 
-A collection folder cannot take the URL slug of a collection or source that
+A collection folder cannot take the URL slug of a collection or saved deck that
 already exists — routing prefers those, so the folder would be unreachable.
 Names are rejected when you create or rename a folder; a folder that comes to
 collide later (a `[[collection]]` added afterwards, or a folder copied in by
@@ -268,7 +225,7 @@ session_secret = "..."              # at least 32 bytes
 ```
 
 Adding this section turns on login for every route except `/auth/*`, and
-requires every `[[collection]]`, `[[source]]` and `[[deck]]` entry to declare
+requires every `[[collection]]` and `[[deck]]` entry to declare
 an `owner` — an email, matched case-insensitively against the OIDC `email`
 claim. Config load fails if any entry is missing one, and equally if an `owner`
 appears *without* an `[oidc]` section, since nobody would ever be logged in to
@@ -306,7 +263,6 @@ one shows its deck tree; select decks and start a drill. From there:
 | `/collection/{slug}/export` | The whole collection as JSON |
 | `/collection/{slug}/bookmarks` | Cards you flagged while drilling |
 | `/decks` | Create and delete cross-collection decks |
-| `/hedgedoc` | Add and remove HedgeDoc note sources |
 
 **Editing.** Bookmark a card during a drill (shortcut: `b`), then edit it from
 the bookmark list. Edits are written to the Markdown file and committed to git.
@@ -582,7 +538,6 @@ explains the reasoning behind the design.
 - [My implementation of a personal mnemonic medium](https://notes.andymatuschak.org/My_implementation_of_a_personal_mnemonic_medium)
 
 [FSRS]: https://github.com/open-spaced-repetition/fsrs4anki
-[HedgeDoc]: https://hedgedoc.org/
 [hashcards]: https://github.com/eudoxia0/hashcards
 [blog]: https://borretti.me/article/hashcards-plain-text-spaced-repetition
 [esr]: https://borretti.me/article/effective-spaced-repetition
