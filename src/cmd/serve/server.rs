@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -10,7 +11,6 @@ use axum::routing::get;
 use axum::routing::post;
 use axum_extra::extract::cookie::Key;
 use tokio::net::TcpListener;
-use tokio::sync::RwLock;
 
 use crate::cmd::drill::fonts::font_handler;
 use crate::cmd::drill::hljs::HLJS_CSS_URL;
@@ -36,10 +36,8 @@ use crate::cmd::serve::bookmarks::bookmark_delete_handler;
 use crate::cmd::serve::bookmarks::bookmark_list_handler;
 use crate::cmd::serve::bookmarks::bookmark_note_handler;
 use crate::cmd::serve::config::MIN_SESSION_SECRET_BYTES;
-use crate::cmd::serve::config::ResolvedCollection;
 use crate::cmd::serve::config::ResolvedOidc;
 use crate::cmd::serve::config::ResolvedServeConfig;
-use crate::cmd::serve::counts::refresh_collection_info;
 use crate::cmd::serve::decks::check_deck_slug_collisions;
 use crate::cmd::serve::decks::deck_add_handler;
 use crate::cmd::serve::decks::deck_delete_handler;
@@ -62,6 +60,7 @@ use crate::cmd::serve::handlers::collection_post_handler;
 use crate::cmd::serve::handlers::collection_script_handler;
 use crate::cmd::serve::handlers::collection_start_handler;
 use crate::cmd::serve::landing::landing_handler;
+use crate::cmd::serve::local::discover_all_collections;
 use crate::cmd::serve::state::AppState;
 use crate::cmd::serve::state::SharedSession;
 use crate::cmd::serve::state::evict_idle_sessions;
@@ -86,27 +85,28 @@ use crate::utils::ensure_dir;
 const SESSION_STALE_MINUTES: i64 = 60;
 
 /// Close session rows left dangling by a crash or restart, across every
-/// collection this server serves, and return the per-slug counts so the deck
-/// browser can report them once.
+/// collection this server can serve, and return the per-database counts so
+/// the topic browser can report them once.
+///
+/// Keyed by database path rather than by URL slug: two users may each own a
+/// collection called "Spanish", and a slug-keyed notice would be shown to
+/// whichever of them opened the page first.
 ///
 /// A collection whose database cannot be opened is skipped with a log line
-/// rather than failing startup: an unreadable database is the deck browser's
-/// problem to report, not a reason to refuse to serve everything else.
-///
-/// Each collection's database is independent, so the sweeps run on their own
-/// threads rather than one after another: a server with many collections
-/// would otherwise have its startup delayed in proportion to how many it
-/// serves.
-fn sweep_dangling_sessions(config: &ResolvedServeConfig) -> HashMap<String, usize> {
+/// rather than failing startup: an unreadable database is the topic
+/// browser's problem to report, not a reason to refuse to serve everything
+/// else. Each database is independent, so the sweeps run on their own
+/// threads rather than one after another.
+fn sweep_dangling_sessions(data_dir: &Path) -> HashMap<PathBuf, usize> {
     // Only sessions whose heartbeat has been silent this long are presumed
-    // dead. A CLI `drill` sharing the database stamps its heartbeat as the
-    // user works, so a live session is never swept out from under it.
+    // dead. A session in another process stamps its heartbeat as the user
+    // works, so a live one is never swept out from under it.
     let stale_before = Timestamp::now().minus_minutes(SESSION_STALE_MINUTES);
-    let collections: Vec<&ResolvedCollection> = config.collections.iter().collect();
+    let collections = discover_all_collections(data_dir);
 
-    let results: Vec<(String, Fallible<usize>)> = std::thread::scope(|scope| {
+    let results: Vec<(PathBuf, Fallible<usize>)> = std::thread::scope(|scope| {
         let handles: Vec<_> = collections
-            .into_iter()
+            .iter()
             .map(|rc| {
                 scope.spawn(move || {
                     let closed = (|| {
@@ -119,7 +119,7 @@ fn sweep_dangling_sessions(config: &ResolvedServeConfig) -> HashMap<String, usiz
                         Database::new(db_path)
                             .and_then(|db| db.close_dangling_sessions(stale_before))
                     })();
-                    (rc.slug.clone(), closed)
+                    (rc.db_path.clone(), closed)
                 })
             })
             .collect();
@@ -130,16 +130,17 @@ fn sweep_dangling_sessions(config: &ResolvedServeConfig) -> HashMap<String, usiz
     });
 
     let mut counts = HashMap::new();
-    for (slug, closed) in results {
+    for (db_path, closed) in results {
         match closed {
             Ok(0) => {}
             Ok(n) => {
-                log::info!("Closed {n} interrupted session(s) for collection '{slug}'");
-                counts.insert(slug, n);
+                log::info!("Closed {n} interrupted session(s) in {}", db_path.display());
+                counts.insert(db_path, n);
             }
-            Err(e) => {
-                log::error!("Could not close interrupted sessions for collection '{slug}': {e}")
-            }
+            Err(e) => log::error!(
+                "Could not close interrupted sessions in {}: {e}",
+                db_path.display()
+            ),
         }
     }
     counts
@@ -185,16 +186,6 @@ pub async fn start_serve(config: ResolvedServeConfig) -> Fallible<()> {
         ensure_dir(&data_dir.join("db"), "review database directory")?;
     }
 
-    // A configured collection's database may live outside `{data_dir}/db`.
-    for rc in &config.collections {
-        if let Some(parent) = rc.db_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-    }
-
-    let collection_infos = refresh_collection_info(&config.collections);
-    log::debug!("Loaded {} collections", collection_infos.len());
-
     let config_path: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(config.config_path.clone()));
     let bind = format!("{}:{}", config.host, config.port);
 
@@ -204,7 +195,10 @@ pub async fn start_serve(config: ResolvedServeConfig) -> Fallible<()> {
     // so they are closed with all persisted reviews kept. This must not run
     // per request: the predicate cannot distinguish a crashed session from a
     // live one, and a CLI `drill` may be running against the same database.
-    let interrupted_closed = sweep_dangling_sessions(&config);
+    let interrupted_closed = match &config.data_dir {
+        Some(data_dir) => sweep_dangling_sessions(data_dir),
+        None => HashMap::new(),
+    };
 
     // Discovery happens once at startup, not lazily on the first login
     // attempt, so a broken [oidc] config fails fast with a clear error.
@@ -216,16 +210,17 @@ pub async fn start_serve(config: ResolvedServeConfig) -> Fallible<()> {
     // User-assembled decks are resolved once here; adds and deletes refresh
     // the list in place.
     let custom_decks = resolve_custom_decks(&config.custom_decks);
-    check_deck_slug_collisions(&custom_decks, &config.collections)?;
+    // Nothing to check a deck against at startup any more: collections are
+    // discovered per request, from each caller's own tree. The file manager
+    // refuses a folder that would take a deck's slug, which is where the
+    // collision can actually be created.
+    let _ = check_deck_slug_collisions;
 
     let state = AppState {
         config: config.clone(),
-        collections: Arc::new(RwLock::new(collection_infos)),
         sessions: Arc::new(Mutex::new(HashMap::new())),
         custom_decks: Arc::new(Mutex::new(custom_decks)),
         config_path,
-        // Counts were just computed above, so the stamp starts fresh.
-        counts_refreshed_at: Arc::new(Mutex::new(Some(Timestamp::now()))),
         interrupted_closed: Arc::new(Mutex::new(interrupted_closed)),
         session_key: session_key(config.oidc.as_ref())?,
         oidc,
@@ -400,4 +395,48 @@ fn spawn_session_eviction_task(
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cmd::serve::local::collection_id;
+    use crate::helper::create_tmp_directory;
+
+    /// Two users may each have a collection called "Spanish". They slugify
+    /// alike, so a notice keyed by slug would be shown to whichever of them
+    /// opened the page first, reporting the other's interrupted sessions.
+    /// Keyed by database path, each notice reaches its own owner.
+    #[test]
+    fn interrupted_notices_are_keyed_per_database_not_per_slug() -> Fallible<()> {
+        let data_dir = create_tmp_directory()?;
+        let db_dir = data_dir.join("db");
+        ensure_dir(&db_dir, "review database directory")?;
+
+        // Still `local/` at this point; Task 5 renames it to `cards/`.
+        let mut db_paths = Vec::new();
+        for user in ["alice-example.com", "bob-example.com"] {
+            let folder = data_dir.join("local").join(user).join("Spanish");
+            std::fs::create_dir_all(&folder)?;
+            let id = collection_id(&folder)?;
+            let db_path = db_dir.join(format!("{id}.db"));
+            let db_str = match db_path.to_str() {
+                Some(p) => p,
+                None => return fail("temp path is not UTF-8"),
+            };
+            let db = Database::new(db_str)?;
+            // A session row opened long ago and never closed: exactly what a
+            // crash leaves behind.
+            let started = Timestamp::now().minus_minutes(SESSION_STALE_MINUTES * 2);
+            db.create_session(started)?;
+            db_paths.push(db_path);
+        }
+
+        let counts = sweep_dangling_sessions(&data_dir);
+        assert_eq!(counts.len(), 2, "each user's collection swept separately");
+        for db_path in &db_paths {
+            assert_eq!(counts.get(db_path), Some(&1), "{}", db_path.display());
+        }
+        Ok(())
+    }
 }

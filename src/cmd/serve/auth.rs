@@ -635,6 +635,31 @@ impl axum::extract::OptionalFromRequestParts<AppState> for CurrentUser {
 
 #[cfg(test)]
 mod tests {
+
+    /// Create a collection folder named `name` in `owner`'s card tree under
+    /// `data_dir`, holding one card, and stamp it with a stable id so the
+    /// read paths can find it.
+    ///
+    /// The folder name *is* the URL slug: discovery slugifies it, and these
+    /// names contain nothing slugify changes.
+    fn card_collection(
+        data_dir: &std::path::Path,
+        owner: Option<&str>,
+        name: &str,
+        card: &str,
+    ) -> Fallible<()> {
+        use crate::cmd::serve::local::LocalRoot;
+        use crate::cmd::serve::local::collection_id;
+
+        let root = LocalRoot::for_user(data_dir, owner)?;
+        let folder = root.path().join(name);
+        std::fs::create_dir_all(&folder)?;
+        std::fs::write(folder.join("Alpha.md"), card)?;
+        std::fs::create_dir_all(data_dir.join("db"))?;
+        collection_id(&folder)?;
+        Ok(())
+    }
+
     use std::sync::Mutex;
 
     use axum_extra::extract::cookie::Key;
@@ -965,7 +990,6 @@ mod tests {
     #[tokio::test]
     async fn test_oidc_login_round_trip() -> Fallible<()> {
         use crate::cmd::serve::config::DefaultsSection;
-        use crate::cmd::serve::config::ResolvedCollection;
         use crate::cmd::serve::config::ResolvedServeConfig;
         use crate::cmd::serve::server::start_serve;
 
@@ -973,21 +997,21 @@ mod tests {
         let idp_port = spawn_mock_oidc_provider("me@example.com", client_secret).await?;
 
         let dir = tempfile::tempdir()?;
-        std::fs::write(dir.path().join("Alpha.md"), "Q: What is 1+1?\nA: 2\n")?;
+        card_collection(
+            dir.path(),
+            Some("me@example.com"),
+            "test-collection",
+            "Q: What is 1+1?
+A: 2
+",
+        )?;
 
         let port = portpicker::pick_unused_port().expect("no free port for serve");
         let config = ResolvedServeConfig {
             host: "127.0.0.1".to_string(),
             port,
             defaults: DefaultsSection::default(),
-            collections: vec![ResolvedCollection {
-                name: "Test Collection".to_string(),
-                slug: "test-collection".to_string(),
-                coll_dir: dir.path().to_path_buf(),
-                db_path: dir.path().join("hashcards.db"),
-                owner: Some("me@example.com".to_string()),
-            }],
-            data_dir: None,
+            data_dir: Some(dir.path().to_path_buf()),
             config_path: None,
             custom_decks: Vec::new(),
             session_timeout_minutes: 1440,
@@ -1020,7 +1044,7 @@ mod tests {
             response.status()
         );
         let body = response.text().await?;
-        assert!(body.contains("Test Collection"), "body: {body}");
+        assert!(body.contains("test-collection"), "body: {body}");
         Ok(())
     }
 
@@ -1033,7 +1057,6 @@ mod tests {
     #[tokio::test]
     async fn test_login_uses_userinfo_when_the_id_token_has_no_email() -> Fallible<()> {
         use crate::cmd::serve::config::DefaultsSection;
-        use crate::cmd::serve::config::ResolvedCollection;
         use crate::cmd::serve::config::ResolvedServeConfig;
         use crate::cmd::serve::server::start_serve;
 
@@ -1042,21 +1065,21 @@ mod tests {
             spawn_mock_oidc_provider_with("me@example.com", client_secret, false).await?;
 
         let dir = tempfile::tempdir()?;
-        std::fs::write(dir.path().join("Alpha.md"), "Q: What is 1+1?\nA: 2\n")?;
+        card_collection(
+            dir.path(),
+            Some("me@example.com"),
+            "test-collection",
+            "Q: What is 1+1?
+A: 2
+",
+        )?;
 
         let port = portpicker::pick_unused_port().expect("no free port for serve");
         let config = ResolvedServeConfig {
             host: "127.0.0.1".to_string(),
             port,
             defaults: DefaultsSection::default(),
-            collections: vec![ResolvedCollection {
-                name: "Test Collection".to_string(),
-                slug: "test-collection".to_string(),
-                coll_dir: dir.path().to_path_buf(),
-                db_path: dir.path().join("hashcards.db"),
-                owner: Some("me@example.com".to_string()),
-            }],
-            data_dir: None,
+            data_dir: Some(dir.path().to_path_buf()),
             config_path: None,
             custom_decks: Vec::new(),
             session_timeout_minutes: 1440,
@@ -1082,7 +1105,7 @@ mod tests {
         let status = response.status();
         let body = response.text().await?;
         assert!(status.is_success(), "status: {status}, body: {body}");
-        assert!(body.contains("Test Collection"), "body: {body}");
+        assert!(body.contains("test-collection"), "body: {body}");
         Ok(())
     }
 
@@ -1093,7 +1116,6 @@ mod tests {
     #[tokio::test]
     async fn test_login_falls_back_to_the_subject_without_any_email() -> Fallible<()> {
         use crate::cmd::serve::config::DefaultsSection;
-        use crate::cmd::serve::config::ResolvedCollection;
         use crate::cmd::serve::config::ResolvedServeConfig;
         use crate::cmd::serve::server::start_serve;
 
@@ -1103,23 +1125,21 @@ mod tests {
             spawn_mock_idp(subject, "unused@example.com", client_secret, false, false).await?;
 
         let dir = tempfile::tempdir()?;
-        std::fs::write(dir.path().join("Alpha.md"), "Q: What is 1+1?\nA: 2\n")?;
+        card_collection(
+            dir.path(),
+            Some(subject),
+            "test-collection",
+            "Q: What is 1+1?
+A: 2
+",
+        )?;
 
         let port = portpicker::pick_unused_port().expect("no free port for serve");
         let config = ResolvedServeConfig {
             host: "127.0.0.1".to_string(),
             port,
             defaults: DefaultsSection::default(),
-            collections: vec![ResolvedCollection {
-                name: "Test Collection".to_string(),
-                slug: "test-collection".to_string(),
-                coll_dir: dir.path().to_path_buf(),
-                db_path: dir.path().join("hashcards.db"),
-                // The owner is the subject, since that is all this provider
-                // gives out.
-                owner: Some(subject.to_string()),
-            }],
-            data_dir: None,
+            data_dir: Some(dir.path().to_path_buf()),
             config_path: None,
             custom_decks: Vec::new(),
             session_timeout_minutes: 1440,
@@ -1145,14 +1165,13 @@ mod tests {
         let status = response.status();
         let body = response.text().await?;
         assert!(status.is_success(), "status: {status}, body: {body}");
-        assert!(body.contains("Test Collection"), "body: {body}");
+        assert!(body.contains("test-collection"), "body: {body}");
         Ok(())
     }
 
     #[tokio::test]
     async fn test_cross_user_collection_access_is_404() -> Fallible<()> {
         use crate::cmd::serve::config::DefaultsSection;
-        use crate::cmd::serve::config::ResolvedCollection;
         use crate::cmd::serve::config::ResolvedServeConfig;
         use crate::cmd::serve::server::start_serve;
 
@@ -1161,33 +1180,26 @@ mod tests {
         // "as Alice."
         let idp_port = spawn_mock_oidc_provider("alice@example.com", client_secret).await?;
 
-        let alice_dir = tempfile::tempdir()?;
-        std::fs::write(alice_dir.path().join("Alpha.md"), "Q: What is 1+1?\nA: 2\n")?;
-        let bob_dir = tempfile::tempdir()?;
-        std::fs::write(bob_dir.path().join("Beta.md"), "Q: What is 2+2?\nA: 4\n")?;
+        let dir = tempfile::tempdir()?;
+        card_collection(
+            dir.path(),
+            Some("alice@example.com"),
+            "alice-deck",
+            "Q: What is 1+1?\nA: 2\n",
+        )?;
+        card_collection(
+            dir.path(),
+            Some("bob@example.com"),
+            "bob-deck",
+            "Q: What is 2+2?\nA: 4\n",
+        )?;
 
         let port = portpicker::pick_unused_port().expect("no free port for serve");
         let config = ResolvedServeConfig {
             host: "127.0.0.1".to_string(),
             port,
             defaults: DefaultsSection::default(),
-            collections: vec![
-                ResolvedCollection {
-                    name: "Alice's Deck".to_string(),
-                    slug: "alice-deck".to_string(),
-                    coll_dir: alice_dir.path().to_path_buf(),
-                    db_path: alice_dir.path().join("hashcards.db"),
-                    owner: Some("alice@example.com".to_string()),
-                },
-                ResolvedCollection {
-                    name: "Bob's Deck".to_string(),
-                    slug: "bob-deck".to_string(),
-                    coll_dir: bob_dir.path().to_path_buf(),
-                    db_path: bob_dir.path().join("hashcards.db"),
-                    owner: Some("bob@example.com".to_string()),
-                },
-            ],
-            data_dir: None,
+            data_dir: Some(dir.path().to_path_buf()),
             config_path: None,
             custom_decks: Vec::new(),
             session_timeout_minutes: 1440,
@@ -1225,15 +1237,14 @@ mod tests {
             .send()
             .await?;
         let body = response.text().await?;
-        assert!(body.contains("Alice's Deck"), "body: {body}");
-        assert!(!body.contains("Bob's Deck"), "body: {body}");
+        assert!(body.contains("alice-deck"), "body: {body}");
+        assert!(!body.contains("bob-deck"), "body: {body}");
         Ok(())
     }
 
     #[tokio::test]
     async fn test_logout_clears_session() -> Fallible<()> {
         use crate::cmd::serve::config::DefaultsSection;
-        use crate::cmd::serve::config::ResolvedCollection;
         use crate::cmd::serve::config::ResolvedServeConfig;
         use crate::cmd::serve::server::start_serve;
 
@@ -1241,21 +1252,21 @@ mod tests {
         let idp_port = spawn_mock_oidc_provider("me@example.com", client_secret).await?;
 
         let dir = tempfile::tempdir()?;
-        std::fs::write(dir.path().join("Alpha.md"), "Q: What is 1+1?\nA: 2\n")?;
+        card_collection(
+            dir.path(),
+            Some("me@example.com"),
+            "test-collection",
+            "Q: What is 1+1?
+A: 2
+",
+        )?;
 
         let port = portpicker::pick_unused_port().expect("no free port for serve");
         let config = ResolvedServeConfig {
             host: "127.0.0.1".to_string(),
             port,
             defaults: DefaultsSection::default(),
-            collections: vec![ResolvedCollection {
-                name: "Test Collection".to_string(),
-                slug: "test-collection".to_string(),
-                coll_dir: dir.path().to_path_buf(),
-                db_path: dir.path().join("hashcards.db"),
-                owner: Some("me@example.com".to_string()),
-            }],
-            data_dir: None,
+            data_dir: Some(dir.path().to_path_buf()),
             config_path: None,
             custom_decks: Vec::new(),
             session_timeout_minutes: 1440,
@@ -1417,7 +1428,6 @@ mod tests {
     #[tokio::test]
     async fn test_unauthenticated_post_gets_401_not_a_redirect() -> Fallible<()> {
         use crate::cmd::serve::config::DefaultsSection;
-        use crate::cmd::serve::config::ResolvedCollection;
         use crate::cmd::serve::config::ResolvedServeConfig;
         use crate::cmd::serve::server::start_serve;
 
@@ -1425,21 +1435,21 @@ mod tests {
         let idp_port = spawn_mock_oidc_provider("me@example.com", client_secret).await?;
 
         let dir = tempfile::tempdir()?;
-        std::fs::write(dir.path().join("Alpha.md"), "Q: What is 1+1?\nA: 2\n")?;
+        card_collection(
+            dir.path(),
+            Some("me@example.com"),
+            "test-collection",
+            "Q: What is 1+1?
+A: 2
+",
+        )?;
 
         let port = portpicker::pick_unused_port().expect("no free port for serve");
         let config = ResolvedServeConfig {
             host: "127.0.0.1".to_string(),
             port,
             defaults: DefaultsSection::default(),
-            collections: vec![ResolvedCollection {
-                name: "Test Collection".to_string(),
-                slug: "test-collection".to_string(),
-                coll_dir: dir.path().to_path_buf(),
-                db_path: dir.path().join("hashcards.db"),
-                owner: Some("me@example.com".to_string()),
-            }],
-            data_dir: None,
+            data_dir: Some(dir.path().to_path_buf()),
             config_path: None,
             custom_decks: Vec::new(),
             session_timeout_minutes: 1440,

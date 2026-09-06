@@ -88,8 +88,16 @@ data_dir = "/var/lib/hashcards"     # required
 session_timeout_minutes = 1440      # 0 disables eviction
 ```
 
-`data_dir` is where the server keeps the card trees (`{data_dir}/local`) and
-the review databases (`{data_dir}/db`).
+`data_dir` is where the server keeps the card trees (`{data_dir}/local/{user}`)
+and the review databases (`{data_dir}/db`). A collection is a top-level folder
+in one of those trees — discovered by reading the directory, not declared in
+this file — and its review database is named from the stable id in the
+folder's `.hashcards.toml`, so renaming a folder keeps its history.
+
+Ownership is structural: with `[oidc]` configured a user's collections are the
+folders in `{data_dir}/local/{their-email-slug}/`, and without it they are the
+folders in `{data_dir}/local/default/`. There is no `owner` to declare and no
+way to name a collection nobody can reach.
 
 The server creates all of these at startup, and refuses to start with a message
 naming the directory if it cannot. **It must be writable by the user the server
@@ -118,21 +126,6 @@ an `[oidc]` section there is no authentication whatsoever — anyone who can
 reach the port can read your cards and edit the underlying files. Expose it
 only behind an authenticating reverse proxy, or configure OIDC.
 
-### `[[collection]]`
-
-```toml
-[[collection]]
-name = "Japanese"
-path = "japanese"
-# owner = "me@example.com"          # required when [oidc] is configured
-```
-
-Each collection is a directory of Markdown files under `{data_dir}`, with
-its own review database at `{data_dir}/db/{slug}.db`. The slug is derived from
-`path`, so `medicine/anatomy` becomes `medicine-anatomy`; two collections whose
-paths produce the same slug are rejected at startup rather than silently
-sharing a database.
-
 ## My Cards
 
 Cards do not have to come from anywhere else. **My Cards** (`/files`) is a
@@ -149,12 +142,13 @@ Renaming a folder is safe. Each one keeps a `.hashcards.toml` holding a stable
 id, and review databases are named from that id rather than from the folder
 name, so your history follows the rename.
 
-A collection folder cannot take the URL slug of a collection or saved deck that
-already exists — routing prefers those, so the folder would be unreachable.
-Names are rejected when you create or rename a folder; a folder that comes to
-collide later (a `[[collection]]` added afterwards, or a folder copied in by
-hand) is left out of the collection list with a warning in the log rather than
-stopping the server.
+A collection folder cannot take the URL slug of a saved deck: both are
+addressed through `/collection/{slug}` and routing prefers the collection, so
+the deck would become unreachable. Names are rejected when you create or rename
+a folder. Two folders whose names produce the same slug are also a collision;
+the first by name order wins and the other is left out of the list with a
+warning in the log, rather than making the URL mean whichever the filesystem
+happened to yield first.
 
 Deleting a collection folder deletes its review database with it. Folders that
 still hold files are refused, so this only happens once you have emptied one.
@@ -225,7 +219,7 @@ session_secret = "..."              # at least 32 bytes
 ```
 
 Adding this section turns on login for every route except `/auth/*`, and
-requires every `[[collection]]` and `[[deck]]` entry to declare
+requires every `[[deck]]` entry to declare
 an `owner` — an email, matched case-insensitively against the OIDC `email`
 claim. Config load fails if any entry is missing one, and equally if an `owner`
 appears *without* an `[oidc]` section, since nobody would ever be logged in to

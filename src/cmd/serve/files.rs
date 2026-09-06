@@ -1217,13 +1217,9 @@ mod tests {
         Ok(())
     }
 
-    /// An `AppState` whose local trees live under `data_dir` and which
-    /// serves `collections` as configured ones.
-    fn state_for(data_dir: &Path, collections: Vec<ResolvedCollection>) -> AppState {
-        crate::cmd::serve::state::test_support::state_with_data_dir(
-            data_dir.to_path_buf(),
-            collections,
-        )
+    /// An `AppState` whose card trees live under `data_dir`.
+    fn state_for(data_dir: &Path) -> AppState {
+        crate::cmd::serve::state::test_support::state_with_data_dir(data_dir.to_path_buf())
     }
 
     /// Put a saved deck in `state` and return its URL slug.
@@ -1251,7 +1247,7 @@ mod tests {
         // Routing prefers collections, so a folder named after a deck would
         // make the deck unreachable while showing up as its own row.
         let dir = create_tmp_directory()?;
-        let state = state_for(&dir, Vec::new());
+        let state = state_for(&dir);
         let taken = reserve_deck(&state, "Exam revision");
         let form = NewEntryForm {
             parent: String::new(),
@@ -1273,7 +1269,7 @@ mod tests {
     #[test]
     fn a_new_folder_may_not_shadow_another_local_folder_slug() -> Fallible<()> {
         let dir = create_tmp_directory()?;
-        let state = state_for(&dir, Vec::new());
+        let state = state_for(&dir);
         let first = NewEntryForm {
             parent: String::new(),
             name: "Verbs 1".to_string(),
@@ -1293,7 +1289,7 @@ mod tests {
         // Only top-level folders are collections, so nothing below the root
         // shares the slug namespace.
         let dir = create_tmp_directory()?;
-        let state = state_for(&dir, Vec::new());
+        let state = state_for(&dir);
         let taken = reserve_deck(&state, "Exam revision");
         create_entry(
             &state,
@@ -1319,7 +1315,7 @@ mod tests {
     #[test]
     fn renaming_a_folder_onto_a_taken_slug_is_refused() -> Fallible<()> {
         let dir = create_tmp_directory()?;
-        let state = state_for(&dir, Vec::new());
+        let state = state_for(&dir);
         let taken = reserve_deck(&state, "Exam revision");
         create_entry(
             &state,
@@ -1350,7 +1346,7 @@ mod tests {
     #[test]
     fn a_save_outside_any_collection_folder_leaves_the_file_alone() -> Fallible<()> {
         let dir = create_tmp_directory()?;
-        let state = state_for(&dir, Vec::new());
+        let state = state_for(&dir);
         let root = user_root(&state, None)?;
         let path = root.path().join("loose.md");
         std::fs::write(&path, "Q: a\nA: b\n")?;
@@ -1369,7 +1365,7 @@ mod tests {
     #[test]
     fn a_file_whose_content_does_not_parse_can_still_be_repaired() -> Fallible<()> {
         let dir = create_tmp_directory()?;
-        let state = state_for(&dir, Vec::new());
+        let state = state_for(&dir);
         let root = user_root(&state, None)?;
         std::fs::create_dir_all(root.path().join("Spanish"))?;
         let path = root.path().join("Spanish").join("verbs.md");
@@ -1390,7 +1386,7 @@ mod tests {
         // Otherwise `{id}.db` is orphaned in `db/` while a folder recreated
         // under the same name silently starts its history over.
         let dir = create_tmp_directory()?;
-        let state = state_for(&dir, Vec::new());
+        let state = state_for(&dir);
         create_entry(
             &state,
             None,
@@ -1463,7 +1459,7 @@ mod tests {
     #[test]
     fn a_save_is_refused_while_a_session_drills_the_collection() -> Fallible<()> {
         let dir = create_tmp_directory()?;
-        let state = state_for(&dir, Vec::new());
+        let state = state_for(&dir);
         let root = user_root(&state, None)?;
         let folder = root.path().join("Spanish");
         std::fs::create_dir_all(&folder)?;
@@ -1494,7 +1490,7 @@ mod tests {
     #[test]
     fn a_save_naming_an_image_that_is_not_there_is_refused() -> Fallible<()> {
         let dir = create_tmp_directory()?;
-        let state = state_for(&dir, Vec::new());
+        let state = state_for(&dir);
         let root = user_root(&state, None)?;
         let folder = root.path().join("Spanish");
         std::fs::create_dir_all(&folder)?;
@@ -1530,7 +1526,7 @@ mod tests {
     #[tokio::test]
     async fn a_refused_save_answers_with_the_buffer_that_was_submitted() -> Fallible<()> {
         let dir = create_tmp_directory()?;
-        let state = state_for(&dir, Vec::new());
+        let state = state_for(&dir);
         let root = user_root(&state, None)?;
         std::fs::create_dir_all(root.path().join("Spanish"))?;
         let path = root.path().join("Spanish").join("verbs.md");
@@ -1569,7 +1565,7 @@ mod tests {
     #[test]
     fn creating_a_file_may_not_conjure_a_shadowing_collection() -> Fallible<()> {
         let dir = create_tmp_directory()?;
-        let state = state_for(&dir, Vec::new());
+        let state = state_for(&dir);
         let taken = reserve_deck(&state, "Exam revision");
 
         let form = NewEntryForm {
@@ -1593,7 +1589,7 @@ mod tests {
     #[test]
     fn a_file_creates_its_collection_with_an_id() -> Fallible<()> {
         let dir = create_tmp_directory()?;
-        let state = state_for(&dir, Vec::new());
+        let state = state_for(&dir);
         create_entry(
             &state,
             None,
@@ -1615,7 +1611,7 @@ mod tests {
     #[test]
     fn the_editor_refuses_a_file_outside_any_collection() -> Fallible<()> {
         let dir = create_tmp_directory()?;
-        let state = state_for(&dir, Vec::new());
+        let state = state_for(&dir);
         let root = user_root(&state, None)?;
         std::fs::write(root.path().join("loose.md"), "Q: a\nA: b\n")?;
         assert!(load_for_edit(&state, None, "loose.md").is_err());
@@ -1630,7 +1626,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let dir = create_tmp_directory()?;
-        let state = state_for(&dir, Vec::new());
+        let state = state_for(&dir);
         create_entry(
             &state,
             None,
@@ -1702,7 +1698,7 @@ mod tests {
     #[test]
     fn a_user_folder_inside_a_collection_may_not_be_called_media() -> Fallible<()> {
         let dir = create_tmp_directory()?;
-        let state = state_for(&dir, Vec::new());
+        let state = state_for(&dir);
         create_entry(
             &state,
             None,
@@ -1774,7 +1770,7 @@ mod tests {
     #[test]
     fn a_collection_whose_media_folder_holds_decks_is_not_deleted() -> Fallible<()> {
         let dir = create_tmp_directory()?;
-        let state = state_for(&dir, Vec::new());
+        let state = state_for(&dir);
         create_entry(
             &state,
             None,
@@ -1811,7 +1807,7 @@ mod tests {
     #[test]
     fn a_collection_is_not_deleted_or_renamed_while_a_session_drills_it() -> Fallible<()> {
         let dir = create_tmp_directory()?;
-        let state = state_for(&dir, Vec::new());
+        let state = state_for(&dir);
         create_entry(
             &state,
             None,
@@ -1884,7 +1880,7 @@ mod tests {
     #[test]
     fn a_card_file_cannot_be_created_directly_in_the_root() -> Fallible<()> {
         let dir = create_tmp_directory()?;
-        let state = state_for(&dir, Vec::new());
+        let state = state_for(&dir);
         let form = NewEntryForm {
             parent: String::new(),
             name: "notes".to_string(),
@@ -1907,7 +1903,7 @@ mod tests {
     #[test]
     fn a_dotted_path_is_still_recognized_as_a_collection_root() -> Fallible<()> {
         let dir = create_tmp_directory()?;
-        let state = state_for(&dir, Vec::new());
+        let state = state_for(&dir);
         create_entry(
             &state,
             None,
@@ -1953,7 +1949,7 @@ mod tests {
     #[test]
     fn a_collection_holding_only_pasted_images_can_still_be_deleted() -> Fallible<()> {
         let dir = create_tmp_directory()?;
-        let state = state_for(&dir, Vec::new());
+        let state = state_for(&dir);
         create_entry(
             &state,
             None,

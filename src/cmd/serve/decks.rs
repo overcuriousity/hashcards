@@ -318,14 +318,7 @@ pub(super) fn render_decks_page(
 ///
 /// Blocking: local collections are discovered by reading the tree.
 fn owned_collections(state: &AppState, owner: Option<&str>) -> Vec<ResolvedCollection> {
-    let configured = state
-        .config
-        .collections
-        .iter()
-        .filter(|c| c.owner.as_deref() == owner)
-        .cloned();
-    let local = local_collections_for(state, current_user_for(owner).as_ref());
-    configured.chain(local).collect()
+    local_collections_for(state, current_user_for(owner).as_ref())
 }
 
 // ---- HTTP handlers ----
@@ -469,7 +462,10 @@ pub async fn deck_add_handler(
     // Duplicate check, mutation and persist under one lock, so concurrent
     // adds cannot write a config missing each other's decks (BUG-39).
     let decks_arc = state.custom_decks.clone();
-    let collections = state.config.collections.clone();
+    // Checked against the caller's own collections, discovered a moment ago
+    // above: a deck slug carries a `deck-` prefix and a hash, so a collision
+    // means a folder deliberately named after a deck.
+    let collections = owned;
     let persisted = tokio::task::spawn_blocking(move || {
         let mut guard = decks_arc.lock();
         if guard
@@ -562,8 +558,7 @@ mod tests {
     #[test]
     fn local_collections_can_be_put_in_a_custom_deck() -> Fallible<()> {
         let dir = crate::helper::create_tmp_directory()?;
-        let state =
-            crate::cmd::serve::state::test_support::state_with_data_dir(dir.clone(), Vec::new());
+        let state = crate::cmd::serve::state::test_support::state_with_data_dir(dir.clone());
         let root = crate::cmd::serve::files::user_root(&state, None)?;
         std::fs::create_dir_all(root.path().join("Spanish"))?;
         std::fs::write(root.path().join("Spanish").join("verbs.md"), "Q: a\nA: b\n")?;

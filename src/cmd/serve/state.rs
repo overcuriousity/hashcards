@@ -6,8 +6,6 @@ use axum_extra::extract::cookie::Key;
 use chrono::Duration;
 use parking_lot::Mutex;
 
-use tokio::sync::RwLock;
-
 use crate::cmd::drill::render::AnswerControls;
 use crate::cmd::drill::state::MutableState;
 use crate::cmd::serve::auth::OidcRuntime;
@@ -24,7 +22,6 @@ pub type SharedSession = Arc<Mutex<DrillSession>>;
 #[derive(Clone)]
 pub struct AppState {
     pub config: Arc<ResolvedServeConfig>,
-    pub collections: Arc<RwLock<Vec<CollectionInfo>>>,
     pub sessions: Arc<Mutex<HashMap<String, SharedSession>>>,
     /// User-assembled cross-collection decks, resolved at startup and
     /// refreshed whenever one is added or deleted. A `parking_lot` mutex
@@ -32,13 +29,14 @@ pub struct AppState {
     /// paths, not only from async handlers.
     pub custom_decks: Arc<Mutex<Vec<ResolvedCustomDeck>>>,
     pub config_path: Arc<Mutex<Option<PathBuf>>>,
-    /// When the collection counts were last recomputed (BUG-45).
-    pub counts_refreshed_at: Arc<Mutex<Option<Timestamp>>>,
-    /// Per-slug count of session rows closed by the startup sweep, waiting to
-    /// be reported to the user. The deck browser takes the entry the first
-    /// time it renders, so the notice is shown once rather than on every
-    /// visit (see `close_dangling_sessions`).
-    pub interrupted_closed: Arc<Mutex<HashMap<String, usize>>>,
+    /// Per-database count of session rows closed by the startup sweep,
+    /// waiting to be reported to the user. The topic browser takes the entry
+    /// the first time it renders, so the notice is shown once rather than on
+    /// every visit (see `sweep_dangling_sessions`).
+    ///
+    /// Keyed by database path, not by slug: two users may each own a
+    /// collection called "Spanish".
+    pub interrupted_closed: Arc<Mutex<HashMap<PathBuf, usize>>>,
     /// Signs the OIDC session and login-flow cookies. When `[oidc]` is not
     /// configured this key is generated randomly at startup and never used
     /// — keeping it non-optional avoids threading `Option` through every
@@ -163,69 +161,30 @@ pub fn evict_idle_sessions(
     evicted
 }
 
-/// Test-only constructors for `AppState`.
-///
-/// Every serve test needs a state with a known set of collections; without
-/// this they each hand-roll the same fifteen-field literal.
+/// Test-only constructor for `AppState`.
 #[cfg(test)]
 pub mod test_support {
     use super::*;
     use crate::cmd::serve::config::DefaultsSection;
-    use crate::cmd::serve::config::ResolvedCollection;
     use crate::cmd::serve::config::ResolvedServeConfig;
 
-    /// An `AppState` serving exactly `collections`, with no git remote, no
-    /// and no OIDC runtime.
-    pub fn state_with_collections(collections: Vec<ResolvedCollection>) -> AppState {
-        state_with_config(ResolvedServeConfig {
-            host: "127.0.0.1".to_string(),
-            port: 0,
-            defaults: DefaultsSection::default(),
-            collections,
-            data_dir: None,
-            config_path: None,
-            custom_decks: Vec::new(),
-            session_timeout_minutes: 1440,
-            oidc: None,
-        })
-    }
-
-    /// An `AppState` whose local card trees live under `data_dir`, serving
-    /// `collections` as configured ones.
-    pub fn state_with_data_dir(
-        data_dir: PathBuf,
-        collections: Vec<ResolvedCollection>,
-    ) -> AppState {
-        state_with_config(ResolvedServeConfig {
-            host: "127.0.0.1".to_string(),
-            port: 0,
-            defaults: DefaultsSection::default(),
-            collections,
-            data_dir: Some(data_dir),
-            config_path: None,
-            custom_decks: Vec::new(),
-            session_timeout_minutes: 1440,
-            oidc: None,
-        })
-    }
-
-    /// An `AppState` wrapping an already-built config.
-    ///
-    /// `config_path` is taken from the config rather than left empty, so a
-    /// test that passes a config recording where it was loaded from gets a
-    /// state that agrees with it. `custom_decks` stays empty: the config
-    /// holds *entries*, which the real startup path turns into resolved
-    /// decks by reading collections. A test needing those must build them
-    /// itself.
-    pub fn state_with_config(config: ResolvedServeConfig) -> AppState {
-        let config_path = config.config_path.clone();
+    /// An `AppState` whose card trees live under `data_dir`, with no OIDC
+    /// runtime and no saved decks.
+    pub fn state_with_data_dir(data_dir: PathBuf) -> AppState {
         AppState {
-            config: Arc::new(config),
-            collections: Arc::new(RwLock::new(Vec::new())),
+            config: Arc::new(ResolvedServeConfig {
+                host: "127.0.0.1".to_string(),
+                port: 0,
+                defaults: DefaultsSection::default(),
+                data_dir: Some(data_dir),
+                config_path: None,
+                custom_decks: Vec::new(),
+                session_timeout_minutes: 1440,
+                oidc: None,
+            }),
             sessions: Arc::new(Mutex::new(HashMap::new())),
             custom_decks: Arc::new(Mutex::new(Vec::new())),
-            config_path: Arc::new(Mutex::new(config_path)),
-            counts_refreshed_at: Arc::new(Mutex::new(None)),
+            config_path: Arc::new(Mutex::new(None)),
             interrupted_closed: Arc::new(Mutex::new(HashMap::new())),
             session_key: Key::generate(),
             oidc: None,

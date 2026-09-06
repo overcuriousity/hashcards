@@ -7,8 +7,6 @@ use axum::response::Html;
 use maud::Markup;
 use maud::html;
 
-use chrono::Duration;
-
 use crate::cmd::drill::template::page_template;
 use crate::cmd::serve::auth::CurrentUser;
 use crate::cmd::serve::counts::refresh_collection_info;
@@ -19,20 +17,6 @@ use crate::cmd::serve::handlers::deck_sources;
 use crate::cmd::serve::state::AppState;
 use crate::cmd::serve::state::CollectionInfo;
 use crate::flash::Flash;
-use crate::types::timestamp::Timestamp;
-
-/// How often the cached collection counts are recomputed, in minutes.
-const COUNT_REFRESH_MINUTES: u64 = 30;
-
-/// True when the cached collection counts are older than the poll interval.
-pub fn counts_are_stale(last: Option<Timestamp>, now: Timestamp, interval_minutes: u64) -> bool {
-    match last {
-        None => true,
-        Some(last) => {
-            now.into_inner() - last.into_inner() >= Duration::minutes(interval_minutes as i64)
-        }
-    }
-}
 
 pub async fn landing_handler(
     State(state): State<AppState>,
@@ -42,30 +26,9 @@ pub async fn landing_handler(
     let flash = Flash::from_query(&query);
     let owner = current_user.as_ref().map(|u| u.email.clone());
 
-    // BUG-45: recompute counts when they are older than the poll interval.
-    // Counts were refreshed on the git poll interval; with no remote left,
-    // the same period simply keeps a long-lived tab from going stale.
-    let interval_minutes = COUNT_REFRESH_MINUTES;
-    let stale = {
-        let last = state.counts_refreshed_at.lock();
-        counts_are_stale(*last, Timestamp::now(), interval_minutes)
-    };
-    if stale && interval_minutes > 0 {
-        let static_collections = state.config.collections.clone();
-        match tokio::task::spawn_blocking(move || refresh_collection_info(&static_collections))
-            .await
-        {
-            Ok(combined) => {
-                *state.collections.write().await = combined;
-                *state.counts_refreshed_at.lock() = Some(Timestamp::now());
-            }
-            Err(e) => log::error!("Failed to refresh collection counts: {e}"),
-        }
-    }
-
-    // Local collections are discovered per request rather than read from the
-    // cached list: a folder created a moment ago must appear at once, and it
-    // is the user's own writing, not a remote that syncs on a timer.
+    // Collections are discovered per request: a folder created a moment ago
+    // must appear at once, and reading a directory is cheap next to the
+    // count refresh that follows it.
     let local_infos = {
         let state = state.clone();
         let user = current_user.clone();
@@ -82,10 +45,8 @@ pub async fn landing_handler(
         }
     };
 
-    let all_collections = state.collections.read().await;
-    let collections: Vec<&CollectionInfo> = all_collections
+    let collections: Vec<&CollectionInfo> = local_infos
         .iter()
-        .chain(local_infos.iter())
         .filter(|c| c.owner.as_deref() == owner.as_deref())
         .collect();
     let config_available = state.config.data_dir.is_some();
@@ -126,7 +87,6 @@ pub async fn landing_handler(
             is_deck: false,
         })
         .collect();
-    drop(all_collections);
     for deck in custom_decks {
         let state = state.clone();
         let user = current_user.clone();
@@ -300,23 +260,4 @@ fn render_landing_page(
             }
         }
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::error::Fallible;
-
-    /// BUG-45: counts older than the poll interval are stale; missing
-    /// counts are always stale.
-    #[test]
-    fn test_counts_are_stale() -> Fallible<()> {
-        let t0 = Timestamp::try_from("2026-01-01T10:00:00.000".to_string())?;
-        let t29 = Timestamp::try_from("2026-01-01T10:29:00.000".to_string())?;
-        let t30 = Timestamp::try_from("2026-01-01T10:30:00.000".to_string())?;
-        assert!(counts_are_stale(None, t0, 30));
-        assert!(!counts_are_stale(Some(t0), t29, 30));
-        assert!(counts_are_stale(Some(t0), t30, 30));
-        Ok(())
-    }
 }

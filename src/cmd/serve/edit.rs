@@ -525,34 +525,35 @@ fn error_page(slug: &str, hash_hex: &str, msg: &str) -> (StatusCode, Html<String
 mod tests {
     use super::*;
 
-    use std::collections::HashMap;
-    use std::sync::Arc;
-
-    use parking_lot::Mutex;
-    use tokio::sync::RwLock;
-
-    use crate::cmd::serve::config::ResolvedServeConfig;
+    use crate::cmd::serve::config::ResolvedCollection;
     use crate::db::Database;
     use crate::types::card::CardContent;
     use crate::types::timestamp::Timestamp;
 
-    fn test_state(coll_dir: &Path) -> Fallible<AppState> {
-        let config = ResolvedServeConfig::from_directories(
-            vec![coll_dir.display().to_string()],
-            "127.0.0.1".to_string(),
-            0,
-        )?;
-        Ok(AppState {
-            config: Arc::new(config),
-            collections: Arc::new(RwLock::new(Vec::new())),
-            sessions: Arc::new(Mutex::new(HashMap::new())),
-            custom_decks: std::sync::Arc::new(parking_lot::Mutex::new(Vec::new())),
-            config_path: Arc::new(Mutex::new(None)),
-            counts_refreshed_at: Arc::new(Mutex::new(None)),
-            interrupted_closed: Arc::new(Mutex::new(HashMap::new())),
-            session_key: axum_extra::extract::cookie::Key::generate(),
-            oidc: None,
-        })
+    /// A state whose card tree holds one collection named `Deck`, with
+    /// `files` written into it and a stable id stamped so the read paths can
+    /// find it. Returns the state, the collection, and its folder.
+    fn fixture(
+        data_dir: &Path,
+        files: &[(&str, &str)],
+    ) -> Fallible<(AppState, ResolvedCollection, PathBuf)> {
+        use crate::cmd::serve::local::LocalRoot;
+        use crate::cmd::serve::local::collection_id;
+        use crate::cmd::serve::state::test_support::state_with_data_dir;
+
+        let root = LocalRoot::for_user(data_dir, None)?;
+        let folder = root.path().join("Deck");
+        std::fs::create_dir_all(&folder)?;
+        for (rel, content) in files {
+            std::fs::write(folder.join(rel), content)?;
+        }
+        std::fs::create_dir_all(data_dir.join("db"))?;
+        collection_id(&folder)?;
+
+        let state = state_with_data_dir(data_dir.to_path_buf());
+        let rc = find_collection(&state, "Deck", None)
+            .ok_or_else(|| ErrorReport::new("the collection was not discovered"))?;
+        Ok((state, rc, folder))
     }
 
     /// Regression: an edit that makes a card identical to one that already
@@ -563,14 +564,15 @@ mod tests {
     #[test]
     fn test_edit_colliding_with_existing_card_does_not_corrupt() -> Fallible<()> {
         let dir = tempfile::tempdir()?;
-        let coll_dir = dir.path().canonicalize()?;
-        let file = coll_dir.join("Deck.md");
+        let data_dir = dir.path().canonicalize()?;
         // Two distinct cards, both with history.
-        std::fs::write(&file, "Q: One\nA: 1\n\n---\n\nQ: Two\nA: 2\n")?;
-
-        let state = test_state(&coll_dir)?;
-        let slug = state.config.collections[0].slug.clone();
-        let db_path = state.config.collections[0].db_path.clone();
+        let (state, rc, coll_dir) = fixture(
+            &data_dir,
+            &[("Deck.md", "Q: One\nA: 1\n\n---\n\nQ: Two\nA: 2\n")],
+        )?;
+        let file = coll_dir.join("Deck.md");
+        let slug = rc.slug.clone();
+        let db_path = rc.db_path.clone();
         let db_str = db_path
             .to_str()
             .ok_or_else(|| ErrorReport::new("non-utf8 db path"))?;
@@ -617,13 +619,14 @@ mod tests {
     #[test]
     fn test_edit_prepending_a_line_still_migrates_history() -> Fallible<()> {
         let dir = tempfile::tempdir()?;
-        let coll_dir = dir.path().canonicalize()?;
+        let data_dir = dir.path().canonicalize()?;
+        let (state, rc, coll_dir) = fixture(
+            &data_dir,
+            &[("Deck.md", "Q: Capital of France?\nA: Paris\n")],
+        )?;
         let file = coll_dir.join("Deck.md");
-        std::fs::write(&file, "Q: Capital of France?\nA: Paris\n")?;
-
-        let state = test_state(&coll_dir)?;
-        let slug = state.config.collections[0].slug.clone();
-        let db_path = state.config.collections[0].db_path.clone();
+        let slug = rc.slug.clone();
+        let db_path = rc.db_path.clone();
 
         let old_cards = parse_deck(&coll_dir)?.cards;
         assert_eq!(old_cards.len(), 1);
@@ -672,13 +675,11 @@ mod tests {
     #[test]
     fn test_edit_reorder_migrates_history_by_content() -> Fallible<()> {
         let dir = tempfile::tempdir()?;
-        let coll_dir = dir.path().canonicalize()?;
+        let data_dir = dir.path().canonicalize()?;
+        let (state, rc, coll_dir) = fixture(&data_dir, &[("Deck.md", "C: A [x] B [y]\n")])?;
         let file = coll_dir.join("Deck.md");
-        std::fs::write(&file, "C: A [x] B [y]\n")?;
-
-        let state = test_state(&coll_dir)?;
-        let slug = state.config.collections[0].slug.clone();
-        let db_path = state.config.collections[0].db_path.clone();
+        let slug = rc.slug.clone();
+        let db_path = rc.db_path.clone();
 
         let old_cards = parse_deck(&coll_dir)?.cards;
         assert_eq!(old_cards.len(), 2);

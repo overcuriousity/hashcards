@@ -29,11 +29,11 @@ data_dir = "/var/lib/hashcards"       # Directory for the card trees, the review
 # jitter = 0.05                       # Random +/- fraction applied to review intervals (0.0 to 0.5, default: 0.05)
 
 # Optional: OIDC login. Adding this section gates every route except /auth/*
-# behind a login, and then *requires* an `owner` on every [[collection]],
-# [[deck]] entry below. Each collection is visible to exactly
-# its one owner; there is no sharing, signup flow or admin UI. Conversely, an
-# `owner` declared without an [oidc] section is a config error, since nobody
-# would ever be logged in to match it.
+# behind a login, and then *requires* an `owner` on every [[deck]] entry
+# below. Each user's collections are the folders in their own card tree, so
+# a collection is visible to exactly its one owner; there is no sharing,
+# signup flow or admin UI. Conversely, an `owner` declared without an [oidc]
+# section is a config error, since nobody would ever be logged in to match it.
 
 # [oidc]
 # issuer_url = "https://cloud.example.com"
@@ -76,17 +76,10 @@ data_dir = "/var/lib/hashcards"       # Directory for the card trees, the review
 #                                     #   curl -H "Authorization: Bearer <token>" \
 #                                     #     {issuer_url}/apps/oidc/userinfo
 
-# Define one or more collections. Paths are relative to {data_dir}.
-
-[[collection]]
-name = "Japanese"
-path = "japanese"
-# owner = "me@example.com"            # Required when [oidc] is configured
-
-[[collection]]
-name = "Anatomy"
-path = "medicine/anatomy"
-# owner = "someone-else@example.com"
+# Collections are not configured here. A collection is a top-level folder in
+# your card tree -- {data_dir}/local/{your-email-slug} with [oidc], or
+# {data_dir}/local/default without it -- created through My Cards (/files) or
+# by hand. Which tree the folder sits in is who owns it.
 
 # Optional: decks assembled across collections, drilled together in one session.
 # `members` are "{collection-slug}/{deck-name}" pairs. Decks created through the

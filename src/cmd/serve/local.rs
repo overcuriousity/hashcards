@@ -278,6 +278,39 @@ pub fn discover_local_collections(
     Ok(collections)
 }
 
+/// Every collection in every user's tree under `{data_dir}/local`.
+///
+/// For startup-time work that must touch each review database once — the
+/// dangling-session sweep — and nothing else. `owner` is always `None`: a
+/// tree's directory name is a *slug* of an email, which no request can be
+/// matched against, so a collection from here must never be routed to.
+/// Every read path goes through `find_collection` instead.
+///
+/// `ExistingOnly`, so startup never writes an id into a user's tree: a
+/// folder with no id has no database either, and nothing to sweep.
+pub fn discover_all_collections(data_dir: &Path) -> Vec<ResolvedCollection> {
+    let trees_dir = data_dir.join("local");
+    let db_dir = data_dir.join("db");
+    let entries = match read_dir(&trees_dir) {
+        Ok(entries) => entries,
+        // No tree yet is the ordinary state of a fresh install.
+        Err(_) => return Vec::new(),
+    };
+    let mut all = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() || path.is_symlink() {
+            continue;
+        }
+        let root = LocalRoot { root: path };
+        match discover_local_collections(&root, &db_dir, None, IdPolicy::ExistingOnly) {
+            Ok(found) => all.extend(found),
+            Err(e) => log::warn!("Skipping the card tree at {}: {e}", root.path().display()),
+        }
+    }
+    all
+}
+
 /// The id of one folder under `policy`. `None` means "no id yet, and this
 /// caller may not create one".
 fn folder_id(path: &Path, policy: IdPolicy) -> Fallible<Option<String>> {

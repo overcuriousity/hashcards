@@ -308,8 +308,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::cmd::serve::config::ResolvedCollection;
-    use crate::cmd::serve::state::test_support::state_with_collections;
+    use crate::cmd::serve::state::test_support::state_with_data_dir;
     use crate::db::ReviewRecord;
     use crate::helper::create_tmp_copy_of_test_directory;
     use crate::helper::create_tmp_directory;
@@ -399,15 +398,17 @@ mod tests {
     /// slug that does not exist at all.
     #[test]
     fn test_export_is_scoped_to_the_owner() -> Fallible<()> {
-        let dir = create_tmp_copy_of_test_directory()?;
-        let coll_dir = PathBuf::from(&dir);
-        let state = state_with_collections(vec![ResolvedCollection {
-            name: "Alice's Deck".to_string(),
-            slug: "alice-deck".to_string(),
-            coll_dir: coll_dir.clone(),
-            db_path: coll_dir.join("hashcards.db"),
-            owner: Some("alice@example.com".to_string()),
-        }]);
+        use crate::cmd::serve::local::LocalRoot;
+        use crate::cmd::serve::local::collection_id;
+
+        let data_dir = create_tmp_directory()?;
+        let root = LocalRoot::for_user(&data_dir, Some("alice@example.com"))?;
+        let folder = root.path().join("alice-deck");
+        std::fs::create_dir_all(&folder)?;
+        std::fs::write(folder.join("Deck.md"), "Q: What is 1+1?\nA: 2\n")?;
+        collection_id(&folder)?;
+        std::fs::create_dir_all(data_dir.join("db"))?;
+        let state = state_with_data_dir(data_dir);
 
         let json = export_inner(&state, "alice-deck", Some("alice@example.com"))?;
         assert!(

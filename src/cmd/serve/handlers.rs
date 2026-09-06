@@ -40,7 +40,6 @@ use crate::cmd::serve::auth::CurrentUser;
 use crate::cmd::serve::browse::build_deck_tree;
 use crate::cmd::serve::browse::render_browse_page;
 use crate::cmd::serve::config::ResolvedCollection;
-use crate::cmd::serve::counts::refresh_collection_info;
 use crate::cmd::serve::decks::ResolvedCustomDeck;
 use crate::cmd::serve::decks::find_custom_deck;
 use crate::cmd::serve::files::existing_local_collections_for;
@@ -156,7 +155,11 @@ fn collection_get_inner(
         // database, so doing it per request would stamp `ended_at` on a
         // session that is still going. Taking the entry also means the
         // notice appears once instead of on every visit.
-        let interrupted_closed = state.interrupted_closed.lock().remove(slug).unwrap_or(0);
+        let interrupted_closed = state
+            .interrupted_closed
+            .lock()
+            .remove(&rc.db_path)
+            .unwrap_or(0);
         let bookmark_count = db.count_bookmarks()?;
         let html = render_browse_page(
             &rc.name,
@@ -262,14 +265,6 @@ pub(super) fn find_collection(
     slug: &str,
     owner: Option<&str>,
 ) -> Option<ResolvedCollection> {
-    if let Some(rc) = state
-        .config
-        .collections
-        .iter()
-        .find(|c| c.slug == slug && c.owner.as_deref() == owner)
-    {
-        return Some(rc.clone());
-    }
     existing_local_collections_for(state, current_user_for(owner).as_ref())
         .into_iter()
         .find(|c| c.slug == slug && c.owner.as_deref() == owner)
@@ -797,22 +792,6 @@ fn collection_post_inner(
             }
         }
 
-        // Snapshot inputs, then compute + update in background (don't block response).
-        let static_collections = state.config.collections.clone();
-        let collections_clone = state.collections.clone();
-        let counts_refreshed_at = state.counts_refreshed_at.clone();
-        tokio::spawn(async move {
-            match tokio::task::spawn_blocking(move || refresh_collection_info(&static_collections))
-                .await
-            {
-                Ok(combined) => {
-                    *collections_clone.write().await = combined;
-                    *counts_refreshed_at.lock() = Some(Timestamp::now());
-                }
-                Err(e) => log::error!("Collection count refresh failed: {e}"),
-            }
-        });
-
         return Ok(Redirect::to("/"));
     }
 
@@ -852,25 +831,6 @@ fn collection_post_inner(
     // leaves the session running; the only result needing dispatch is
     // `Ignored`, which carries a one-shot message for the user.
     let result = handle_action(&mut session.mutable, action, submitted_card, submitted_undo)?;
-
-    // BUG-45: a finished session changes due counts; refresh them in the
-    // background so the landing page is up to date.
-    if matches!(result, ActionResult::SessionFinished) {
-        let static_collections = state.config.collections.clone();
-        let collections_clone = state.collections.clone();
-        let counts_refreshed_at = state.counts_refreshed_at.clone();
-        tokio::spawn(async move {
-            match tokio::task::spawn_blocking(move || refresh_collection_info(&static_collections))
-                .await
-            {
-                Ok(combined) => {
-                    *collections_clone.write().await = combined;
-                    *counts_refreshed_at.lock() = Some(Timestamp::now());
-                }
-                Err(e) => log::error!("Collection count refresh failed: {e}"),
-            }
-        });
-    }
 
     match result {
         ActionResult::Ignored(reason) => {
@@ -994,8 +954,6 @@ mod tests {
     use std::time::Duration;
     use std::time::Instant;
 
-    use std::collections::HashMap;
-
     use super::SessionSourceSpec;
     use super::collection_get_inner;
     use super::create_session_from_sources;
@@ -1005,7 +963,6 @@ mod tests {
     use crate::cmd::drill::state::MutableState;
     use crate::cmd::drill::state::SessionDbs;
     use crate::cmd::serve::config::ResolvedCollection;
-    use crate::cmd::serve::config::ResolvedServeConfig;
     use crate::cmd::serve::state::AppState;
     use crate::cmd::serve::state::DrillSession;
     use crate::db::Database;
@@ -1042,78 +999,57 @@ mod tests {
     /// callers only match unowned collections.
     #[test]
     fn test_find_collection_is_scoped_to_owner() -> Fallible<()> {
-        use crate::cmd::serve::config::DefaultsSection;
-        use crate::cmd::serve::config::ResolvedCollection;
-        use crate::cmd::serve::handlers::find_collection;
+        let dir = tempfile::tempdir()?;
+        let data_dir = dir.path().to_path_buf();
+        card_collection(
+            &data_dir,
+            Some("alice@example.com"),
+            "alice-deck",
+            "Q: One\nA: 1\n",
+        )?;
+        card_collection(
+            &data_dir,
+            Some("bob@example.com"),
+            "bob-deck",
+            "Q: Two\nA: 2\n",
+        )?;
+        let state = crate::cmd::serve::state::test_support::state_with_data_dir(data_dir);
 
-        let alice_dir = tempfile::tempdir()?;
-        let bob_dir = tempfile::tempdir()?;
-        let collections = vec![
-            ResolvedCollection {
-                name: "Alice's Deck".to_string(),
-                slug: "alice-deck".to_string(),
-                coll_dir: alice_dir.path().to_path_buf(),
-                db_path: alice_dir.path().join("hashcards.db"),
-                owner: Some("alice@example.com".to_string()),
-            },
-            ResolvedCollection {
-                name: "Bob's Deck".to_string(),
-                slug: "bob-deck".to_string(),
-                coll_dir: bob_dir.path().to_path_buf(),
-                db_path: bob_dir.path().join("hashcards.db"),
-                owner: Some("bob@example.com".to_string()),
-            },
-        ];
-        let config = ResolvedServeConfig {
-            host: "127.0.0.1".to_string(),
-            port: 0,
-            defaults: DefaultsSection::default(),
-            collections,
-            data_dir: None,
-            config_path: None,
-            custom_decks: Vec::new(),
-            session_timeout_minutes: 1440,
-            oidc: None,
-        };
-        let state = AppState {
-            config: std::sync::Arc::new(config),
-            collections: std::sync::Arc::new(tokio::sync::RwLock::new(Vec::new())),
-            sessions: std::sync::Arc::new(parking_lot::Mutex::new(HashMap::new())),
-            custom_decks: std::sync::Arc::new(parking_lot::Mutex::new(Vec::new())),
-            config_path: std::sync::Arc::new(parking_lot::Mutex::new(None)),
-            counts_refreshed_at: std::sync::Arc::new(parking_lot::Mutex::new(None)),
-            interrupted_closed: std::sync::Arc::new(parking_lot::Mutex::new(HashMap::new())),
-            session_key: axum_extra::extract::cookie::Key::generate(),
-            oidc: None,
-        };
-
-        assert!(find_collection(&state, "bob-deck", Some("alice@example.com")).is_none());
-        assert!(find_collection(&state, "alice-deck", Some("alice@example.com")).is_some());
-        assert!(find_collection(&state, "alice-deck", None).is_none());
+        assert!(super::find_collection(&state, "bob-deck", Some("alice@example.com")).is_none());
+        assert!(super::find_collection(&state, "alice-deck", Some("alice@example.com")).is_some());
+        assert!(super::find_collection(&state, "alice-deck", None).is_none());
         Ok(())
     }
 
-    fn test_state(coll_dir: &std::path::Path) -> Fallible<AppState> {
-        let config = ResolvedServeConfig::from_directories(
-            vec![coll_dir.display().to_string()],
-            "127.0.0.1".to_string(),
-            0,
-        )?;
-        test_state_with_config(config)
+    /// Create a collection folder named `name` in `owner`'s card tree under
+    /// `data_dir`, holding one card, stamped with a stable id.
+    fn card_collection(
+        data_dir: &std::path::Path,
+        owner: Option<&str>,
+        name: &str,
+        card: &str,
+    ) -> Fallible<()> {
+        use crate::cmd::serve::local::LocalRoot;
+        use crate::cmd::serve::local::collection_id;
+
+        let root = LocalRoot::for_user(data_dir, owner)?;
+        let folder = root.path().join(name);
+        std::fs::create_dir_all(&folder)?;
+        std::fs::write(folder.join("Deck.md"), card)?;
+        std::fs::create_dir_all(data_dir.join("db"))?;
+        collection_id(&folder)?;
+        Ok(())
     }
 
-    fn test_state_with_config(config: ResolvedServeConfig) -> Fallible<AppState> {
-        Ok(AppState {
-            config: std::sync::Arc::new(config),
-            collections: std::sync::Arc::new(tokio::sync::RwLock::new(Vec::new())),
-            sessions: std::sync::Arc::new(parking_lot::Mutex::new(HashMap::new())),
-            custom_decks: std::sync::Arc::new(parking_lot::Mutex::new(Vec::new())),
-            config_path: std::sync::Arc::new(parking_lot::Mutex::new(None)),
-            counts_refreshed_at: std::sync::Arc::new(parking_lot::Mutex::new(None)),
-            interrupted_closed: std::sync::Arc::new(parking_lot::Mutex::new(HashMap::new())),
-            session_key: axum_extra::extract::cookie::Key::generate(),
-            oidc: None,
-        })
+    /// A state whose card tree holds one collection named `Deck`, and that
+    /// collection as discovery reports it.
+    fn test_state(data_dir: &std::path::Path) -> Fallible<(AppState, ResolvedCollection)> {
+        card_collection(data_dir, None, "Deck", "Q: One\nA: 1\n")?;
+        let state =
+            crate::cmd::serve::state::test_support::state_with_data_dir(data_dir.to_path_buf());
+        let rc = super::find_collection(&state, "Deck", None)
+            .ok_or_else(|| ErrorReport::new("the collection was not discovered"))?;
+        Ok((state, rc))
     }
 
     /// Regression: a session removed from the map between the GET handler's
@@ -1125,12 +1061,11 @@ mod tests {
     #[test]
     fn test_detached_session_renders_browse_page_not_stale_session() -> Fallible<()> {
         let dir = tempfile::tempdir()?;
-        let coll_dir = dir.path().canonicalize()?;
-        std::fs::write(coll_dir.join("Deck.md"), "Q: One\nA: 1\n")?;
+        let data_dir = dir.path().canonicalize()?;
 
-        let state = test_state(&coll_dir)?;
-        let slug = state.config.collections[0].slug.clone();
-        let db_path = state.config.collections[0].db_path.clone();
+        let (state, rc) = test_state(&data_dir)?;
+        let slug = rc.slug.clone();
+        let db_path = rc.db_path.clone();
         let db_str = db_path
             .to_str()
             .ok_or_else(|| ErrorReport::new("non-utf8 db path"))?;
@@ -1146,7 +1081,7 @@ mod tests {
             TinyRng::from_seed(1),
         );
         let session = std::sync::Arc::new(parking_lot::Mutex::new(DrillSession::new(
-            coll_dir.clone(),
+            rc.coll_dir.clone(),
             Vec::new(),
             started_at,
             AnswerControls::Full,
@@ -1200,45 +1135,36 @@ mod tests {
         use crate::cmd::serve::decks::ResolvedCustomDeck;
         use crate::cmd::serve::decks::slug_for_deck;
 
-        let alpha_dir = tempfile::tempdir()?;
-        std::fs::write(
-            alpha_dir.path().join("Alpha.md"),
+        // Two collections in one card tree: the deck draws on both, and
+        // `deck_sources` finds them by slug through discovery.
+        let dir = tempfile::tempdir()?;
+        let data_dir = dir.path().to_path_buf();
+        card_collection(
+            &data_dir,
+            None,
+            "alpha",
             "Q: alpha question?\nA: alpha answer\n",
         )?;
-        let beta_dir = tempfile::tempdir()?;
-        std::fs::write(
-            beta_dir.path().join("Beta.md"),
+        card_collection(
+            &data_dir,
+            None,
+            "beta",
             "Q: beta question?\nA: beta answer\n",
         )?;
-
-        let alpha = ResolvedCollection {
-            name: "Alpha".to_string(),
-            slug: "alpha".to_string(),
-            coll_dir: alpha_dir.path().to_path_buf(),
-            db_path: alpha_dir.path().join("alpha.db"),
-            owner: None,
-        };
-        let beta = ResolvedCollection {
-            name: "Beta".to_string(),
-            slug: "beta".to_string(),
-            coll_dir: beta_dir.path().to_path_buf(),
-            db_path: beta_dir.path().join("beta.db"),
-            owner: None,
-        };
-
-        let mut config =
-            ResolvedServeConfig::from_directories(Vec::new(), "127.0.0.1".to_string(), 0)?;
-        config.collections = vec![alpha.clone(), beta.clone()];
-        let state = test_state_with_config(config)?;
+        let state = crate::cmd::serve::state::test_support::state_with_data_dir(data_dir.clone());
+        let alpha = super::find_collection(&state, "alpha", None)
+            .ok_or_else(|| ErrorReport::new("alpha was not discovered"))?;
+        let beta = super::find_collection(&state, "beta", None)
+            .ok_or_else(|| ErrorReport::new("beta was not discovered"))?;
 
         let deck = ResolvedCustomDeck {
             name: "Mixed".to_string(),
             slug: slug_for_deck("Mixed", None),
             owner: None,
             members: vec![
-                crate::cmd::serve::config::DeckMember::parse("alpha/Alpha")
+                crate::cmd::serve::config::DeckMember::parse("alpha/Deck")
                     .ok_or_else(|| ErrorReport::new("member"))?,
-                crate::cmd::serve::config::DeckMember::parse("beta/Beta")
+                crate::cmd::serve::config::DeckMember::parse("beta/Deck")
                     .ok_or_else(|| ErrorReport::new("member"))?,
             ],
         };
@@ -1335,10 +1261,10 @@ mod tests {
             db_path: two_dir.path().join("two.db"),
             owner: None,
         };
-        let mut config =
-            ResolvedServeConfig::from_directories(Vec::new(), "127.0.0.1".to_string(), 0)?;
-        config.collections = vec![one.clone(), two.clone()];
-        let state = test_state_with_config(config)?;
+        let data_dir = tempfile::tempdir()?;
+        let state = crate::cmd::serve::state::test_support::state_with_data_dir(
+            data_dir.path().to_path_buf(),
+        );
 
         let sources = vec![
             SessionSourceSpec {
@@ -1373,7 +1299,7 @@ mod tests {
 
         let dir = tempfile::tempdir()?;
         let data_dir = dir.path().to_path_buf();
-        let state = state_with_data_dir(data_dir.clone(), Vec::new());
+        let state = state_with_data_dir(data_dir.clone());
 
         assert!(find_collection(&state, "Spanish", None).is_none());
         assert!(

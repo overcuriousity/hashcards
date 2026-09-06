@@ -24,11 +24,11 @@ mod tests {
     use std::path::PathBuf;
 
     use portpicker::pick_unused_port;
+    use tempfile::TempDir;
     use tempfile::tempdir;
     use tokio::spawn;
 
     use crate::cmd::serve::config::DefaultsSection;
-    use crate::cmd::serve::config::ResolvedCollection;
     use crate::cmd::serve::config::ResolvedServeConfig;
     use crate::cmd::serve::server::start_serve;
     use crate::db::Database;
@@ -38,39 +38,77 @@ mod tests {
 
     const TEST_HOST: &str = "127.0.0.1";
 
-    /// Start a serve-mode server for one collection rooted at `coll_dir`,
-    /// registered under `slug`. Returns the port.
-    async fn spawn_test_server(coll_dir: PathBuf, slug: &str) -> Fallible<u16> {
-        let port = pick_unused_port().unwrap();
+    /// Create a collection named `name` in the default card tree under
+    /// `data_dir`, holding `files`, and stamp it with a stable id so the
+    /// read paths can find it.
+    ///
+    /// The folder name *is* the URL slug: discovery slugifies it, so a name
+    /// with a space becomes a slug with a dash.
+    ///
+    /// Returns the collection folder and its review database path.
+    fn card_collection(
+        data_dir: &std::path::Path,
+        name: &str,
+        files: &[(&str, &str)],
+    ) -> Fallible<(PathBuf, PathBuf)> {
+        use crate::cmd::serve::local::LocalRoot;
+        use crate::cmd::serve::local::collection_id;
+
+        let root = LocalRoot::for_user(data_dir, None)?;
+        let folder = root.path().join(name);
+        std::fs::create_dir_all(&folder)?;
+        for (rel, content) in files {
+            let path = folder.join(rel);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            write(path, content)?;
+        }
+        let id = collection_id(&folder)?;
+        let db_dir = data_dir.join("db");
+        std::fs::create_dir_all(&db_dir)?;
+        Ok((folder, db_dir.join(format!("{id}.db"))))
+    }
+
+    /// Serve `data_dir` on `port`, and wait until it answers.
+    async fn serve_data_dir(data_dir: &std::path::Path, port: u16) -> Fallible<()> {
         let config = ResolvedServeConfig {
             host: TEST_HOST.to_string(),
             port,
             defaults: DefaultsSection::default(),
-            collections: vec![ResolvedCollection {
-                name: "Test Collection".to_string(),
-                slug: slug.to_string(),
-                coll_dir: coll_dir.clone(),
-                db_path: coll_dir.join("hashcards.db"),
-                owner: None,
-            }],
-            data_dir: None,
+            data_dir: Some(data_dir.to_path_buf()),
             config_path: None,
             custom_decks: Vec::new(),
             session_timeout_minutes: 1440,
             oidc: None,
         };
         spawn(async move { start_serve(config).await });
-        wait_for_server(TEST_HOST, port).await?;
-        Ok(port)
+        wait_for_server(TEST_HOST, port).await
+    }
+
+    /// A server whose card tree holds one collection named `name`. Returns
+    /// the port and the temp directory, which the caller must keep alive.
+    async fn spawn_test_server(name: &str, files: &[(&str, &str)]) -> Fallible<(u16, TempDir)> {
+        let port = pick_unused_port().unwrap();
+        let dir = tempdir()?;
+        card_collection(dir.path(), name, files)?;
+        serve_data_dir(dir.path(), port).await?;
+        Ok((port, dir))
     }
 
     #[tokio::test]
     async fn test_flash_query_param_renders_on_collection_page() -> Fallible<()> {
-        let dir = tempdir()?;
-        let coll_dir = dir.path().to_path_buf();
-        write(coll_dir.join("Alpha.md"), "Q: What is 1+1?\nA: 2\n")?;
         let slug = "test-collection";
-        let port = spawn_test_server(coll_dir, slug).await?;
+        let (port, _dir) = spawn_test_server(
+            slug,
+            &[(
+                "Alpha.md",
+                "Q: What is 1+1?
+A: 2
+",
+            )],
+        )
+        .await?;
 
         let response = reqwest::get(format!(
             "http://{TEST_HOST}:{port}/collection/{slug}?flash=Hello%20world&kind=success"
@@ -88,10 +126,17 @@ mod tests {
     /// of them renamed alone leaves a switch that does nothing.
     #[tokio::test]
     async fn test_theme_switch_is_wired_end_to_end() -> Fallible<()> {
-        let dir = tempdir()?;
-        let coll_dir = dir.path().to_path_buf();
-        write(coll_dir.join("Alpha.md"), "Q: What is 1+1?\nA: 2\n")?;
-        let port = spawn_test_server(coll_dir, "test-collection").await?;
+        let slug = "test-collection";
+        let (port, _dir) = spawn_test_server(
+            slug,
+            &[(
+                "Alpha.md",
+                "Q: What is 1+1?
+A: 2
+",
+            )],
+        )
+        .await?;
 
         let css = reqwest::get(format!("http://{TEST_HOST}:{port}/style.css"))
             .await?
@@ -135,10 +180,17 @@ mod tests {
     /// here instead.
     #[tokio::test]
     async fn test_fonts_are_served() -> Fallible<()> {
-        let dir = tempdir()?;
-        let coll_dir = dir.path().to_path_buf();
-        write(coll_dir.join("Alpha.md"), "Q: What is 1+1?\nA: 2\n")?;
-        let port = spawn_test_server(coll_dir, "test-collection").await?;
+        let slug = "test-collection";
+        let (port, _dir) = spawn_test_server(
+            slug,
+            &[(
+                "Alpha.md",
+                "Q: What is 1+1?
+A: 2
+",
+            )],
+        )
+        .await?;
 
         let css = reqwest::get(format!("http://{TEST_HOST}:{port}/style.css"))
             .await?
@@ -183,11 +235,17 @@ mod tests {
     /// proves the auth routes and middleware are opt-in, not always-on.
     #[tokio::test]
     async fn test_auth_routes_absent_without_oidc_config() -> Fallible<()> {
-        let dir = tempdir()?;
-        let coll_dir = dir.path().to_path_buf();
-        write(coll_dir.join("Alpha.md"), "Q: What is 1+1?\nA: 2\n")?;
         let slug = "test-collection";
-        let port = spawn_test_server(coll_dir, slug).await?;
+        let (port, _dir) = spawn_test_server(
+            slug,
+            &[(
+                "Alpha.md",
+                "Q: What is 1+1?
+A: 2
+",
+            )],
+        )
+        .await?;
 
         let response = reqwest::Client::new()
             .get(format!("http://{TEST_HOST}:{port}/auth/login"))
@@ -209,19 +267,7 @@ mod tests {
         let dir = tempdir()?;
         let data_dir = dir.path().to_path_buf();
 
-        let config = ResolvedServeConfig {
-            host: TEST_HOST.to_string(),
-            port,
-            defaults: DefaultsSection::default(),
-            collections: Vec::new(),
-            data_dir: Some(data_dir.clone()),
-            config_path: None,
-            custom_decks: Vec::new(),
-            session_timeout_minutes: 1440,
-            oidc: None,
-        };
-        spawn(async move { start_serve(config).await });
-        wait_for_server(TEST_HOST, port).await?;
+        serve_data_dir(&data_dir, port).await?;
 
         let client = reqwest::Client::new();
         let base = format!("http://{TEST_HOST}:{port}");
@@ -260,35 +306,16 @@ mod tests {
     /// must not fail with "duplicate field `decks`".
     #[tokio::test]
     async fn test_start_with_multiple_decks() -> Fallible<()> {
-        let port = pick_unused_port().unwrap();
-        let dir = tempdir()?;
-        let coll_dir = dir.path().to_path_buf();
-
-        // Create two markdown files representing two different decks.
-        write(coll_dir.join("Alpha.md"), "Q: What is 1+1?\nA: 2\n")?;
-        write(coll_dir.join("Beta.md"), "Q: What is 2+2?\nA: 4\n")?;
-
         let slug = "test-collection".to_string();
-        let config = ResolvedServeConfig {
-            host: TEST_HOST.to_string(),
-            port,
-            defaults: DefaultsSection::default(),
-            collections: vec![ResolvedCollection {
-                name: "Test Collection".to_string(),
-                slug: slug.clone(),
-                coll_dir: coll_dir.clone(),
-                db_path: coll_dir.join("hashcards.db"),
-                owner: None,
-            }],
-            data_dir: None,
-            config_path: None,
-            custom_decks: Vec::new(),
-            session_timeout_minutes: 1440,
-            oidc: None,
-        };
-
-        spawn(async move { start_serve(config).await });
-        wait_for_server(TEST_HOST, port).await?;
+        // Two markdown files representing two different topics.
+        let (port, _dir) = spawn_test_server(
+            &slug,
+            &[
+                ("Alpha.md", "Q: What is 1+1?\nA: 2\n"),
+                ("Beta.md", "Q: What is 2+2?\nA: 4\n"),
+            ],
+        )
+        .await?;
 
         // POST with multiple `decks` values — this used to fail with
         // "Failed to deserialize form body: duplicate field `decks`".
@@ -323,12 +350,15 @@ mod tests {
     /// cost two presses of the same word.
     #[tokio::test]
     async fn test_drill_from_the_list_lands_on_a_card() -> Fallible<()> {
-        let dir = tempdir()?;
-        let coll_dir = dir.path().to_path_buf();
-        write(coll_dir.join("Alpha.md"), "Q: What is 1+1?\nA: 2\n")?;
-        write(coll_dir.join("Beta.md"), "Q: What is 2+2?\nA: 4\n")?;
         let slug = "test-collection";
-        let port = spawn_test_server(coll_dir, slug).await?;
+        let (port, _dir) = spawn_test_server(
+            slug,
+            &[
+                ("Alpha.md", "Q: What is 1+1?\nA: 2\n"),
+                ("Beta.md", "Q: What is 2+2?\nA: 4\n"),
+            ],
+        )
+        .await?;
         let base = format!("http://{TEST_HOST}:{port}");
         let client = reqwest::Client::new();
 
@@ -361,11 +391,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_start_with_no_decks_is_rejected_with_flash() -> Fallible<()> {
-        let dir = tempdir()?;
-        let coll_dir = dir.path().to_path_buf();
-        write(coll_dir.join("Alpha.md"), "Q: What is 1+1?\nA: 2\n")?;
         let slug = "test-collection";
-        let port = spawn_test_server(coll_dir, slug).await?;
+        let (port, _dir) = spawn_test_server(
+            slug,
+            &[(
+                "Alpha.md",
+                "Q: What is 1+1?
+A: 2
+",
+            )],
+        )
+        .await?;
 
         // POST with no `decks` field at all (no-JS or hand-made form).
         let response = reqwest::Client::new()
@@ -385,11 +421,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_bookmark_delete_error_is_surfaced_as_flash() -> Fallible<()> {
-        let dir = tempdir()?;
-        let coll_dir = dir.path().to_path_buf();
-        write(coll_dir.join("Alpha.md"), "Q: What is 1+1?\nA: 2\n")?;
         let slug = "test-collection";
-        let port = spawn_test_server(coll_dir, slug).await?;
+        let (port, _dir) = spawn_test_server(
+            slug,
+            &[(
+                "Alpha.md",
+                "Q: What is 1+1?
+A: 2
+",
+            )],
+        )
+        .await?;
 
         // "nothex" is not a valid card hash: the delete must fail, and the
         // failure must be visible on the post-redirect bookmarks page.
@@ -406,31 +448,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_landing_counts_refresh_after_session_finish() -> Fallible<()> {
-        let port = pick_unused_port().unwrap();
-        let dir = tempdir()?;
-        let coll_dir = dir.path().to_path_buf();
-        write(coll_dir.join("Deck.md"), "Q: What is 1+1?\nA: 2\n")?;
-
         let slug = "count-collection".to_string();
-        let config = ResolvedServeConfig {
-            host: TEST_HOST.to_string(),
-            port,
-            defaults: DefaultsSection::default(),
-            collections: vec![ResolvedCollection {
-                name: "Count Collection".to_string(),
-                slug: slug.clone(),
-                coll_dir: coll_dir.clone(),
-                db_path: coll_dir.join("hashcards.db"),
-                owner: None,
-            }],
-            data_dir: None,
-            config_path: None,
-            custom_decks: Vec::new(),
-            session_timeout_minutes: 1440,
-            oidc: None,
-        };
-        spawn(async move { start_serve(config).await });
-        wait_for_server(TEST_HOST, port).await?;
+        let (port, _dir) =
+            spawn_test_server(&slug, &[("Deck.md", "Q: What is 1+1?\nA: 2\n")]).await?;
 
         let base = format!("http://{TEST_HOST}:{port}");
         let client = reqwest::Client::new();
@@ -481,33 +501,16 @@ mod tests {
     async fn test_unfinished_session_is_offered_for_resume_not_replaced() -> Fallible<()> {
         let port = pick_unused_port().unwrap();
         let dir = tempdir()?;
-        let coll_dir = dir.path().to_path_buf();
-        write(
-            coll_dir.join("Deck.md"),
-            "Q: What is 1+1?\nA: 2\n\n---\n\nQ: What is 2+2?\nA: 4\n",
-        )?;
-
         let slug = "resume-collection".to_string();
-        let db_path = coll_dir.join("hashcards.db");
-        let config = ResolvedServeConfig {
-            host: TEST_HOST.to_string(),
-            port,
-            defaults: DefaultsSection::default(),
-            collections: vec![ResolvedCollection {
-                name: "Resume Collection".to_string(),
-                slug: slug.clone(),
-                coll_dir: coll_dir.clone(),
-                db_path: db_path.clone(),
-                owner: None,
-            }],
-            data_dir: None,
-            config_path: None,
-            custom_decks: Vec::new(),
-            session_timeout_minutes: 1440,
-            oidc: None,
-        };
-        spawn(async move { start_serve(config).await });
-        wait_for_server(TEST_HOST, port).await?;
+        let (_folder, db_path) = card_collection(
+            dir.path(),
+            &slug,
+            &[(
+                "Deck.md",
+                "Q: What is 1+1?\nA: 2\n\n---\n\nQ: What is 2+2?\nA: 4\n",
+            )],
+        )?;
+        serve_data_dir(dir.path(), port).await?;
 
         let base = format!("http://{TEST_HOST}:{port}");
         let client = reqwest::Client::new();
@@ -548,9 +551,9 @@ mod tests {
     async fn test_dangling_session_row_is_closed_and_reported() -> Fallible<()> {
         let port = pick_unused_port().unwrap();
         let dir = tempdir()?;
-        let coll_dir = dir.path().to_path_buf();
-        write(coll_dir.join("Deck.md"), "Q: What is 1+1?\nA: 2\n")?;
-        let db_path = coll_dir.join("hashcards.db");
+        let slug = "dangling-collection".to_string();
+        let (_folder, db_path) =
+            card_collection(dir.path(), &slug, &[("Deck.md", "Q: What is 1+1?\nA: 2\n")])?;
 
         // Simulate a crash: a session row that was never closed.
         {
@@ -562,26 +565,7 @@ mod tests {
             db.create_session(t0)?;
         }
 
-        let slug = "dangling-collection".to_string();
-        let config = ResolvedServeConfig {
-            host: TEST_HOST.to_string(),
-            port,
-            defaults: DefaultsSection::default(),
-            collections: vec![ResolvedCollection {
-                name: "Dangling Collection".to_string(),
-                slug: slug.clone(),
-                coll_dir: coll_dir.clone(),
-                db_path: db_path.clone(),
-                owner: None,
-            }],
-            data_dir: None,
-            config_path: None,
-            custom_decks: Vec::new(),
-            session_timeout_minutes: 1440,
-            oidc: None,
-        };
-        spawn(async move { start_serve(config).await });
-        wait_for_server(TEST_HOST, port).await?;
+        serve_data_dir(dir.path(), port).await?;
 
         let body = reqwest::get(format!("http://{TEST_HOST}:{port}/collection/{slug}"))
             .await?
@@ -612,33 +596,15 @@ mod tests {
     /// renders the same card rather than the deck browser.
     #[tokio::test]
     async fn test_session_survives_render_error() -> Fallible<()> {
-        let port = pick_unused_port().unwrap();
-        let dir = tempdir()?;
-        let coll_dir = dir.path().to_path_buf();
-        let card_file = coll_dir.join("Alpha.md");
-        write(&card_file, "Q: What is 1+1?\nA: 2\n")?;
-
         let slug = "test-collection".to_string();
-        let config = ResolvedServeConfig {
-            host: TEST_HOST.to_string(),
-            port,
-            defaults: DefaultsSection::default(),
-            collections: vec![ResolvedCollection {
-                name: "Test Collection".to_string(),
-                slug: slug.clone(),
-                coll_dir: coll_dir.clone(),
-                db_path: coll_dir.join("hashcards.db"),
-                owner: None,
-            }],
-            data_dir: None,
-            config_path: None,
-            custom_decks: Vec::new(),
-            session_timeout_minutes: 1440,
-            oidc: None,
-        };
-
-        spawn(async move { start_serve(config).await });
-        wait_for_server(TEST_HOST, port).await?;
+        let (port, dir) =
+            spawn_test_server(&slug, &[("Alpha.md", "Q: What is 1+1?\nA: 2\n")]).await?;
+        let card_file = dir
+            .path()
+            .join("local")
+            .join("default")
+            .join(&slug)
+            .join("Alpha.md");
         let client = reqwest::Client::new();
 
         // Start a drill session; the redirect is followed to the session page.
@@ -696,19 +662,7 @@ mod tests {
         let dir = tempdir()?;
         let data_dir = dir.path().to_path_buf();
         let port = pick_unused_port().unwrap();
-        let config = ResolvedServeConfig {
-            host: TEST_HOST.to_string(),
-            port,
-            defaults: DefaultsSection::default(),
-            collections: Vec::new(),
-            data_dir: Some(data_dir.clone()),
-            config_path: None,
-            custom_decks: Vec::new(),
-            session_timeout_minutes: 1440,
-            oidc: None,
-        };
-        spawn(async move { start_serve(config).await });
-        wait_for_server(TEST_HOST, port).await?;
+        serve_data_dir(&data_dir, port).await?;
 
         let folder = data_dir.join("local").join("default").join("Spanish");
         std::fs::create_dir_all(&folder)?;
@@ -743,19 +697,7 @@ mod tests {
         let dir = tempdir()?;
         let data_dir = dir.path().to_path_buf();
         let port = pick_unused_port().unwrap();
-        let config = ResolvedServeConfig {
-            host: TEST_HOST.to_string(),
-            port,
-            defaults: DefaultsSection::default(),
-            collections: Vec::new(),
-            data_dir: Some(data_dir.clone()),
-            config_path: None,
-            custom_decks: Vec::new(),
-            session_timeout_minutes: 1440,
-            oidc: None,
-        };
-        spawn(async move { start_serve(config).await });
-        wait_for_server(TEST_HOST, port).await?;
+        serve_data_dir(&data_dir, port).await?;
 
         let deck_dir = data_dir.join("local").join("default").join("Spanish");
         std::fs::create_dir_all(&deck_dir)?;
