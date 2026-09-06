@@ -42,7 +42,7 @@ use crate::cmd::serve::browse::render_browse_page;
 use crate::cmd::serve::config::ResolvedCollection;
 use crate::cmd::serve::decks::ResolvedCustomDeck;
 use crate::cmd::serve::decks::find_custom_deck;
-use crate::cmd::serve::files::existing_local_collections_for;
+use crate::cmd::serve::files::existing_collections_for_user;
 use crate::cmd::serve::state::AppState;
 use crate::cmd::serve::state::DrillSession;
 use crate::cmd::serve::state::SharedSession;
@@ -265,7 +265,7 @@ pub(super) fn find_collection(
     slug: &str,
     owner: Option<&str>,
 ) -> Option<ResolvedCollection> {
-    existing_local_collections_for(state, current_user_for(owner).as_ref())
+    existing_collections_for_user(state, current_user_for(owner).as_ref())
         .into_iter()
         .find(|c| c.slug == slug && c.owner.as_deref() == owner)
 }
@@ -302,7 +302,7 @@ pub(super) async fn collection_exists(state: &AppState, slug: &str, owner: Optio
     find_collection_blocking(state, slug, owner).await.is_some()
 }
 
-/// `local_collections_for` keys the tree off a `CurrentUser`; callers here
+/// `collections_for_user` keys the tree off a `CurrentUser`; callers here
 /// already reduced that to an owner email.
 pub(super) fn current_user_for(owner: Option<&str>) -> Option<CurrentUser> {
     owner.map(|email| CurrentUser {
@@ -1029,10 +1029,10 @@ mod tests {
         name: &str,
         card: &str,
     ) -> Fallible<()> {
-        use crate::cmd::serve::local::LocalRoot;
-        use crate::cmd::serve::local::collection_id;
+        use crate::cmd::serve::cards::CardRoot;
+        use crate::cmd::serve::cards::collection_id;
 
-        let root = LocalRoot::for_user(data_dir, owner)?;
+        let root = CardRoot::for_user(data_dir, owner)?;
         let folder = root.path().join(name);
         std::fs::create_dir_all(&folder)?;
         std::fs::write(folder.join("Deck.md"), card)?;
@@ -1293,8 +1293,8 @@ mod tests {
     /// data directory.
     #[test]
     fn find_collection_does_not_write_into_the_local_tree() -> Fallible<()> {
+        use crate::cmd::serve::cards::collection_id;
         use crate::cmd::serve::handlers::find_collection;
-        use crate::cmd::serve::local::collection_id;
         use crate::cmd::serve::state::test_support::state_with_data_dir;
 
         let dir = tempfile::tempdir()?;
@@ -1303,12 +1303,12 @@ mod tests {
 
         assert!(find_collection(&state, "Spanish", None).is_none());
         assert!(
-            !data_dir.join("local").exists(),
+            !data_dir.join("cards").exists(),
             "a lookup created the local tree"
         );
 
         // A folder that already has an id is still found.
-        let folder = data_dir.join("local").join("default").join("Spanish");
+        let folder = data_dir.join("cards").join("default").join("Spanish");
         std::fs::create_dir_all(&folder)?;
         collection_id(&folder)?;
         assert!(find_collection(&state, "Spanish", None).is_some());

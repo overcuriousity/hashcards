@@ -88,15 +88,15 @@ data_dir = "/var/lib/hashcards"     # required
 session_timeout_minutes = 1440      # 0 disables eviction
 ```
 
-`data_dir` is where the server keeps the card trees (`{data_dir}/local/{user}`)
+`data_dir` is where the server keeps the card trees (`{data_dir}/cards/{user}`)
 and the review databases (`{data_dir}/db`). A collection is a top-level folder
 in one of those trees — discovered by reading the directory, not declared in
 this file — and its review database is named from the stable id in the
 folder's `.hashcards.toml`, so renaming a folder keeps its history.
 
 Ownership is structural: with `[oidc]` configured a user's collections are the
-folders in `{data_dir}/local/{their-email-slug}/`, and without it they are the
-folders in `{data_dir}/local/default/`. There is no `owner` to declare and no
+folders in `{data_dir}/cards/{their-email-slug}/`, and without it they are the
+folders in `{data_dir}/cards/default/`. There is no `owner` to declare and no
 way to name a collection nobody can reach.
 
 The server creates all of these at startup, and refuses to start with a message
@@ -128,9 +128,8 @@ only behind an authenticating reverse proxy, or configure OIDC.
 
 ## My Cards
 
-Cards do not have to come from anywhere else. **My Cards** (`/files`) is a
-folder tree hashcards keeps at `{data_dir}/local/{user}` and that only you write
-to — no git remote, no sync that can overwrite it.
+**My Cards** (`/files`) is the folder tree hashcards keeps at
+`{data_dir}/cards/{user}`, and that only you write to.
 
 Each top-level folder is a collection; files inside it are decks. Create a
 folder, add a `.md` file, and write cards in the editor: the buttons insert

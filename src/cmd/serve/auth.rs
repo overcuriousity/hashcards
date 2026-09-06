@@ -648,10 +648,10 @@ mod tests {
         name: &str,
         card: &str,
     ) -> Fallible<()> {
-        use crate::cmd::serve::local::LocalRoot;
-        use crate::cmd::serve::local::collection_id;
+        use crate::cmd::serve::cards::CardRoot;
+        use crate::cmd::serve::cards::collection_id;
 
-        let root = LocalRoot::for_user(data_dir, owner)?;
+        let root = CardRoot::for_user(data_dir, owner)?;
         let folder = root.path().join(name);
         std::fs::create_dir_all(&folder)?;
         std::fs::write(folder.join("Alpha.md"), card)?;

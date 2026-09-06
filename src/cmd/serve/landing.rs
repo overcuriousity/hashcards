@@ -11,7 +11,7 @@ use crate::cmd::drill::template::page_template;
 use crate::cmd::serve::auth::CurrentUser;
 use crate::cmd::serve::counts::refresh_collection_info;
 use crate::cmd::serve::decks::ResolvedCustomDeck;
-use crate::cmd::serve::files::local_collections_for;
+use crate::cmd::serve::files::collections_for_user;
 use crate::cmd::serve::handlers::deck_card_counts;
 use crate::cmd::serve::handlers::deck_sources;
 use crate::cmd::serve::state::AppState;
@@ -33,7 +33,7 @@ pub async fn landing_handler(
         let state = state.clone();
         let user = current_user.clone();
         match tokio::task::spawn_blocking(move || {
-            refresh_collection_info(&local_collections_for(&state, user.as_ref()))
+            refresh_collection_info(&collections_for_user(&state, user.as_ref()))
         })
         .await
         {

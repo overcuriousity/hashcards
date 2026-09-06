@@ -2,12 +2,12 @@ use maud::Markup;
 use maud::html;
 
 use crate::cmd::drill::template::page_template;
+use crate::cmd::serve::cards::CardRoot;
 use crate::cmd::serve::config::slugify;
 use crate::cmd::serve::files::LOOSE_FILE;
 use crate::cmd::serve::files::TreeEntry;
 use crate::cmd::serve::files::parse_buffer;
 use crate::cmd::serve::href::encoded_path;
-use crate::cmd::serve::local::LocalRoot;
 use crate::error::Fallible;
 use crate::error::fail;
 use crate::flash::Flash;
@@ -156,7 +156,7 @@ pub fn render_editor_page(
 /// Returns a fragment, not a page: the editor swaps it into the preview
 /// pane. Errors carry their line number so the user can find them in the
 /// textarea.
-pub fn render_preview(root: &LocalRoot, rel_path: &str, content: &str) -> Markup {
+pub fn render_preview(root: &CardRoot, rel_path: &str, content: &str) -> Markup {
     let parsed = match parse_buffer(rel_path, content) {
         Ok(p) => p,
         Err(e) => {
@@ -226,7 +226,7 @@ fn count_of(n: usize, noun: &str) -> String {
 /// The path comes straight from the browser, so it is resolved inside the
 /// user's root like every other client-supplied path, rather than joined
 /// onto it.
-fn preview_render_config(root: &LocalRoot, rel_path: &str) -> Fallible<MarkdownRenderConfig> {
+fn preview_render_config(root: &CardRoot, rel_path: &str) -> Fallible<MarkdownRenderConfig> {
     let trimmed = rel_path.trim_matches('/');
     let (coll_dir, deck_rel, slug) = match trimmed.split_once('/') {
         Some((top, rest)) => (root.resolve(top)?, rest.to_string(), slugify(top)),
@@ -244,8 +244,8 @@ fn preview_render_config(root: &LocalRoot, rel_path: &str) -> Fallible<MarkdownR
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cmd::serve::cards::CardRoot;
     use crate::cmd::serve::files::TreeEntry;
-    use crate::cmd::serve::local::LocalRoot;
     use crate::error::Fallible;
     use crate::helper::create_tmp_directory;
 
@@ -255,7 +255,7 @@ mod tests {
     #[test]
     fn preview_refuses_a_path_outside_the_root() -> Fallible<()> {
         let dir = create_tmp_directory()?;
-        let root = LocalRoot::for_user(&dir, None)?;
+        let root = CardRoot::for_user(&dir, None)?;
         assert!(preview_render_config(&root, "../../etc/x.md").is_err());
         assert!(preview_render_config(&root, "/etc/x.md").is_err());
         Ok(())
@@ -295,7 +295,7 @@ mod tests {
     #[test]
     fn preview_counts_agree_with_their_nouns() -> Fallible<()> {
         let dir = create_tmp_directory()?;
-        let root = LocalRoot::for_user(&dir, None)?;
+        let root = CardRoot::for_user(&dir, None)?;
         std::fs::create_dir(root.path().join("Spanish"))?;
 
         let one = render_preview(&root, "Spanish/verbs.md", "Q: One\nA: Card").into_string();
@@ -327,7 +327,7 @@ mod tests {
     #[test]
     fn preview_cards_carry_the_rich_text_class() -> Fallible<()> {
         let dir = create_tmp_directory()?;
-        let root = LocalRoot::for_user(&dir, None)?;
+        let root = CardRoot::for_user(&dir, None)?;
         std::fs::create_dir(root.path().join("Spanish"))?;
         let html = render_preview(
             &root,

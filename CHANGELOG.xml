@@ -14,6 +14,14 @@
             The collection list is one list again. Four full-width bars — sign-in, decks, sources, git — announced background details above it, each as loud as the thing the page is for. They are now one line of small links beside the title and one muted status line under it, and the collections are rows carrying the due count in the one colour on the page.
             </change>
         </changed>
+        <removed>
+            <change author="claude">
+            **Remote sources are gone.** `[git]`, `[[source]]`/`[[hedgedoc]]` and the auto-commit of web edits are removed, and with them the `/sources` page, both background sync tasks and every outbound request except OIDC. They could not be edited: a save to a HedgeDoc-backed collection was overwritten on the next sync tick with no warning, and a commit into the git worktree was never pushed, so once the remote moved the branch had diverged and every later `git pull --ff-only` failed silently. A collection is now one thing — a top-level folder in your own card tree, discovered by reading the directory and identified by the stable id in its `.hashcards.toml` — so "a card can be edited" is a flat fact about the application rather than a property of where the card came from. Ownership is structural too: which tree a folder sits in is who owns it, so a collection nobody can reach stops being expressible. Three slug namespaces collapse to one, two database-naming schemes to one, and `{data_dir}/local` is renamed `{data_dir}/cards` now that there is no `{data_dir}/repo` for it to be named against. Review databases stay in `{data_dir}/db` under the names they already have, so no history moves. To bring markdown in, create a file in **My Cards** and paste the text into the editor, which previews through the production parser and validates images before saving. Nothing was deployed, so there is no migration: `[git]`, `[[source]]`, `[[hedgedoc]]` and `[[collection]]` are no longer accepted in `hashcards.toml`.
+            </change>
+            <change author="claude">
+            The notice about sessions a crash left open is now reported per review database rather than per URL slug, and the startup sweep that finds them walks every user's card tree. It used to iterate only the configured collections, which no longer exist; and two users who both call a collection "Spanish" slugify alike, so whichever of them opened the page first was shown the other's count.
+            </change>
+        </removed>
         <fixed>
             <change author="claude">
             The session-completed screen no longer navigates away on a five-second timer. It is the one page in a session a user might want to sit and read.

@@ -24,7 +24,7 @@ use maud::html;
 
 use crate::cmd::drill::template::page_template;
 use crate::cmd::serve::auth::CurrentUser;
-use crate::cmd::serve::files::local_collections_for;
+use crate::cmd::serve::files::collections_for_user;
 use crate::cmd::serve::handlers::current_user_for;
 use crate::cmd::serve::state::AppState;
 use crate::collection::Collection;
@@ -318,7 +318,7 @@ pub(super) fn render_decks_page(
 ///
 /// Blocking: local collections are discovered by reading the tree.
 fn owned_collections(state: &AppState, owner: Option<&str>) -> Vec<ResolvedCollection> {
-    local_collections_for(state, current_user_for(owner).as_ref())
+    collections_for_user(state, current_user_for(owner).as_ref())
 }
 
 // ---- HTTP handlers ----

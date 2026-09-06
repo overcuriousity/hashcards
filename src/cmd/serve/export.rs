@@ -398,11 +398,11 @@ mod tests {
     /// slug that does not exist at all.
     #[test]
     fn test_export_is_scoped_to_the_owner() -> Fallible<()> {
-        use crate::cmd::serve::local::LocalRoot;
-        use crate::cmd::serve::local::collection_id;
+        use crate::cmd::serve::cards::CardRoot;
+        use crate::cmd::serve::cards::collection_id;
 
         let data_dir = create_tmp_directory()?;
-        let root = LocalRoot::for_user(&data_dir, Some("alice@example.com"))?;
+        let root = CardRoot::for_user(&data_dir, Some("alice@example.com"))?;
         let folder = root.path().join("alice-deck");
         std::fs::create_dir_all(&folder)?;
         std::fs::write(folder.join("Deck.md"), "Q: What is 1+1?\nA: 2\n")?;

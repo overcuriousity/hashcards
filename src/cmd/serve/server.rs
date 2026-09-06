@@ -35,6 +35,7 @@ use crate::cmd::serve::auth::require_auth;
 use crate::cmd::serve::bookmarks::bookmark_delete_handler;
 use crate::cmd::serve::bookmarks::bookmark_list_handler;
 use crate::cmd::serve::bookmarks::bookmark_note_handler;
+use crate::cmd::serve::cards::discover_all_collections;
 use crate::cmd::serve::config::MIN_SESSION_SECRET_BYTES;
 use crate::cmd::serve::config::ResolvedOidc;
 use crate::cmd::serve::config::ResolvedServeConfig;
@@ -60,7 +61,6 @@ use crate::cmd::serve::handlers::collection_post_handler;
 use crate::cmd::serve::handlers::collection_script_handler;
 use crate::cmd::serve::handlers::collection_start_handler;
 use crate::cmd::serve::landing::landing_handler;
-use crate::cmd::serve::local::discover_all_collections;
 use crate::cmd::serve::state::AppState;
 use crate::cmd::serve::state::SharedSession;
 use crate::cmd::serve::state::evict_idle_sessions;
@@ -400,7 +400,7 @@ fn spawn_session_eviction_task(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cmd::serve::local::collection_id;
+    use crate::cmd::serve::cards::collection_id;
     use crate::helper::create_tmp_directory;
 
     /// Two users may each have a collection called "Spanish". They slugify
@@ -413,10 +413,9 @@ mod tests {
         let db_dir = data_dir.join("db");
         ensure_dir(&db_dir, "review database directory")?;
 
-        // Still `local/` at this point; Task 5 renames it to `cards/`.
         let mut db_paths = Vec::new();
         for user in ["alice-example.com", "bob-example.com"] {
-            let folder = data_dir.join("local").join(user).join("Spanish");
+            let folder = data_dir.join("cards").join(user).join("Spanish");
             std::fs::create_dir_all(&folder)?;
             let id = collection_id(&folder)?;
             let db_path = db_dir.join(format!("{id}.db"));

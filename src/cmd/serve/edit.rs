@@ -537,11 +537,11 @@ mod tests {
         data_dir: &Path,
         files: &[(&str, &str)],
     ) -> Fallible<(AppState, ResolvedCollection, PathBuf)> {
-        use crate::cmd::serve::local::LocalRoot;
-        use crate::cmd::serve::local::collection_id;
+        use crate::cmd::serve::cards::CardRoot;
+        use crate::cmd::serve::cards::collection_id;
         use crate::cmd::serve::state::test_support::state_with_data_dir;
 
-        let root = LocalRoot::for_user(data_dir, None)?;
+        let root = CardRoot::for_user(data_dir, None)?;
         let folder = root.path().join("Deck");
         std::fs::create_dir_all(&folder)?;
         for (rel, content) in files {

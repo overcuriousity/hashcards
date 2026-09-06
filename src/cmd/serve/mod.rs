@@ -1,6 +1,7 @@
 mod auth;
 mod bookmarks;
 mod browse;
+mod cards;
 pub mod config;
 mod counts;
 mod decks;
@@ -11,7 +12,6 @@ mod files_ui;
 mod handlers;
 mod href;
 mod landing;
-mod local;
 pub mod server;
 mod state;
 mod upload;
@@ -51,10 +51,10 @@ mod tests {
         name: &str,
         files: &[(&str, &str)],
     ) -> Fallible<(PathBuf, PathBuf)> {
-        use crate::cmd::serve::local::LocalRoot;
-        use crate::cmd::serve::local::collection_id;
+        use crate::cmd::serve::cards::CardRoot;
+        use crate::cmd::serve::cards::collection_id;
 
-        let root = LocalRoot::for_user(data_dir, None)?;
+        let root = CardRoot::for_user(data_dir, None)?;
         let folder = root.path().join(name);
         std::fs::create_dir_all(&folder)?;
         for (rel, content) in files {
@@ -601,7 +601,7 @@ A: 2
             spawn_test_server(&slug, &[("Alpha.md", "Q: What is 1+1?\nA: 2\n")]).await?;
         let card_file = dir
             .path()
-            .join("local")
+            .join("cards")
             .join("default")
             .join(&slug)
             .join("Alpha.md");
@@ -664,7 +664,7 @@ A: 2
         let port = pick_unused_port().unwrap();
         serve_data_dir(&data_dir, port).await?;
 
-        let folder = data_dir.join("local").join("default").join("Spanish");
+        let folder = data_dir.join("cards").join("default").join("Spanish");
         std::fs::create_dir_all(&folder)?;
         write(folder.join("a#b.md"), "Q: the cat\nA: el gato\n")?;
 
@@ -699,7 +699,7 @@ A: 2
         let port = pick_unused_port().unwrap();
         serve_data_dir(&data_dir, port).await?;
 
-        let deck_dir = data_dir.join("local").join("default").join("Spanish");
+        let deck_dir = data_dir.join("cards").join("default").join("Spanish");
         std::fs::create_dir_all(&deck_dir)?;
         write(deck_dir.join("verbs.md"), "Q: a\nA: b\n")?;
 

@@ -15,6 +15,12 @@ use serde::Deserialize;
 
 use crate::cmd::run_blocking;
 use crate::cmd::serve::auth::CurrentUser;
+use crate::cmd::serve::cards::COLLECTION_META_FILE;
+use crate::cmd::serve::cards::CardRoot;
+use crate::cmd::serve::cards::IdPolicy;
+use crate::cmd::serve::cards::collection_id;
+use crate::cmd::serve::cards::discover_local_collections;
+use crate::cmd::serve::cards::existing_collection_id;
 use crate::cmd::serve::config::ResolvedCollection;
 use crate::cmd::serve::config::slugify;
 use crate::cmd::serve::edit::file_mtime_ms;
@@ -25,12 +31,6 @@ use crate::cmd::serve::files_ui::render_editor_page;
 use crate::cmd::serve::files_ui::render_preview;
 use crate::cmd::serve::files_ui::render_tree_page;
 use crate::cmd::serve::href::encoded_path;
-use crate::cmd::serve::local::IdPolicy;
-use crate::cmd::serve::local::LOCAL_META_FILE;
-use crate::cmd::serve::local::LocalRoot;
-use crate::cmd::serve::local::collection_id;
-use crate::cmd::serve::local::discover_local_collections;
-use crate::cmd::serve::local::existing_collection_id;
 use crate::cmd::serve::state::AppState;
 use crate::cmd::serve::upload::MEDIA_DIR;
 use crate::db::Database;
@@ -70,7 +70,7 @@ pub struct TreeEntry {
 /// level sorted by name. Dotfiles, the per-collection metadata file and a
 /// collection's `media` folder are hidden: they are hashcards' bookkeeping,
 /// not the user's content.
-pub fn read_tree(root: &LocalRoot) -> Fallible<Vec<TreeEntry>> {
+pub fn read_tree(root: &CardRoot) -> Fallible<Vec<TreeEntry>> {
     let mut out = Vec::new();
     walk(root.path(), "", 0, &mut out)?;
     Ok(out)
@@ -85,7 +85,7 @@ fn walk(dir: &Path, prefix: &str, depth: usize, out: &mut Vec<TreeEntry>) -> Fal
             Ok(n) => n,
             Err(_) => continue,
         };
-        if name.starts_with('.') || name == LOCAL_META_FILE {
+        if name.starts_with('.') || name == COLLECTION_META_FILE {
             continue;
         }
         // `media` directly inside a collection is where pasted images are
@@ -144,8 +144,10 @@ fn validate_name(name: &str) -> Fallible<String> {
     if trimmed.is_empty() {
         return fail("Enter a name.");
     }
-    if trimmed == LOCAL_META_FILE {
-        return fail(format!("`{LOCAL_META_FILE}` is reserved by hashcards."));
+    if trimmed == COLLECTION_META_FILE {
+        return fail(format!(
+            "`{COLLECTION_META_FILE}` is reserved by hashcards."
+        ));
     }
     if trimmed.starts_with('.') {
         return fail("Names cannot start with a dot.");
@@ -217,7 +219,7 @@ fn non_empty_children(dir: &Path, is_collection_root: bool) -> Fallible<Vec<Stri
     let mut kept = Vec::new();
     for entry in read_dir(dir)? {
         let name = entry?.file_name().into_string().unwrap_or_default();
-        if name.starts_with('.') || name == LOCAL_META_FILE {
+        if name.starts_with('.') || name == COLLECTION_META_FILE {
             continue;
         }
         if is_collection_root && name == MEDIA_DIR {
@@ -230,17 +232,17 @@ fn non_empty_children(dir: &Path, is_collection_root: bool) -> Fallible<Vec<Stri
 }
 
 /// The local tree belonging to the caller, created if it is not there yet.
-pub fn user_root(state: &AppState, user: Option<&CurrentUser>) -> Fallible<LocalRoot> {
+pub fn user_root(state: &AppState, user: Option<&CurrentUser>) -> Fallible<CardRoot> {
     let data_dir = data_dir(state)?;
-    LocalRoot::for_user(&data_dir, user.map(|u| u.email.as_str()))
+    CardRoot::for_user(&data_dir, user.map(|u| u.email.as_str()))
 }
 
 /// The same tree, without creating anything. Read paths use this: serving a
 /// page must not write into the user's card folder, and must not fail on a
 /// read-only data directory.
-pub fn user_root_readonly(state: &AppState, user: Option<&CurrentUser>) -> Fallible<LocalRoot> {
+pub fn user_root_readonly(state: &AppState, user: Option<&CurrentUser>) -> Fallible<CardRoot> {
     let data_dir = data_dir(state)?;
-    LocalRoot::open(&data_dir, user.map(|u| u.email.as_str()))
+    CardRoot::open(&data_dir, user.map(|u| u.email.as_str()))
 }
 
 fn data_dir(state: &AppState) -> Fallible<PathBuf> {
@@ -359,7 +361,7 @@ fn owner_key(user: Option<&CurrentUser>) -> Option<String> {
 fn check_collection_slug(
     state: &AppState,
     user: Option<&CurrentUser>,
-    root: &LocalRoot,
+    root: &CardRoot,
     name: &str,
     except: Option<&Path>,
 ) -> Fallible<()> {
@@ -604,7 +606,7 @@ pub const LOOSE_FILE_NEW: &str = "A card file has to live inside a collection fo
 /// A collection is a top-level folder, so a file directly under the root
 /// belongs to none: it can be neither reviewed nor given a place to keep
 /// its images, and every caller refuses it rather than inventing one.
-pub fn collection_folder(root: &LocalRoot, rel: &str) -> Fallible<PathBuf> {
+pub fn collection_folder(root: &CardRoot, rel: &str) -> Fallible<PathBuf> {
     let trimmed = rel.trim_matches('/');
     let top = match trimmed.split('/').next() {
         Some(t) if !t.is_empty() => t.to_string(),
@@ -968,7 +970,7 @@ fn any_card_has_history(db_path: &str, cards: &[Card]) -> Fallible<bool> {
 /// a directory listing is cheap next to the count refresh that follows it.
 /// Discovery failures are logged and treated as "no local collections"
 /// rather than taken down the whole page.
-pub fn local_collections_for(
+pub fn collections_for_user(
     state: &AppState,
     user: Option<&CurrentUser>,
 ) -> Vec<ResolvedCollection> {
@@ -980,7 +982,7 @@ pub fn local_collections_for(
 /// Read paths use this: a folder that has no id yet is skipped rather than
 /// given one, so looking a collection up never writes into the user's tree
 /// (and never blocks the async executor on creating it).
-pub fn existing_local_collections_for(
+pub fn existing_collections_for_user(
     state: &AppState,
     user: Option<&CurrentUser>,
 ) -> Vec<ResolvedCollection> {
@@ -1020,17 +1022,17 @@ fn collections_for(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cmd::serve::local::LocalRoot;
+    use crate::cmd::serve::cards::CardRoot;
     use crate::helper::create_tmp_directory;
 
     #[test]
     fn tree_lists_folders_before_files_depth_first() -> Fallible<()> {
         let dir = create_tmp_directory()?;
-        let root = LocalRoot::for_user(&dir, None)?;
+        let root = CardRoot::for_user(&dir, None)?;
         std::fs::create_dir_all(root.path().join("Spanish"))?;
         std::fs::write(root.path().join("Spanish").join("verbs.md"), "Q: a\nA: b\n")?;
         std::fs::write(
-            root.path().join("Spanish").join(LOCAL_META_FILE),
+            root.path().join("Spanish").join(COLLECTION_META_FILE),
             "id = \"x\"\n",
         )?;
 
@@ -1045,8 +1047,8 @@ mod tests {
     #[test]
     fn tree_hides_the_metadata_file_and_dotfiles() -> Fallible<()> {
         let dir = create_tmp_directory()?;
-        let root = LocalRoot::for_user(&dir, None)?;
-        std::fs::write(root.path().join(LOCAL_META_FILE), "id = \"x\"\n")?;
+        let root = CardRoot::for_user(&dir, None)?;
+        std::fs::write(root.path().join(COLLECTION_META_FILE), "id = \"x\"\n")?;
         std::fs::write(root.path().join(".hidden"), "")?;
 
         assert!(read_tree(&root)?.is_empty());
@@ -1072,18 +1074,18 @@ mod tests {
         assert!(validate_name("a/b").is_err());
         assert!(validate_name("..").is_err());
         assert!(validate_name("").is_err());
-        assert!(validate_name(LOCAL_META_FILE).is_err());
+        assert!(validate_name(COLLECTION_META_FILE).is_err());
     }
 
     #[test]
     fn a_non_empty_folder_is_not_deleted() -> Fallible<()> {
         let dir = create_tmp_directory()?;
-        let root = LocalRoot::for_user(&dir, None)?;
+        let root = CardRoot::for_user(&dir, None)?;
         let folder = root.path().join("Spanish");
         std::fs::create_dir_all(&folder)?;
         std::fs::write(folder.join("verbs.md"), "Q: a\nA: b\n")?;
         // The metadata file alone must not count as "non-empty".
-        std::fs::write(folder.join(LOCAL_META_FILE), "id = \"x\"\n")?;
+        std::fs::write(folder.join(COLLECTION_META_FILE), "id = \"x\"\n")?;
 
         assert_eq!(
             non_empty_children(&folder, true)?,
@@ -1100,7 +1102,7 @@ mod tests {
         // The local root must not sit under the directory that git and
         // source sync own, or a pull could overwrite user writing.
         let dir = create_tmp_directory()?;
-        let root = LocalRoot::for_user(&dir, None)?;
+        let root = CardRoot::for_user(&dir, None)?;
         assert!(!root.path().starts_with(dir.join("repo")));
         Ok(())
     }
@@ -1108,11 +1110,11 @@ mod tests {
     #[test]
     fn db_path_comes_from_the_top_level_folder_id() -> Fallible<()> {
         let dir = create_tmp_directory()?;
-        let root = LocalRoot::for_user(&dir, None)?;
+        let root = CardRoot::for_user(&dir, None)?;
         let folder = root.path().join("Spanish");
         std::fs::create_dir_all(&folder)?;
         std::fs::write(folder.join("verbs.md"), "Q: a\nA: b\n")?;
-        let id = crate::cmd::serve::local::collection_id(&folder)?;
+        let id = crate::cmd::serve::cards::collection_id(&folder)?;
 
         let db_dir = dir.join("db");
         let path = db_path_for(&collection_folder(&root, "Spanish/verbs.md")?, &db_dir)?;
@@ -1123,7 +1125,7 @@ mod tests {
     #[test]
     fn a_file_outside_any_collection_folder_is_rejected() -> Fallible<()> {
         let dir = create_tmp_directory()?;
-        let root = LocalRoot::for_user(&dir, None)?;
+        let root = CardRoot::for_user(&dir, None)?;
         std::fs::write(root.path().join("loose.md"), "Q: a\nA: b\n")?;
         assert!(collection_folder(&root, "loose.md").is_err());
         Ok(())
@@ -1148,7 +1150,7 @@ mod tests {
     #[test]
     fn preview_of_valid_markdown_lists_every_card() -> Fallible<()> {
         let dir = create_tmp_directory()?;
-        let root = LocalRoot::for_user(&dir, None)?;
+        let root = CardRoot::for_user(&dir, None)?;
         std::fs::create_dir_all(root.path().join("Spanish"))?;
         let html = crate::cmd::serve::files_ui::render_preview(
             &root,
@@ -1164,7 +1166,7 @@ mod tests {
     #[test]
     fn preview_of_broken_markdown_reports_the_parse_error() -> Fallible<()> {
         let dir = create_tmp_directory()?;
-        let root = LocalRoot::for_user(&dir, None)?;
+        let root = CardRoot::for_user(&dir, None)?;
         std::fs::create_dir_all(root.path().join("Spanish"))?;
         let html = crate::cmd::serve::files_ui::render_preview(
             &root,
@@ -1676,7 +1678,7 @@ mod tests {
     #[test]
     fn the_media_folder_is_hidden_inside_a_collection() -> Fallible<()> {
         let dir = create_tmp_directory()?;
-        let root = LocalRoot::for_user(&dir, None)?;
+        let root = CardRoot::for_user(&dir, None)?;
         std::fs::create_dir_all(root.path().join("Spanish").join("media"))?;
         std::fs::write(root.path().join("Spanish").join("media").join("a.png"), "x")?;
         std::fs::write(root.path().join("Spanish").join("verbs.md"), "Q: a\nA: b\n")?;
@@ -1897,7 +1899,7 @@ mod tests {
         Ok(())
     }
 
-    /// `LocalRoot::resolve` normalizes a path while the collection checks
+    /// `CardRoot::resolve` normalizes a path while the collection checks
     /// used to split the raw one, so `./Spanish` was deleted as if it were
     /// nested: no id read, and `{id}.db` left orphaned in `db/`.
     #[test]
