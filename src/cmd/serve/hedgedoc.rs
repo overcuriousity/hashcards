@@ -13,7 +13,7 @@ use tokio::time::interval;
 use crate::cmd::serve::config::ResolvedCollection;
 use crate::cmd::serve::config::SourceEntry;
 use crate::cmd::serve::config::slugify;
-use crate::cmd::serve::git::compute_collection_counts;
+use crate::cmd::serve::counts::compute_collection_counts;
 use crate::cmd::serve::source::SourceKind;
 use crate::cmd::serve::source::raw_url;
 use crate::cmd::serve::state::CollectionInfo;
@@ -768,7 +768,7 @@ pub fn build_combined_infos(
     static_collections: &[ResolvedCollection],
     hedgedoc_sources: &[HedgedocSource],
 ) -> Vec<CollectionInfo> {
-    use crate::cmd::serve::git::refresh_collection_info;
+    use crate::cmd::serve::counts::refresh_collection_info;
 
     let mut infos = refresh_collection_info(static_collections);
     for src in hedgedoc_sources {

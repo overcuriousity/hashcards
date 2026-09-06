@@ -11,9 +11,9 @@ use chrono::Duration;
 
 use crate::cmd::drill::template::page_template;
 use crate::cmd::serve::auth::CurrentUser;
+use crate::cmd::serve::counts::refresh_collection_info;
 use crate::cmd::serve::decks::ResolvedCustomDeck;
 use crate::cmd::serve::files::local_collections_for;
-use crate::cmd::serve::git::refresh_collection_info;
 use crate::cmd::serve::handlers::deck_card_counts;
 use crate::cmd::serve::handlers::deck_sources;
 use crate::cmd::serve::hedgedoc::build_combined_infos;

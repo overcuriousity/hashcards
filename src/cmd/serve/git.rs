@@ -11,6 +11,8 @@ use tokio::time::interval;
 
 use crate::cmd::serve::config::ResolvedCollection;
 use crate::cmd::serve::config::ResolvedGit;
+use crate::cmd::serve::counts::compute_collection_counts;
+use crate::cmd::serve::counts::refresh_collection_info;
 use crate::cmd::serve::state::CollectionInfo;
 use crate::cmd::serve::state::HedgedocSource;
 use crate::error::Fallible;
@@ -55,60 +57,6 @@ pub async fn clone_or_pull(repo_url: &str, branch: &str, target_dir: &Path) -> F
         }
     }
     Ok(())
-}
-
-pub fn refresh_collection_info(collections: &[ResolvedCollection]) -> Vec<CollectionInfo> {
-    let mut infos = Vec::new();
-    for rc in collections {
-        let (total_cards, due_today) = match compute_collection_counts(&rc.coll_dir, &rc.db_path) {
-            Ok(counts) => counts,
-            Err(e) => {
-                log::warn!("Failed to load collection '{}': {e}", rc.name);
-                (0, 0)
-            }
-        };
-
-        infos.push(CollectionInfo {
-            name: rc.name.clone(),
-            slug: rc.slug.clone(),
-            total_cards,
-            due_today,
-            owner: rc.owner.clone(),
-        });
-    }
-    infos
-}
-
-pub fn compute_collection_counts(coll_dir: &Path, db_path: &Path) -> Fallible<(usize, usize)> {
-    use crate::collection::Collection;
-    use crate::types::date::Date;
-
-    if !coll_dir.exists() {
-        return Ok((0, 0));
-    }
-
-    let collection = Collection::with_db_path(coll_dir.to_path_buf(), db_path.to_path_buf())?;
-    let total_cards = collection.cards.len();
-
-    let today: Date = Timestamp::now().date();
-
-    // Sync new cards to DB
-    let db_hashes = collection.db.card_hashes()?;
-    let now = Timestamp::now();
-    for card in collection.cards.iter() {
-        if !db_hashes.contains(&card.hash()) {
-            collection.db.insert_card(card.hash(), now)?;
-        }
-    }
-
-    let due_hashes = collection.db.due_today(today)?;
-    let due_today = collection
-        .cards
-        .iter()
-        .filter(|c| due_hashes.contains(&c.hash()))
-        .count();
-
-    Ok((total_cards, due_today))
 }
 
 pub fn spawn_sync_task(
@@ -297,27 +245,7 @@ mod tests {
     use std::path::Path;
     use std::process::Command as SyncCommand;
 
-    use tempfile::tempdir;
-
     use super::commit_edit;
-    use super::refresh_collection_info;
-    use crate::cmd::serve::config::ResolvedCollection;
-    use crate::error::Fallible;
-
-    #[test]
-    fn test_refresh_collection_info_carries_owner() -> Fallible<()> {
-        let dir = tempdir()?;
-        let rc = ResolvedCollection {
-            name: "Japanese".to_string(),
-            slug: "japanese".to_string(),
-            coll_dir: dir.path().to_path_buf(),
-            db_path: dir.path().join("hashcards.db"),
-            owner: Some("me@example.com".to_string()),
-        };
-        let infos = refresh_collection_info(&[rc]);
-        assert_eq!(infos[0].owner.as_deref(), Some("me@example.com"));
-        Ok(())
-    }
 
     fn git(dir: &Path, args: &[&str]) {
         let out = SyncCommand::new("git")

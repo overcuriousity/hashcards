@@ -2,6 +2,7 @@ mod auth;
 mod bookmarks;
 mod browse;
 pub mod config;
+mod counts;
 mod decks;
 mod edit;
 pub mod export;
