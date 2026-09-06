@@ -19,8 +19,6 @@ use crate::types::performance::Jitter;
 pub struct ServeConfig {
     pub server: ServerSection,
     #[serde(default)]
-    pub git: Option<GitSection>,
-    #[serde(default)]
     pub defaults: DefaultsSection,
     #[serde(default)]
     pub oidc: Option<OidcSection>,
@@ -123,37 +121,6 @@ fn default_port() -> u16 {
 
 fn default_session_timeout_minutes() -> u64 {
     1440
-}
-
-#[derive(Deserialize)]
-pub struct GitSection {
-    pub repo_url: Option<String>,
-    #[serde(default = "default_branch")]
-    pub branch: String,
-    #[serde(default = "default_poll_interval")]
-    pub poll_interval_minutes: u64,
-    /// Author name for auto-commits of in-browser edits.
-    #[serde(default = "default_commit_author_name")]
-    pub commit_author_name: String,
-    /// Author email for auto-commits of in-browser edits.
-    #[serde(default = "default_commit_author_email")]
-    pub commit_author_email: String,
-}
-
-fn default_branch() -> String {
-    "main".to_string()
-}
-
-fn default_poll_interval() -> u64 {
-    30
-}
-
-fn default_commit_author_name() -> String {
-    "hashcards web edit".to_string()
-}
-
-fn default_commit_author_email() -> String {
-    "hashcards@localhost".to_string()
 }
 
 #[derive(Deserialize)]
@@ -272,16 +239,6 @@ pub fn load_config(path: &Path) -> Fallible<ServeConfig> {
 
 // --- Resolved runtime config ---
 
-pub struct ResolvedGit {
-    pub repo_url: String,
-    pub branch: String,
-    pub poll_interval_minutes: u64,
-    pub commit_author_name: String,
-    pub commit_author_email: String,
-    pub repo_dir: PathBuf,
-    pub db_dir: PathBuf,
-}
-
 #[derive(Clone)]
 pub struct ResolvedCollection {
     pub name: String,
@@ -295,7 +252,6 @@ pub struct ResolvedCollection {
 pub struct ResolvedServeConfig {
     pub host: String,
     pub port: u16,
-    pub git: Option<ResolvedGit>,
     pub defaults: DefaultsSection,
     pub collections: Vec<ResolvedCollection>,
     /// The directory holding the repo clone and the review databases.
@@ -520,30 +476,9 @@ impl ResolvedServeConfig {
             }
         }
 
-        let git = match config.git {
-            None => None,
-            Some(g) => match g.repo_url {
-                Some(repo_url) => Some(ResolvedGit {
-                    repo_url,
-                    branch: g.branch,
-                    poll_interval_minutes: g.poll_interval_minutes,
-                    commit_author_name: g.commit_author_name,
-                    commit_author_email: g.commit_author_email,
-                    repo_dir: repo_dir.clone(),
-                    db_dir: db_dir.clone(),
-                }),
-                None => {
-                    return fail(
-                        "configuration error: [git] section is present but `repo_url` is missing",
-                    );
-                }
-            },
-        };
-
         Ok(Self {
             host: config.server.host,
             port: config.server.port,
-            git,
             defaults: config.defaults,
             collections,
             data_dir: Some(data_dir),
@@ -600,7 +535,6 @@ impl ResolvedServeConfig {
         Ok(Self {
             host,
             port,
-            git: None,
             defaults: DefaultsSection::default(),
             collections,
             data_dir: None,

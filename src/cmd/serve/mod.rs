@@ -8,7 +8,6 @@ mod edit;
 pub mod export;
 mod files;
 mod files_ui;
-mod git;
 mod handlers;
 mod hedgedoc;
 mod hedgedoc_ui;
@@ -50,7 +49,6 @@ mod tests {
         let config = ResolvedServeConfig {
             host: TEST_HOST.to_string(),
             port,
-            git: None,
             defaults: DefaultsSection::default(),
             collections: vec![ResolvedCollection {
                 name: "Test Collection".to_string(),
@@ -219,7 +217,6 @@ mod tests {
         let config = ResolvedServeConfig {
             host: TEST_HOST.to_string(),
             port,
-            git: None,
             defaults: DefaultsSection::default(),
             collections: Vec::new(),
             data_dir: Some(data_dir.clone()),
@@ -281,7 +278,6 @@ mod tests {
         let config = ResolvedServeConfig {
             host: TEST_HOST.to_string(),
             port,
-            git: None,
             defaults: DefaultsSection::default(),
             collections: vec![ResolvedCollection {
                 name: "Test Collection".to_string(),
@@ -454,7 +450,6 @@ mod tests {
         let config = ResolvedServeConfig {
             host: TEST_HOST.to_string(),
             port,
-            git: None,
             defaults: DefaultsSection::default(),
             collections: vec![],
             data_dir: Some(data_dir.clone()),
@@ -503,7 +498,6 @@ mod tests {
         let config = ResolvedServeConfig {
             host: TEST_HOST.to_string(),
             port,
-            git: None,
             defaults: DefaultsSection::default(),
             collections: vec![ResolvedCollection {
                 name: "Count Collection".to_string(),
@@ -582,7 +576,6 @@ mod tests {
         let config = ResolvedServeConfig {
             host: TEST_HOST.to_string(),
             port,
-            git: None,
             defaults: DefaultsSection::default(),
             collections: vec![ResolvedCollection {
                 name: "Resume Collection".to_string(),
@@ -658,7 +651,6 @@ mod tests {
         let config = ResolvedServeConfig {
             host: TEST_HOST.to_string(),
             port,
-            git: None,
             defaults: DefaultsSection::default(),
             collections: vec![ResolvedCollection {
                 name: "Dangling Collection".to_string(),
@@ -716,7 +708,6 @@ mod tests {
         let config = ResolvedServeConfig {
             host: TEST_HOST.to_string(),
             port,
-            git: None,
             defaults: DefaultsSection::default(),
             collections: vec![ResolvedCollection {
                 name: "Test Collection".to_string(),
@@ -795,7 +786,6 @@ mod tests {
         let config = ResolvedServeConfig {
             host: TEST_HOST.to_string(),
             port,
-            git: None,
             defaults: DefaultsSection::default(),
             collections: Vec::new(),
             data_dir: Some(data_dir.clone()),
@@ -844,7 +834,6 @@ mod tests {
         let config = ResolvedServeConfig {
             host: TEST_HOST.to_string(),
             port,
-            git: None,
             defaults: DefaultsSection::default(),
             collections: Vec::new(),
             data_dir: Some(data_dir.clone()),

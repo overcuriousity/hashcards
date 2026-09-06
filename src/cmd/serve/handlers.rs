@@ -43,7 +43,6 @@ use crate::cmd::serve::config::ResolvedCollection;
 use crate::cmd::serve::decks::ResolvedCustomDeck;
 use crate::cmd::serve::decks::find_custom_deck;
 use crate::cmd::serve::files::existing_local_collections_for;
-use crate::cmd::serve::git::clone_or_pull;
 use crate::cmd::serve::hedgedoc::apply_sync_result;
 use crate::cmd::serve::hedgedoc::build_combined_infos;
 use crate::cmd::serve::hedgedoc::build_source;
@@ -1031,41 +1030,6 @@ pub async fn collection_script_handler(
     )
 }
 
-pub async fn sync_handler(State(state): State<AppState>) -> Redirect {
-    let git = match &state.config.git {
-        Some(git) => git,
-        None => {
-            return Flash::error("Sync is not available: no git repository is configured.")
-                .redirect("/");
-        }
-    };
-
-    match clone_or_pull(&git.repo_url, &git.branch, &git.repo_dir).await {
-        Ok(()) => {
-            let sources_snapshot = state.hedgedoc_sources.lock().clone();
-            let static_collections = state.config.collections.clone();
-            match tokio::task::spawn_blocking(move || {
-                build_combined_infos(&static_collections, &sources_snapshot)
-            })
-            .await
-            {
-                Ok(combined) => {
-                    *state.collections.write().await = combined;
-                    *state.counts_refreshed_at.lock() = Some(Timestamp::now());
-                }
-                Err(e) => log::error!("Manual sync failed to compute collection counts: {e}"),
-            }
-            *state.last_synced.lock() = Some(Timestamp::now());
-            log::debug!("Manual sync completed successfully");
-            Flash::success("Sync complete.").redirect("/")
-        }
-        Err(e) => {
-            log::error!("Manual sync failed: {e}");
-            Flash::error(format!("Sync failed: {e}")).redirect("/")
-        }
-    }
-}
-
 // ---- HedgeDoc management handlers ----
 
 /// Render the HedgeDoc source management page.
@@ -1433,7 +1397,6 @@ mod tests {
         let config = ResolvedServeConfig {
             host: "127.0.0.1".to_string(),
             port: 0,
-            git: None,
             defaults: DefaultsSection::default(),
             collections,
             data_dir: None,
@@ -1447,7 +1410,6 @@ mod tests {
             config: std::sync::Arc::new(config),
             collections: std::sync::Arc::new(tokio::sync::RwLock::new(Vec::new())),
             sessions: std::sync::Arc::new(parking_lot::Mutex::new(HashMap::new())),
-            last_synced: std::sync::Arc::new(parking_lot::Mutex::new(None)),
             hedgedoc_sources: std::sync::Arc::new(parking_lot::Mutex::new(Vec::new())),
             custom_decks: std::sync::Arc::new(parking_lot::Mutex::new(Vec::new())),
             hedgedoc_last_synced: std::sync::Arc::new(parking_lot::Mutex::new(None)),
@@ -1478,7 +1440,6 @@ mod tests {
             config: std::sync::Arc::new(config),
             collections: std::sync::Arc::new(tokio::sync::RwLock::new(Vec::new())),
             sessions: std::sync::Arc::new(parking_lot::Mutex::new(HashMap::new())),
-            last_synced: std::sync::Arc::new(parking_lot::Mutex::new(None)),
             hedgedoc_sources: std::sync::Arc::new(parking_lot::Mutex::new(Vec::new())),
             custom_decks: std::sync::Arc::new(parking_lot::Mutex::new(Vec::new())),
             hedgedoc_last_synced: std::sync::Arc::new(parking_lot::Mutex::new(None)),

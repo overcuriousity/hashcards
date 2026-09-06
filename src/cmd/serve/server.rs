@@ -37,7 +37,6 @@ use crate::cmd::serve::bookmarks::bookmark_list_handler;
 use crate::cmd::serve::bookmarks::bookmark_note_handler;
 use crate::cmd::serve::config::MIN_SESSION_SECRET_BYTES;
 use crate::cmd::serve::config::ResolvedCollection;
-use crate::cmd::serve::config::ResolvedGit;
 use crate::cmd::serve::config::ResolvedOidc;
 use crate::cmd::serve::config::ResolvedServeConfig;
 use crate::cmd::serve::decks::check_deck_slug_collisions;
@@ -58,8 +57,6 @@ use crate::cmd::serve::files::files_folder_handler;
 use crate::cmd::serve::files::files_get_handler;
 use crate::cmd::serve::files::files_rename_handler;
 use crate::cmd::serve::files::preview_handler;
-use crate::cmd::serve::git::clone_or_pull;
-use crate::cmd::serve::git::spawn_sync_task;
 use crate::cmd::serve::handlers::collection_file_handler;
 use crate::cmd::serve::handlers::collection_get_handler;
 use crate::cmd::serve::handlers::collection_post_handler;
@@ -69,7 +66,6 @@ use crate::cmd::serve::handlers::hedgedoc_add_handler;
 use crate::cmd::serve::handlers::hedgedoc_delete_handler;
 use crate::cmd::serve::handlers::hedgedoc_manage_handler;
 use crate::cmd::serve::handlers::hedgedoc_sync_now_handler;
-use crate::cmd::serve::handlers::sync_handler;
 use crate::cmd::serve::hedgedoc::build_combined_infos;
 use crate::cmd::serve::hedgedoc::build_source_lossless;
 use crate::cmd::serve::hedgedoc::check_startup_slug_collisions;
@@ -98,6 +94,9 @@ use crate::utils::ensure_dir;
 /// server also serves, is closed if `serve` happens to restart during that
 /// window. Accepted tradeoff — any fixed cutoff has some such window.
 const SESSION_STALE_MINUTES: i64 = 60;
+
+/// How often HedgeDoc notes are re-fetched, in minutes.
+const HEDGEDOC_POLL_MINUTES: u64 = 30;
 
 /// Close session rows left dangling by a crash or restart, across every
 /// collection this server serves, and return the per-slug counts so the deck
@@ -207,28 +206,6 @@ pub async fn start_serve(config: ResolvedServeConfig) -> Fallible<()> {
         ensure_dir(&data_dir.join("hedgedoc"), "HedgeDoc note directory")?;
     }
 
-    // Git mode: clone/pull repo and create data directories
-    let sync_git = match &config.git {
-        Some(git) => {
-            ensure_dir(&git.repo_dir, "git repository directory")?;
-            ensure_dir(&git.db_dir, "review database directory")?;
-
-            log::debug!("Initial git sync...");
-            clone_or_pull(&git.repo_url, &git.branch, &git.repo_dir).await?;
-
-            Some(ResolvedGit {
-                repo_url: git.repo_url.clone(),
-                branch: git.branch.clone(),
-                poll_interval_minutes: git.poll_interval_minutes,
-                commit_author_name: git.commit_author_name.clone(),
-                commit_author_email: git.commit_author_email.clone(),
-                repo_dir: git.repo_dir.clone(),
-                db_dir: git.db_dir.clone(),
-            })
-        }
-        None => None,
-    };
-
     // Ensure DB parent directories exist for all collections (in git mode these
     // are already created above; in non-git TOML mode they may not exist yet).
     for rc in &config.collections {
@@ -257,12 +234,6 @@ pub async fn start_serve(config: ResolvedServeConfig) -> Fallible<()> {
     let collection_infos = build_combined_infos(&config.collections, &hedgedoc_sources_init);
     log::debug!("Loaded {} collections", collection_infos.len());
 
-    let last_synced = if config.git.is_some() {
-        Some(Timestamp::now())
-    } else {
-        None
-    };
-
     let sync_collections: Vec<ResolvedCollection> = config
         .collections
         .iter()
@@ -275,12 +246,10 @@ pub async fn start_serve(config: ResolvedServeConfig) -> Fallible<()> {
         })
         .collect();
 
-    // Determine poll interval for HedgeDoc (inherit from git, or default 30 min).
-    let hedgedoc_poll_minutes = config
-        .git
-        .as_ref()
-        .map(|g| g.poll_interval_minutes)
-        .unwrap_or(30);
+    // HedgeDoc notes used to inherit the git poll interval. With no git
+    // remote left there is nothing to inherit from, so the old fallback is
+    // now simply the interval.
+    let hedgedoc_poll_minutes = HEDGEDOC_POLL_MINUTES;
 
     let config_path: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(config.config_path.clone()));
     let bind = format!("{}:{}", config.host, config.port);
@@ -334,7 +303,6 @@ pub async fn start_serve(config: ResolvedServeConfig) -> Fallible<()> {
         config: config.clone(),
         collections: Arc::new(RwLock::new(collection_infos)),
         sessions: Arc::new(Mutex::new(HashMap::new())),
-        last_synced: Arc::new(Mutex::new(last_synced)),
         hedgedoc_sources: hedgedoc_sources.clone(),
         custom_decks: Arc::new(Mutex::new(custom_decks)),
         hedgedoc_last_synced: hedgedoc_last_synced.clone(),
@@ -347,17 +315,6 @@ pub async fn start_serve(config: ResolvedServeConfig) -> Fallible<()> {
     };
 
     spawn_session_eviction_task(state.sessions.clone(), config.session_timeout_minutes);
-
-    // Spawn background git sync task (only in git mode)
-    if let Some(git) = sync_git {
-        spawn_sync_task(
-            git,
-            sync_collections.clone(),
-            state.collections.clone(),
-            state.last_synced.clone(),
-            state.hedgedoc_sources.clone(),
-        );
-    }
 
     // Spawn background HedgeDoc sync task (only when data_dir is available)
     if data_dir.is_some() {
@@ -372,7 +329,6 @@ pub async fn start_serve(config: ResolvedServeConfig) -> Fallible<()> {
 
     let app = Router::new()
         .route("/", get(landing_handler))
-        .route("/sync", post(sync_handler))
         .route("/files", get(files_get_handler))
         .route("/files/folder", post(files_folder_handler))
         .route("/files/file", post(files_file_handler))

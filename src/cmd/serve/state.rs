@@ -27,7 +27,6 @@ pub struct AppState {
     pub config: Arc<ResolvedServeConfig>,
     pub collections: Arc<RwLock<Vec<CollectionInfo>>>,
     pub sessions: Arc<Mutex<HashMap<String, SharedSession>>>,
-    pub last_synced: Arc<Mutex<Option<Timestamp>>>,
     pub hedgedoc_sources: Arc<Mutex<Vec<HedgedocSource>>>,
     /// User-assembled cross-collection decks, resolved at startup and
     /// refreshed whenever one is added or deleted. A `parking_lot` mutex
@@ -206,7 +205,6 @@ pub mod test_support {
         state_with_config(ResolvedServeConfig {
             host: "127.0.0.1".to_string(),
             port: 0,
-            git: None,
             defaults: DefaultsSection::default(),
             collections,
             data_dir: None,
@@ -227,7 +225,6 @@ pub mod test_support {
         state_with_config(ResolvedServeConfig {
             host: "127.0.0.1".to_string(),
             port: 0,
-            git: None,
             defaults: DefaultsSection::default(),
             collections,
             data_dir: Some(data_dir),
@@ -253,7 +250,6 @@ pub mod test_support {
             config: Arc::new(config),
             collections: Arc::new(RwLock::new(Vec::new())),
             sessions: Arc::new(Mutex::new(HashMap::new())),
-            last_synced: Arc::new(Mutex::new(None)),
             hedgedoc_sources: Arc::new(Mutex::new(Vec::new())),
             custom_decks: Arc::new(Mutex::new(Vec::new())),
             hedgedoc_last_synced: Arc::new(Mutex::new(None)),

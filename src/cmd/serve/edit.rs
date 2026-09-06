@@ -17,7 +17,6 @@ use serde::Deserialize;
 use crate::cmd::drill::template::page_template;
 use crate::cmd::run_blocking;
 use crate::cmd::serve::auth::CurrentUser;
-use crate::cmd::serve::git::commit_edit;
 use crate::cmd::serve::handlers::find_collection;
 use crate::cmd::serve::state::AppState;
 use crate::db::Database;
@@ -148,8 +147,6 @@ pub struct EditOutcome {
     pub migrated: usize,
     /// New cards that could not be matched to prior history and start fresh.
     pub skipped: usize,
-    /// Whether the edit was committed to a containing git repository.
-    pub committed: bool,
 }
 
 pub async fn edit_post_handler(
@@ -161,19 +158,18 @@ pub async fn edit_post_handler(
     let state2 = state.clone();
     let slug2 = slug.clone();
     let hash2 = hash_hex.clone();
-    match run_blocking(move || edit_post_inner(&state2, &slug2, &hash2, form, current_user)).await {
+    let owner = current_user.map(|u| u.email);
+    match run_blocking(move || edit_post_inner(&state2, &slug2, &hash2, form, owner.as_deref()))
+        .await
+    {
         Ok(outcome) => {
             log::debug!(
-                "Edit saved: {} card(s) migrated, {} skipped, committed={}",
+                "Edit saved: {} card(s) migrated, {} skipped",
                 outcome.migrated,
-                outcome.skipped,
-                outcome.committed
+                outcome.skipped
             );
             let target = format!("/collection/{slug}/bookmarks");
-            let mut msg = String::from("Card saved.");
-            if outcome.committed {
-                msg.push_str(" Committed to git.");
-            }
+            let msg = String::from("Card saved.");
             let flash = if outcome.skipped > 0 {
                 Flash::error(format!(
                     "{msg} {} card(s) could not be matched to their previous review history and will start fresh.",
@@ -193,9 +189,8 @@ fn edit_post_inner(
     slug: &str,
     hash_hex: &str,
     form: EditForm,
-    current_user: Option<CurrentUser>,
+    owner: Option<&str>,
 ) -> Fallible<EditOutcome> {
-    let owner = current_user.as_ref().map(|u| u.email.as_str());
     let rc = find_collection(state, slug, owner)
         .ok_or_else(|| ErrorReport::new(format!("Unknown collection: {slug}")))?;
 
@@ -281,27 +276,6 @@ fn edit_post_inner(
         }
     };
 
-    // FEAT-04: every successful web edit becomes a git commit, so git sync
-    // keeps working and the collection gets versioned card history for free.
-    // When OIDC is on, the commit is attributed to the logged-in user rather
-    // than the shared configured default, so git history shows who edited
-    // what.
-    let (author_name, author_email): (&str, &str) = match &current_user {
-        Some(user) => (user.email.as_str(), user.email.as_str()),
-        None => match state.config.git.as_ref() {
-            Some(g) => (
-                g.commit_author_name.as_str(),
-                g.commit_author_email.as_str(),
-            ),
-            None => ("hashcards web edit", "hashcards@localhost"),
-        },
-    };
-    let committed = commit_edit(&file_path, author_name, author_email).map_err(|e| {
-        ErrorReport::new(format!(
-            "The edit was saved, but committing it to git failed: {e} Sync may fail until the change is committed by hand."
-        ))
-    })?;
-
     Ok(EditOutcome {
         migrated: counts.renamed,
         // A rename the database declined as a true collision (its target
@@ -309,7 +283,6 @@ fn edit_post_inner(
         // user should hear about. A rename whose old hash had no history of
         // its own is not: there was nothing to lose.
         skipped: plan.skipped + counts.collided,
-        committed,
     })
 }
 
@@ -573,7 +546,6 @@ mod tests {
             config: Arc::new(config),
             collections: Arc::new(RwLock::new(Vec::new())),
             sessions: Arc::new(Mutex::new(HashMap::new())),
-            last_synced: Arc::new(Mutex::new(None)),
             hedgedoc_sources: Arc::new(Mutex::new(Vec::new())),
             custom_decks: std::sync::Arc::new(parking_lot::Mutex::new(Vec::new())),
             hedgedoc_last_synced: Arc::new(Mutex::new(None)),
@@ -753,170 +725,6 @@ mod tests {
         for c in &old_cards {
             assert!(!db.card_exists(c.hash())?, "stale old card {}", c.hash());
         }
-        Ok(())
-    }
-
-    use std::process::Command as SyncCommand;
-
-    fn git(dir: &Path, args: &[&str]) {
-        let out = SyncCommand::new("git")
-            .args(args)
-            .current_dir(dir)
-            .output()
-            .unwrap();
-        assert!(
-            out.status.success(),
-            "git {args:?} failed: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-    }
-
-    /// Regression test for BUG-34 / FEAT-04: after a web edit in a git-backed
-    /// collection, the working tree is clean and a subsequent pull succeeds.
-    #[test]
-    fn test_edit_in_git_backed_collection_commits_and_pull_succeeds() -> Fallible<()> {
-        let dir = tempfile::tempdir()?;
-        let work = dir.path().join("work");
-        std::fs::create_dir_all(&work)?;
-        // Not canonicalized: on Windows that adds a `\\?\` verbatim prefix,
-        // which git's clone-source parser below misreads as a UNC host.
-        // `tempdir()` already returns an absolute path.
-
-        git(&work, &["init", "-b", "main"]);
-        // The per-collection DB lives in the collection dir in --directories
-        // mode; ignore it so the clean-tree assertion sees only card files.
-        std::fs::write(work.join(".gitignore"), "hashcards.db\n")?;
-        let file = work.join("Deck.md");
-        std::fs::write(&file, "Q: capital of France?\nA: Paris\n")?;
-        git(&work, &["add", "."]);
-        git(
-            &work,
-            &[
-                "-c",
-                "user.name=t",
-                "-c",
-                "user.email=t@t",
-                "commit",
-                "-m",
-                "init",
-            ],
-        );
-
-        // A bare clone acts as the remote so `git pull` has something to talk to.
-        let remote = dir.path().join("remote.git");
-        let work_str = work
-            .to_str()
-            .ok_or_else(|| ErrorReport::new("non-utf8 tempdir"))?;
-        let remote_str = remote
-            .to_str()
-            .ok_or_else(|| ErrorReport::new("non-utf8 tempdir"))?;
-        git(dir.path(), &["clone", "--bare", work_str, remote_str]);
-        git(&work, &["remote", "add", "origin", remote_str]);
-
-        let state = test_state(&work)?;
-        let slug = state.config.collections[0].slug.clone();
-        let cards = parse_deck(&work)?.cards;
-        let hash_hex = cards[0].hash().to_hex();
-        let mtime = file_mtime_ms(&file)?;
-
-        let outcome = edit_post_inner(
-            &state,
-            &slug,
-            &hash_hex,
-            EditForm {
-                new_text: "Q: capital of France?\nA: **Paris**".to_string(),
-                mtime_ms: mtime.to_string(),
-            },
-            None,
-        )?;
-        assert!(outcome.committed, "edit was not committed");
-
-        // The working tree is clean...
-        let status = SyncCommand::new("git")
-            .args(["status", "--porcelain"])
-            .current_dir(&work)
-            .output()?;
-        assert!(
-            status.stdout.is_empty(),
-            "working tree not clean after edit: {}",
-            String::from_utf8_lossy(&status.stdout)
-        );
-
-        // ...and a subsequent pull succeeds.
-        let pull = SyncCommand::new("git")
-            .args(["pull", "--ff-only", "origin", "main"])
-            .current_dir(&work)
-            .output()?;
-        assert!(
-            pull.status.success(),
-            "pull failed after edit: {}",
-            String::from_utf8_lossy(&pull.stderr)
-        );
-        Ok(())
-    }
-
-    /// When `[oidc]` is on, an in-browser edit's git commit is attributed to
-    /// the logged-in user, not the configured default — a better audit
-    /// trail than a single shared "hashcards web edit" author.
-    #[test]
-    fn test_edit_commit_uses_current_user_as_author_when_oidc_is_on() -> Fallible<()> {
-        let dir = tempfile::tempdir()?;
-        let work = dir.path().join("work");
-        std::fs::create_dir_all(&work)?;
-
-        git(&work, &["init", "-b", "main"]);
-        std::fs::write(work.join(".gitignore"), "hashcards.db\n")?;
-        let file = work.join("Deck.md");
-        std::fs::write(&file, "Q: capital of France?\nA: Paris\n")?;
-        git(&work, &["add", "."]);
-        git(
-            &work,
-            &[
-                "-c",
-                "user.name=t",
-                "-c",
-                "user.email=t@t",
-                "commit",
-                "-m",
-                "init",
-            ],
-        );
-
-        // Alice must own the collection for `find_collection` to resolve it
-        // under her session — an unowned collection would 404 for anyone
-        // authenticated, by design (see Task 8).
-        let mut state = test_state(&work)?;
-        {
-            let config = std::sync::Arc::get_mut(&mut state.config)
-                .ok_or_else(|| ErrorReport::new("config Arc unexpectedly shared"))?;
-            config.collections[0].owner = Some("alice@example.com".to_string());
-        }
-        let slug = state.config.collections[0].slug.clone();
-        let cards = parse_deck(&work)?.cards;
-        let hash_hex = cards[0].hash().to_hex();
-        let mtime = file_mtime_ms(&file)?;
-
-        let current_user = Some(CurrentUser {
-            email: "alice@example.com".to_string(),
-        });
-        let outcome = edit_post_inner(
-            &state,
-            &slug,
-            &hash_hex,
-            EditForm {
-                new_text: "Q: capital of France?\nA: **Paris**".to_string(),
-                mtime_ms: mtime.to_string(),
-            },
-            current_user,
-        )?;
-        assert!(outcome.committed, "edit was not committed");
-
-        let log = SyncCommand::new("git")
-            .args(["log", "-1", "--pretty=format:%an <%ae>"])
-            .current_dir(&work)
-            .output()?;
-        let author = String::from_utf8_lossy(&log.stdout);
-        assert_eq!(author, "alice@example.com <alice@example.com>");
         Ok(())
     }
 

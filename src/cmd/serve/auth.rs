@@ -979,7 +979,6 @@ mod tests {
         let config = ResolvedServeConfig {
             host: "127.0.0.1".to_string(),
             port,
-            git: None,
             defaults: DefaultsSection::default(),
             collections: vec![ResolvedCollection {
                 name: "Test Collection".to_string(),
@@ -1050,7 +1049,6 @@ mod tests {
         let config = ResolvedServeConfig {
             host: "127.0.0.1".to_string(),
             port,
-            git: None,
             defaults: DefaultsSection::default(),
             collections: vec![ResolvedCollection {
                 name: "Test Collection".to_string(),
@@ -1113,7 +1111,6 @@ mod tests {
         let config = ResolvedServeConfig {
             host: "127.0.0.1".to_string(),
             port,
-            git: None,
             defaults: DefaultsSection::default(),
             collections: vec![ResolvedCollection {
                 name: "Test Collection".to_string(),
@@ -1176,7 +1173,6 @@ mod tests {
         let config = ResolvedServeConfig {
             host: "127.0.0.1".to_string(),
             port,
-            git: None,
             defaults: DefaultsSection::default(),
             collections: vec![
                 ResolvedCollection {
@@ -1255,7 +1251,6 @@ mod tests {
         let config = ResolvedServeConfig {
             host: "127.0.0.1".to_string(),
             port,
-            git: None,
             defaults: DefaultsSection::default(),
             collections: vec![ResolvedCollection {
                 name: "Test Collection".to_string(),
@@ -1441,7 +1436,6 @@ mod tests {
         let config = ResolvedServeConfig {
             host: "127.0.0.1".to_string(),
             port,
-            git: None,
             defaults: DefaultsSection::default(),
             collections: vec![ResolvedCollection {
                 name: "Test Collection".to_string(),

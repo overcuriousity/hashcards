@@ -12,7 +12,7 @@
                                       # anyone who can reach the port can read
                                       # and edit your cards.
 # port = 8000                         # Port number (default: 8000)
-data_dir = "/var/lib/hashcards"       # Directory for the repo clone, the review
+data_dir = "/var/lib/hashcards"       # Directory for the card trees, the review
                                       # databases and any HedgeDoc notes. Created
                                       # at startup, but only if the parent is
                                       # writable: /var/lib is root-owned, so a
@@ -22,13 +22,6 @@ data_dir = "/var/lib/hashcards"       # Directory for the repo clone, the review
                                       # as yourself? Use ~/.local/share/hashcards.
 
 # session_timeout_minutes = 1440       # Evict drill sessions idle this long; 0 disables (default: 1440)
-
-[git]
-repo_url = "https://github.com/user/flashcards.git"
-# branch = "main"                     # Branch to track (default: main)
-# poll_interval_minutes = 30          # Sync interval; 0 to disable (default: 30)
-# commit_author_name = "hashcards web edit"     # Author of auto-commits for in-browser edits
-# commit_author_email = "hashcards@localhost"   # Author email for those commits
 
 [defaults]
 # answer_controls = "full"            # "full" or "binary" (default: full)
@@ -83,7 +76,7 @@ repo_url = "https://github.com/user/flashcards.git"
 #                                     #   curl -H "Authorization: Bearer <token>" \
 #                                     #     {issuer_url}/apps/oidc/userinfo
 
-# Define one or more collections. Paths are relative to {data_dir}/repo.
+# Define one or more collections. Paths are relative to {data_dir}.
 
 [[collection]]
 name = "Japanese"

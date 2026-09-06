@@ -6,13 +6,13 @@
 
 ![Screenshot of the app, showing a front/back flashcard.](screenshot.webp)
 
-A multi-user web server for plain text spaced repetition. Point it at a git
-repository of Markdown files and it serves them as flashcard collections,
+A multi-user web server for plain text spaced repetition. Point it at a
+directory of Markdown files and it serves them as flashcard collections,
 scheduling reviews with [FSRS] and keeping every user's history in SQLite.
 
-- **Plain text, in your repository.** Cards are Markdown files you write in
-  your own editor and track in git. The server clones the repository and
-  syncs it on a timer; edits made in the browser are committed back.
+- **Plain text, in your own files.** Cards are Markdown you write in your own
+  editor, or in the browser — the server owns the bytes either way, so a card
+  can be edited wherever you happen to be looking at it.
 - **Content addressed.** A card is identified by the hash of its text, so
   editing a card is a deliberate act with visible consequences for its
   schedule — nothing is silently rewritten behind your back.
@@ -88,10 +88,9 @@ data_dir = "/var/lib/hashcards"     # required
 session_timeout_minutes = 1440      # 0 disables eviction
 ```
 
-`data_dir` is where the server keeps the repository clone (`{data_dir}/repo`),
-the review databases (`{data_dir}/db`) and any HedgeDoc notes
-(`{data_dir}/hedgedoc`). Collection paths are always resolved inside
-`{data_dir}/repo`.
+`data_dir` is where the server keeps the card trees (`{data_dir}/local`), the
+review databases (`{data_dir}/db`) and any HedgeDoc notes
+(`{data_dir}/hedgedoc`).
 
 The server creates all of these at startup, and refuses to start with a message
 naming the directory if it cannot. **It must be writable by the user the server
@@ -120,25 +119,6 @@ an `[oidc]` section there is no authentication whatsoever — anyone who can
 reach the port can read your cards and edit the underlying files. Expose it
 only behind an authenticating reverse proxy, or configure OIDC.
 
-### `[git]`
-
-```toml
-[git]
-repo_url = "https://github.com/user/flashcards.git"
-branch = "main"
-poll_interval_minutes = 30          # 0 disables polling
-commit_author_name = "hashcards web edit"
-commit_author_email = "hashcards@localhost"
-```
-
-The repository is cloned into `{data_dir}/repo` at startup and pulled on the
-interval; the landing page also has a "Sync Now" button. Cards edited in the
-browser are committed with the configured author — or, when OIDC is on, as the
-logged-in user.
-
-The section is optional. Without it there is no syncing, and you are
-responsible for putting the cards under `{data_dir}/repo` yourself.
-
 ### `[[collection]]`
 
 ```toml
@@ -148,7 +128,7 @@ path = "japanese"
 # owner = "me@example.com"          # required when [oidc] is configured
 ```
 
-Each collection is a directory of Markdown files under `{data_dir}/repo`, with
+Each collection is a directory of Markdown files under `{data_dir}`, with
 its own review database at `{data_dir}/db/{slug}.db`. The slug is derived from
 `path`, so `medicine/anatomy` becomes `medicine-anatomy`; two collections whose
 paths produce the same slug are rejected at startup rather than silently

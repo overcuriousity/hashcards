@@ -22,6 +22,9 @@ use crate::cmd::serve::state::CollectionInfo;
 use crate::flash::Flash;
 use crate::types::timestamp::Timestamp;
 
+/// How often the cached collection counts are recomputed, in minutes.
+const COUNT_REFRESH_MINUTES: u64 = 30;
+
 /// True when the cached collection counts are older than the poll interval.
 pub fn counts_are_stale(last: Option<Timestamp>, now: Timestamp, interval_minutes: u64) -> bool {
     match last {
@@ -41,12 +44,9 @@ pub async fn landing_handler(
     let owner = current_user.as_ref().map(|u| u.email.clone());
 
     // BUG-45: recompute counts when they are older than the poll interval.
-    let interval_minutes = state
-        .config
-        .git
-        .as_ref()
-        .map(|g| g.poll_interval_minutes)
-        .unwrap_or(30);
+    // Counts were refreshed on the git poll interval; with no remote left,
+    // the same period simply keeps a long-lived tab from going stale.
+    let interval_minutes = COUNT_REFRESH_MINUTES;
     let stale = {
         let last = state.counts_refreshed_at.lock();
         counts_are_stale(*last, Timestamp::now(), interval_minutes)
@@ -92,9 +92,7 @@ pub async fn landing_handler(
         .chain(local_infos.iter())
         .filter(|c| c.owner.as_deref() == owner.as_deref())
         .collect();
-    let last_synced = *state.last_synced.lock();
     let hedgedoc_last_synced = *state.hedgedoc_last_synced.lock();
-    let git_enabled = state.config.git.is_some();
     let hedgedoc_count = state
         .hedgedoc_sources
         .lock()
@@ -164,8 +162,6 @@ pub async fn landing_handler(
     }
 
     let status = LandingStatus {
-        last_synced,
-        git_enabled,
         hedgedoc_count,
         hedgedoc_last_synced,
         config_available,
@@ -175,11 +171,9 @@ pub async fn landing_handler(
     (StatusCode::OK, Html(html.into_string()))
 }
 
-/// The server-status details shown under the collection list: whether git
-/// and the config file are in play, and when each source last synced.
+/// The server-status details shown under the collection list: whether the
+/// config file is in play, how the sources stand, and who is signed in.
 struct LandingStatus {
-    last_synced: Option<Timestamp>,
-    git_enabled: bool,
     hedgedoc_count: usize,
     hedgedoc_last_synced: Option<Timestamp>,
     config_available: bool,
@@ -229,12 +223,6 @@ fn row_meta(due_today: usize, total_cards: usize) -> Markup {
 /// announced a background detail as loudly as the list itself.
 fn status_line(status: &LandingStatus) -> Option<String> {
     let mut parts: Vec<String> = Vec::new();
-    if status.git_enabled {
-        parts.push(match status.last_synced {
-            Some(ts) => format!("git {}", ts.into_inner().format("%H:%M")),
-            None => "git not yet synced".to_string(),
-        });
-    }
     if status.hedgedoc_count > 0 {
         parts.push(match status.hedgedoc_last_synced {
             Some(ts) => format!(
@@ -265,7 +253,6 @@ fn render_landing_page(
     flash: Option<Flash>,
 ) -> Markup {
     let LandingStatus {
-        git_enabled,
         config_available,
         ref signed_in_as,
         ..
@@ -282,12 +269,6 @@ fn render_landing_page(
                     @if config_available {
                         a.nav-link href="/files" { "My cards" }
                         a.nav-link href="/sources" { "Sources" }
-                    }
-                    @if git_enabled {
-                        // POST: syncing writes.
-                        form action="/sync" method="post" {
-                            button.nav-link type="submit" { "Sync" }
-                        }
                     }
                     @if signed_in_as.is_some() {
                         // POST, so a third-party page cannot log the user out
