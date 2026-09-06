@@ -45,6 +45,7 @@ use crate::cmd::serve::decks::find_custom_deck;
 use crate::cmd::serve::files::existing_collections_for_user;
 use crate::cmd::serve::state::AppState;
 use crate::cmd::serve::state::DrillSession;
+use crate::cmd::serve::state::SessionKey;
 use crate::cmd::serve::state::SharedSession;
 use crate::collection::Collection;
 use crate::db::Database;
@@ -121,7 +122,8 @@ fn collection_get_inner(
 ) -> Fallible<String> {
     // Clone the Arc out of the map so the map lock is not held during
     // rendering; the session itself stays in the map even if rendering fails.
-    let session: Option<SharedSession> = state.sessions.lock().get(slug).cloned();
+    let key = SessionKey::new(owner, slug);
+    let session: Option<SharedSession> = state.sessions.lock().get(&key).cloned();
 
     // A concurrent Home action (or eviction) may have removed this session
     // from the map, and closed its DB row, between the clone above and the
@@ -428,15 +430,16 @@ fn collection_start_inner(
     // FEAT-03: never silently discard an unfinished session. The redirect
     // to /collection/{slug} lands on the running session; the user must
     // End it (or let BUG-08 eviction reap it) before starting a new one.
+    let key = SessionKey::new(owner, slug);
     {
         let mut sessions = state.sessions.lock();
-        if let Some(existing) = sessions.get(slug) {
+        if let Some(existing) = sessions.get(&key) {
             if existing.lock().mutable.finished_at.is_none() {
                 return Ok(());
             }
         }
         // Finished sessions are replaced.
-        if let Some(previous) = sessions.remove(slug) {
+        if let Some(previous) = sessions.remove(&key) {
             previous.lock().detach();
         }
     }
@@ -464,10 +467,7 @@ fn collection_start_inner(
         }
     };
     if let Some(s) = session {
-        state
-            .sessions
-            .lock()
-            .insert(slug.to_string(), Arc::new(Mutex::new(s)));
+        state.sessions.lock().insert(key, Arc::new(Mutex::new(s)));
     }
     Ok(())
 }
@@ -507,6 +507,9 @@ pub(super) fn create_session_from_sources(
     for (index, spec) in sources.into_iter().enumerate() {
         let rc = spec.collection;
         let collection = Collection::with_db_path(rc.coll_dir.clone(), rc.db_path.clone())?;
+        // Canonical, as every card's file path is: media is resolved by
+        // stripping this prefix off the file the card was parsed from.
+        let coll_dir = collection.directory.clone();
 
         // Sync new cards to DB
         let db_hashes: HashSet<CardHash> = collection.db.card_hashes()?;
@@ -552,10 +555,12 @@ pub(super) fn create_session_from_sources(
         session_dbs.push(SessionDb {
             db: collection.db,
             session_id,
-            // A single-collection session renders media against the
-            // session's own directory, exactly as before.
-            source: multi_source.then(|| SessionSource {
-                coll_dir: rc.coll_dir.clone(),
+            // Recorded for every session, not only a multi-collection one:
+            // a card's media is served from the collection that holds it,
+            // and a deck's slug names no collection, so a session addressed
+            // by one has no usable prefix of its own.
+            source: Some(SessionSource {
+                coll_dir,
                 file_url_prefix: format!("/collection/{}/file", rc.slug),
             }),
         });
@@ -758,12 +763,15 @@ fn collection_post_inner(
     form: FormData,
     owner: Option<&str>,
 ) -> Fallible<Redirect> {
-    // A grading/Home action on a slug that isn't the caller's own must not
-    // touch that slug's session, even if one happens to be active (sessions
-    // are keyed by slug alone, not by owner).
+    // A grading/Home action on a slug that isn't the caller's own is refused
+    // before the session map is touched at all. The map is keyed by owner as
+    // well as slug, so this cannot reach someone else's session either way;
+    // refusing here is what turns "not yours" into an error rather than a
+    // silent no-op against an empty key.
     if find_drill_target(state, slug, owner).is_none() {
         return fail(format!("Unknown collection: {slug}"));
     }
+    let key = SessionKey::new(owner, slug);
     let action = form.action;
     let submitted_undo: Option<i64> = form.undo_review;
     let submitted_card: Option<CardHash> = match form.card.as_deref() {
@@ -782,7 +790,7 @@ fn collection_post_inner(
     // Home action: close the session and drop it without needing to hold the
     // global lock during DB work.
     if matches!(action, Action::Home) {
-        let session = state.sessions.lock().remove(slug);
+        let session = state.sessions.lock().remove(&key);
         if let Some(s) = session {
             let mut s = s.lock();
             s.detach();
@@ -799,7 +807,7 @@ fn collection_post_inner(
     // Lock the session in place: the map lock is released immediately, the
     // per-slug lock is held for the DB work, and an error leaves the session
     // in the map untouched.
-    let session: SharedSession = match state.sessions.lock().get(slug).cloned() {
+    let session: SharedSession = match state.sessions.lock().get(&key).cloned() {
         Some(s) => s,
         None => return Ok(Redirect::to(&format!("/collection/{slug}"))),
     };
@@ -937,7 +945,8 @@ pub async fn collection_script_handler(
             script(&[]),
         );
     }
-    let session: Option<SharedSession> = state.sessions.lock().get(&slug).cloned();
+    let key = SessionKey::new(owner.as_deref(), &slug);
+    let session: Option<SharedSession> = state.sessions.lock().get(&key).cloned();
     let macros: Vec<(String, String)> = match session {
         Some(session) => session.lock().macros.clone(),
         // No active session; serve the script without macros.
@@ -966,6 +975,7 @@ mod tests {
     use crate::cmd::serve::config::ResolvedCollection;
     use crate::cmd::serve::state::AppState;
     use crate::cmd::serve::state::DrillSession;
+    use crate::cmd::serve::state::SessionKey;
     use crate::db::Database;
     use crate::error::ErrorReport;
     use crate::error::Fallible;
@@ -1089,12 +1099,72 @@ mod tests {
             mutable,
         )));
         session.lock().detach();
-        state.sessions.lock().insert(slug.clone(), session);
+        state
+            .sessions
+            .lock()
+            .insert(SessionKey::new(None, &slug), session);
 
         let html = collection_get_inner(&state, &slug, None, None)?;
         assert!(
             html.contains(r#"class="browse""#),
             "detached session must fall back to the deck browser page, got: {html}"
+        );
+        Ok(())
+    }
+
+    /// Cross-user isolation: a collection is a folder in its owner's card
+    /// tree, so two users can each own one named "Deck" and both slugify to
+    /// `Deck`. Keyed by slug alone, the sessions map handed whoever asked
+    /// second the other's live session — their card to read, and their
+    /// database to grade into.
+    #[test]
+    fn a_session_is_not_shared_by_two_owners_of_the_same_slug() -> Fallible<()> {
+        let dir = tempfile::tempdir()?;
+        let data_dir = dir.path().to_path_buf();
+        card_collection(
+            &data_dir,
+            Some("alice@example.com"),
+            "Deck",
+            "Q: alice question?\nA: alice answer\n",
+        )?;
+        card_collection(
+            &data_dir,
+            Some("bob@example.com"),
+            "Deck",
+            "Q: bob question?\nA: bob answer\n",
+        )?;
+        let state = crate::cmd::serve::state::test_support::state_with_data_dir(data_dir);
+
+        let alice = super::find_collection(&state, "Deck", Some("alice@example.com"))
+            .ok_or_else(|| ErrorReport::new("alice's collection was not discovered"))?;
+        let session = create_session_from_sources(
+            &state,
+            vec![SessionSourceSpec {
+                collection: alice,
+                decks: Vec::new(),
+            }],
+            None,
+        )?
+        .ok_or_else(|| ErrorReport::new("expected alice's new card to be due"))?;
+        state.sessions.lock().insert(
+            SessionKey::new(Some("alice@example.com"), "Deck"),
+            std::sync::Arc::new(parking_lot::Mutex::new(session)),
+        );
+
+        let bob = collection_get_inner(&state, "Deck", None, Some("bob@example.com"))?;
+        assert!(
+            !bob.contains("alice question"),
+            "bob was served alice's card: {bob}"
+        );
+        assert!(
+            bob.contains(r#"class="browse""#),
+            "bob must get his own topic browser, got: {bob}"
+        );
+
+        let alice = collection_get_inner(&state, "Deck", None, Some("alice@example.com"))?;
+        assert!(
+            alice.contains("alice question"),
+            "alice must still reach her own session, got: {alice}"
         );
         Ok(())
     }
@@ -1232,6 +1302,47 @@ mod tests {
             .sum();
         assert_eq!(alpha_reviews, 1, "Alpha's card must be scheduled in Alpha");
         assert_eq!(beta_reviews, 1, "Beta's card must be scheduled in Beta");
+        Ok(())
+    }
+
+    /// A deck's slug names no collection, so `/collection/{deck}/file/...`
+    /// resolves to nothing and every image in the session 404s. The card's
+    /// home collection is recorded on the session for exactly that reason —
+    /// it used to be recorded only when a deck had more than one member, so
+    /// a one-member deck inherited the deck's own unusable prefix.
+    #[test]
+    fn a_deck_session_serves_media_from_the_home_collection() -> Fallible<()> {
+        let dir = tempfile::tempdir()?;
+        let data_dir = dir.path().to_path_buf();
+        card_collection(
+            &data_dir,
+            None,
+            "alpha",
+            "Q: alpha question?\nA: alpha answer\n",
+        )?;
+        let state = crate::cmd::serve::state::test_support::state_with_data_dir(data_dir);
+        let alpha = super::find_collection(&state, "alpha", None)
+            .ok_or_else(|| ErrorReport::new("alpha was not discovered"))?;
+
+        let session = create_session_from_sources(
+            &state,
+            vec![SessionSourceSpec {
+                collection: alpha,
+                decks: Vec::new(),
+            }],
+            None,
+        )?
+        .ok_or_else(|| ErrorReport::new("expected the new card to be due"))?;
+
+        let hash = session.mutable.cards[0].hash();
+        let source = session
+            .mutable
+            .dbs
+            .for_card(hash)
+            .source
+            .as_ref()
+            .ok_or_else(|| ErrorReport::new("the session recorded no source collection"))?;
+        assert_eq!(source.file_url_prefix, "/collection/alpha/file");
         Ok(())
     }
 

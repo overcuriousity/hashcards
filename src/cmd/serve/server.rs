@@ -62,6 +62,7 @@ use crate::cmd::serve::handlers::collection_script_handler;
 use crate::cmd::serve::handlers::collection_start_handler;
 use crate::cmd::serve::landing::landing_handler;
 use crate::cmd::serve::state::AppState;
+use crate::cmd::serve::state::SessionKey;
 use crate::cmd::serve::state::SharedSession;
 use crate::cmd::serve::state::evict_idle_sessions;
 use crate::cmd::serve::stats::collection_stats_handler;
@@ -363,7 +364,7 @@ async fn shutdown_signal() {
 /// Periodically evict drill sessions idle past the configured timeout,
 /// closing their DB session rows (BUG-08).
 fn spawn_session_eviction_task(
-    sessions: Arc<Mutex<HashMap<String, SharedSession>>>,
+    sessions: Arc<Mutex<HashMap<SessionKey, SharedSession>>>,
     timeout_minutes: u64,
 ) {
     if timeout_minutes == 0 {
@@ -384,10 +385,11 @@ fn spawn_session_eviction_task(
             .await
             {
                 Ok(evicted) if !evicted.is_empty() => {
+                    let slugs: Vec<&str> = evicted.iter().map(|k| k.slug()).collect();
                     log::info!(
                         "Evicted {} idle drill session(s): {}",
                         evicted.len(),
-                        evicted.join(", ")
+                        slugs.join(", ")
                     );
                 }
                 Ok(_) => {}

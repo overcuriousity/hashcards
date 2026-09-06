@@ -22,7 +22,10 @@ use crate::cmd::drill::state::MigrationEffect;
 use crate::cmd::drill::template::page_template;
 use crate::cmd::run_blocking;
 use crate::cmd::serve::auth::CurrentUser;
-use crate::cmd::serve::handlers::find_collection;
+use crate::cmd::serve::config::ResolvedCollection;
+use crate::cmd::serve::handlers::DrillTarget;
+use crate::cmd::serve::handlers::deck_sources;
+use crate::cmd::serve::handlers::find_drill_target;
 use crate::cmd::serve::state::AppState;
 use crate::cmd::serve::state::migrate_sessions;
 use crate::db::Database;
@@ -105,32 +108,100 @@ fn edit_get_inner(
     owner: Option<&str>,
     return_to: ReturnTo,
 ) -> Fallible<String> {
-    let rc = find_collection(state, slug, owner)
-        .ok_or_else(|| ErrorReport::new(format!("Unknown collection: {slug}")))?;
-
     let hash = CardHash::from_hex(hash_hex)?;
-    let coll_dir = rc.coll_dir.canonicalize()?;
-    let cards = parse_deck(&coll_dir)?.cards;
-    let card = find_card_by_hash(&cards, hash)?;
+    let site = card_site(state, slug, hash, owner)?;
+    let card = find_card_by_hash(&site.cards, hash)?;
 
     let file_path = card.file_path().clone();
     let file_content = std::fs::read_to_string(&file_path)?;
     let mtime_ms = file_mtime_ms(&file_path)?;
     let block = extract_card_block(&file_content, card.range())?;
     let rel_path = file_path
-        .strip_prefix(&coll_dir)
+        .strip_prefix(&site.coll_dir)
         .unwrap_or(&file_path)
         .display()
         .to_string();
 
     let html = render_edit_form(
-        &rc.name, slug, hash_hex, &rel_path, &block, mtime_ms, return_to,
+        &site.target_name,
+        slug,
+        hash_hex,
+        &rel_path,
+        &block,
+        mtime_ms,
+        return_to,
     );
     Ok(html.into_string())
 }
 
+/// Where a card being edited actually lives, reached through the slug the
+/// caller came from.
+struct CardSite {
+    /// The collection holding the card's file and its review database.
+    rc: ResolvedCollection,
+    /// `rc.coll_dir`, canonicalized: card file paths are canonical, so the
+    /// relative path shown in the form is taken against this.
+    coll_dir: PathBuf,
+    /// Every card in that collection, parsed once for both the lookup and
+    /// the sibling scan the save needs.
+    cards: Vec<Card>,
+    /// What the back link is labelled with — the deck's name when the
+    /// caller came from a deck, since that is where the link returns to.
+    target_name: String,
+}
+
+/// Resolve `slug` to the collection holding `hash`.
+///
+/// The slug is whatever the card was reached under, which is not always a
+/// collection: the pencil in a drill links to the slug the *session* is
+/// filed under, and for a custom deck that is the deck's own slug, naming
+/// no collection at all. A deck's members are searched for the card, which
+/// is also the only way a multi-collection deck could name the right one —
+/// the card's home need not be the collection the deck is listed under.
+fn card_site(
+    state: &AppState,
+    slug: &str,
+    hash: CardHash,
+    owner: Option<&str>,
+) -> Fallible<CardSite> {
+    let target = find_drill_target(state, slug, owner)
+        .ok_or_else(|| ErrorReport::new(format!("Unknown collection: {slug}")))?;
+    match target {
+        DrillTarget::Collection(rc) => {
+            let coll_dir = rc.coll_dir.canonicalize()?;
+            let cards = parse_deck(&coll_dir)?.cards;
+            let target_name = rc.name.clone();
+            Ok(CardSite {
+                rc,
+                coll_dir,
+                cards,
+                target_name,
+            })
+        }
+        DrillTarget::Deck(deck) => {
+            for source in deck_sources(state, &deck, owner) {
+                let rc = source.collection;
+                let coll_dir = rc.coll_dir.canonicalize()?;
+                let cards = parse_deck(&coll_dir)?.cards;
+                if cards.iter().any(|c| c.hash() == hash) {
+                    return Ok(CardSite {
+                        rc,
+                        coll_dir,
+                        cards,
+                        target_name: deck.name.clone(),
+                    });
+                }
+            }
+            fail(format!(
+                "That card is not in any collection the deck '{}' draws on.",
+                deck.name
+            ))
+        }
+    }
+}
+
 fn render_edit_form(
-    collection_name: &str,
+    return_label: &str,
     slug: &str,
     hash_hex: &str,
     rel_path: &str,
@@ -143,8 +214,8 @@ fn render_edit_form(
             div.browse-header {
                 a.back-link href=(return_to.target(slug)) {
                     @match return_to {
-                        ReturnTo::Collection => { "\u{2190} " (collection_name) }
-                        ReturnTo::Bookmarks => { "\u{2190} " (collection_name) " Bookmarks" }
+                        ReturnTo::Collection => { "\u{2190} " (return_label) }
+                        ReturnTo::Bookmarks => { "\u{2190} " (return_label) " Bookmarks" }
                     }
                 }
                 h1 { "Edit Card" }
@@ -244,12 +315,13 @@ fn edit_post_inner(
     form: EditForm,
     owner: Option<&str>,
 ) -> Fallible<EditOutcome> {
-    let rc = find_collection(state, slug, owner)
-        .ok_or_else(|| ErrorReport::new(format!("Unknown collection: {slug}")))?;
-
     let hash = CardHash::from_hex(hash_hex)?;
-    let coll_dir = rc.coll_dir.canonicalize()?;
-    let cards = parse_deck(&coll_dir)?.cards;
+    let CardSite {
+        rc,
+        coll_dir,
+        cards,
+        ..
+    } = card_site(state, slug, hash, owner)?;
     let card = find_card_by_hash(&cards, hash)?;
 
     let file_path = card.file_path().clone();
@@ -608,7 +680,7 @@ fn error_page(slug: &str, hash_hex: &str, msg: &str) -> (StatusCode, Html<String
 mod tests {
     use super::*;
 
-    use crate::cmd::serve::config::ResolvedCollection;
+    use crate::cmd::serve::handlers::find_collection;
     use crate::db::Database;
     use crate::types::card::CardContent;
     use crate::types::timestamp::Timestamp;
@@ -664,6 +736,65 @@ mod tests {
         let rc = find_collection(&state, "Deck", None)
             .ok_or_else(|| ErrorReport::new("the collection was not discovered"))?;
         Ok((state, rc, folder))
+    }
+
+    /// The pencil in a running drill links to the slug the *session* is
+    /// filed under, and a custom deck's session is filed under the deck's
+    /// own slug. Resolving that as a collection found nothing, so every card
+    /// edited from a deck drill answered "Unknown collection: deck-..." with
+    /// a 500. The card's home is one of the deck's members, so the members
+    /// are what get searched.
+    #[test]
+    fn a_card_is_editable_through_the_deck_it_was_drilled_under() -> Fallible<()> {
+        use crate::cmd::serve::config::DeckMember;
+        use crate::cmd::serve::decks::ResolvedCustomDeck;
+        use crate::cmd::serve::decks::slug_for_deck;
+
+        let dir = tempfile::tempdir()?;
+        let data_dir = dir.path().canonicalize()?;
+        let (state, _rc, coll_dir) = fixture(&data_dir, &[("Cards.md", "Q: One\nA: 1\n")])?;
+        let cards = parse_deck(&coll_dir)?.cards;
+        let hash_hex = cards[0].hash().to_hex();
+
+        let deck = ResolvedCustomDeck {
+            name: "Mixed".to_string(),
+            slug: slug_for_deck("Mixed", None),
+            owner: None,
+            members: vec![
+                DeckMember::parse("Deck/Cards")
+                    .ok_or_else(|| ErrorReport::new("the deck member did not parse"))?,
+            ],
+        };
+        state.custom_decks.lock().push(deck.clone());
+
+        let html = edit_get_inner(&state, &deck.slug, &hash_hex, None, ReturnTo::Collection)?;
+        assert!(
+            html.contains("Q: One"),
+            "the editor must open on the card, got: {html}"
+        );
+        // Back to the drill it was opened from, not to the home collection:
+        // the session is filed under the deck's slug.
+        assert!(
+            html.contains(&format!(r#"href="/collection/{}""#, deck.slug)),
+            "the back link must return to the deck, got: {html}"
+        );
+
+        // Saving reaches the file in the card's home collection.
+        let file = coll_dir.join("Cards.md");
+        let mtime = file_mtime_ms(&file)?;
+        edit_post_inner(
+            &state,
+            &deck.slug,
+            &hash_hex,
+            EditForm {
+                new_text: "Q: One\nA: uno".to_string(),
+                mtime_ms: mtime.to_string(),
+                return_to: Some("collection".to_string()),
+            },
+            None,
+        )?;
+        assert!(std::fs::read_to_string(&file)?.contains("A: uno"));
+        Ok(())
     }
 
     /// Regression: an edit that makes a card identical to one that already

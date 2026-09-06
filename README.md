@@ -95,8 +95,10 @@ this file — and its review database is named from the stable id in the
 folder's `.hashcards.toml`, so renaming a folder keeps its history.
 
 Ownership is structural: with `[oidc]` configured a user's collections are the
-folders in `{data_dir}/cards/{their-email-slug}/`, and without it they are the
-folders in `{data_dir}/cards/default/`. There is no `owner` to declare and no
+folders in `{data_dir}/cards/{their-email-slug}-{hash}/`, and without it they
+are the folders in `{data_dir}/cards/default/`. The hash is eight characters
+of the email's own digest, because slugifying alone is not injective and the
+tree a folder sits in is who owns it. There is no `owner` to declare and no
 way to name a collection nobody can reach.
 
 The server creates all of these at startup, and refuses to start with a message

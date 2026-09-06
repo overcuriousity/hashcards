@@ -34,6 +34,21 @@
             <change author="claude">
             The session-completed screen no longer navigates away on a five-second timer. It is the one page in a session a user might want to sit and read.
             </change>
+            <change author="claude">
+            A running drill belongs to the user who started it. Sessions were filed under the URL slug alone, and a collection is now a folder in its owner's card tree, so two users each owning a "Spanish" both address it as `Spanish` — whoever asked second was shown the other's live card, and could Reveal, grade, Undo and End it, writing reviews into a database that was never theirs. The same slug on the collection list offered a stranger's session to Resume. Sessions are now keyed by owner as well as slug.
+            </change>
+            <change author="claude">
+            A card drilled inside a deck can be edited and shows its images. The pencil and the media URLs both name the slug the session is filed under, which for a saved deck is the deck's own slug and names no collection at all: the editor answered "Unknown collection: deck-..." with a 500, and every image in the session 404'd. The editor now looks through a deck to the member collection that actually holds the card — which is also the only way a deck spanning several collections could name the right one — and returns to the drill it was opened from. Each session records the home collection of every card it holds, not only the ones drawing on more than one collection.
+            </change>
+            <change author="claude">
+            An edit that makes a card byte-identical to another card the session is already drilling no longer corrupts the survivor's schedule. The database declines that rename — the target has its own history, and neither row may be destroyed — but the session's performance cache took the rename anyway, so the next grade of the surviving card computed its stability, difficulty and interval from the edited-away card's history. The cache now keeps what the database kept.
+            </change>
+            <change author="claude">
+            A deck whose counts cannot be worked out is still listed. It was logged and dropped, so a deck whose member collection had stopped loading — one missing image is enough — vanished from the one page that lists it, with nothing on screen to say anything was wrong. It now appears, says "Counts unavailable", and explains itself when opened.
+            </change>
+            <change author="claude">
+            A card tree is named for its owner's email *and* eight characters of its hash. Slugifying alone is not injective — every character outside `[A-Za-z0-9._-]` becomes `-`, so `me+work@example.com` and `me-work@example.com` named one folder — and which tree a collection sits in is who owns it, so two OIDC identities would have shared every collection, every file and every review database. Nothing was deployed, so there is no migration; a tree left over from a local run is renamed by hand or created afresh.
+            </change>
         </fixed>
         </unreleased>
     <releases>

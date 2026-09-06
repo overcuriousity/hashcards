@@ -77,7 +77,7 @@ data_dir = "/var/lib/hashcards"       # Directory for the card trees, the review
 #                                     #     {issuer_url}/apps/oidc/userinfo
 
 # Collections are not configured here. A collection is a top-level folder in
-# your card tree -- {data_dir}/cards/{your-email-slug} with [oidc], or
+# your card tree -- {data_dir}/cards/{your-email-slug}-{hash} with [oidc], or
 # {data_dir}/cards/default without it -- created through My Cards (/files) or
 # by hand. Which tree the folder sits in is who owns it.
 

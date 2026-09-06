@@ -79,12 +79,17 @@ impl Cache {
     /// duplicate key, which is right while a session is grading; this runs
     /// after an edit has already been written to disk and committed, where
     /// there is nothing to roll back to and a hash this session never held
-    /// is simply not its business. If the target hash is already present —
-    /// the database declined that rename as a collision — the new value
-    /// wins: the cache mirrors the file, and the database is the record.
+    /// is simply not its business.
+    ///
+    /// A target the session already holds is the collision case, and the one
+    /// the database declines: it keeps the target's row, its history and its
+    /// performance, so the cache keeps them too and the old entry is simply
+    /// forgotten. Letting the incoming value win instead fed the *old*
+    /// card's stability and difficulty into the next grade of a card whose
+    /// record had never changed.
     pub fn rekey(&mut self, old: CardHash, new: CardHash) {
         if let Some(performance) = self.changes.remove(&old) {
-            self.changes.insert(new, performance);
+            self.changes.entry(new).or_insert(performance);
         }
     }
 
@@ -224,6 +229,48 @@ mod tests {
         let new = CardHash::hash_bytes(b"new");
         cache.rekey(old, new);
         assert!(cache.get(new).is_err());
+    }
+
+    /// The collision case, and the one the database declines: an edit makes
+    /// one card byte-identical to another the session is already holding.
+    /// The surviving card keeps its own row, so it must keep its own
+    /// performance — the next grade of it is computed from what the cache
+    /// says.
+    #[test]
+    fn test_cache_rekey_keeps_the_performance_of_a_card_already_held() -> Fallible<()> {
+        let mut cache = Cache::new();
+        let old = CardHash::hash_bytes(b"old");
+        let new = CardHash::hash_bytes(b"new");
+        cache.insert(old, reviewed(7))?;
+        cache.insert(new, reviewed(3))?;
+
+        cache.rekey(old, new);
+
+        match cache.get(new)? {
+            Performance::Reviewed(rp) => assert_eq!(
+                rp.review_count, 3,
+                "the surviving card's own history must stand"
+            ),
+            _ => return fail("Expected Performance::Reviewed"),
+        }
+        assert!(
+            cache.get(old).is_err(),
+            "the edited-away hash must be forgotten"
+        );
+        Ok(())
+    }
+
+    /// A reviewed performance distinguishable by its review count.
+    fn reviewed(review_count: usize) -> Performance {
+        Performance::Reviewed(ReviewedPerformance {
+            last_reviewed_at: Timestamp::now(),
+            stability: 1.0,
+            difficulty: 2.0,
+            interval_raw: 0.4,
+            interval_days: 1,
+            due_date: Date::today(),
+            review_count,
+        })
     }
 
     #[test]

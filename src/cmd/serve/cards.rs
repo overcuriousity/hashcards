@@ -141,14 +141,27 @@ pub struct ResolvedEntry {
 }
 
 /// Where `owner`'s tree lives, whether or not it exists yet.
+///
+/// The folder is named for the email, and then disambiguated by eight hex
+/// characters of its hash. The slug alone is not injective — `slugify` maps
+/// every character outside `[A-Za-z0-9._-]` to `-`, so `me+work@example.com`
+/// and `me-work@example.com` name the same folder — and which tree a
+/// collection sits in *is* who owns it: two identities sharing a tree would
+/// share every collection in it, every file in the file manager, and every
+/// review database. The slug is kept in front of the hash so that the
+/// directory is still recognisable to whoever administers the server.
 fn root_path(data_dir: &Path, owner: Option<&str>) -> Fallible<PathBuf> {
     let who = match owner {
-        Some(email) => slugify(&email.to_lowercase()),
+        Some(email) => {
+            let email = email.trim().to_lowercase();
+            if email.is_empty() {
+                return fail("Cannot open a local card folder: the owner name is empty.");
+            }
+            let digest = blake3::hash(email.as_bytes()).to_hex();
+            format!("{}-{}", slugify(&email), &digest[..8])
+        }
         None => "default".to_string(),
     };
-    if who.is_empty() {
-        return fail("Cannot open a local card folder: the owner name is empty.");
-    }
     Ok(data_dir.join("cards").join(who))
 }
 
@@ -358,8 +371,33 @@ mod tests {
     #[test]
     fn user_dir_is_slugified_and_lowercased() -> Fallible<()> {
         let (dir, root) = fixture()?;
-        assert_eq!(root.path(), dir.join("cards").join("me-example.com"));
+        let expected = dir
+            .join("cards")
+            .join(format!("me-example.com-{}", digest_of("me@example.com")));
+        assert_eq!(root.path(), expected);
         Ok(())
+    }
+
+    /// Two emails that slugify alike must not share a tree. The tree a
+    /// collection sits in is who owns it, so a shared one would hand both
+    /// identities the same collections, the same files and the same review
+    /// databases.
+    #[test]
+    fn users_whose_emails_slugify_alike_get_separate_trees() -> Fallible<()> {
+        let dir = create_tmp_directory()?;
+        let plus = CardRoot::for_user(&dir, Some("me+work@example.com"))?;
+        let dash = CardRoot::for_user(&dir, Some("me-work@example.com"))?;
+        assert_ne!(plus.path(), dash.path());
+        // Case and surrounding space are still the same identity.
+        let upper = CardRoot::for_user(&dir, Some("  Me+Work@Example.com "))?;
+        assert_eq!(plus.path(), upper.path());
+        Ok(())
+    }
+
+    /// The eight hex characters `root_path` appends, for tests that spell
+    /// out the expected folder name.
+    fn digest_of(email: &str) -> String {
+        blake3::hash(email.as_bytes()).to_hex()[..8].to_string()
     }
 
     #[test]

@@ -1428,6 +1428,7 @@ mod tests {
         use crate::cmd::drill::state::MutableState;
         use crate::cmd::drill::state::SessionDbs;
         use crate::cmd::serve::state::DrillSession;
+        use crate::cmd::serve::state::SessionKey;
         use crate::rng::TinyRng;
         use crate::types::performance::Jitter;
 
@@ -1455,7 +1456,10 @@ mod tests {
             AnswerControls::Full,
             mutable,
         )));
-        state.sessions.lock().insert(slug.to_string(), session);
+        state
+            .sessions
+            .lock()
+            .insert(SessionKey::new(None, slug), session);
         Ok(())
     }
 
@@ -1475,6 +1479,7 @@ mod tests {
         use crate::cmd::drill::state::SessionDbs;
         use crate::cmd::drill::state::SessionSource;
         use crate::cmd::serve::state::DrillSession;
+        use crate::cmd::serve::state::SessionKey;
         use crate::rng::TinyRng;
         use crate::types::performance::Jitter;
 
@@ -1514,7 +1519,10 @@ mod tests {
             AnswerControls::Full,
             mutable,
         )));
-        state.sessions.lock().insert(deck_slug.to_string(), session);
+        state
+            .sessions
+            .lock()
+            .insert(SessionKey::new(None, deck_slug), session);
         Ok(())
     }
 
