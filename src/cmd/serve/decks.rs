@@ -243,7 +243,7 @@ pub(super) fn render_decks_page(
             h1 { "Decks" }
             p { a.back-link href="/" { "\u{2190} Back to collections" } }
             p.empty {
-                "A deck is a saved selection of decks from any of your collections, drilled \
+                "A deck is a saved selection of topics from any of your collections, drilled \
                  together. Reviews still count towards each card's own collection, so a card \
                  in several decks keeps one schedule."
             }
@@ -256,7 +256,7 @@ pub(super) fn render_decks_page(
             } @else {
                 h2 { "New deck" }
                 @if choices.is_empty() {
-                    p.empty { "No collections with decks to choose from yet." }
+                    p.empty { "No collections with topics to choose from yet." }
                 } @else {
                     form action="/decks/add" method="post" {
                         div.add-source-row {

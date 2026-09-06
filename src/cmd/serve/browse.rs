@@ -186,8 +186,13 @@ fn duplicates_summary(count: usize) -> String {
     format!("{subject}. Only one copy is drilled, and only that copy carries review history.")
 }
 
-/// Render the deck browser page for a collection.
-/// `hedge_urls` maps deck name to the original HedgeDoc note URL, for collections
+/// Render a collection's own page: its topics, and the things you can do
+/// with the collection as a whole.
+///
+/// The list page drills a collection in one tap, so this page is no longer a
+/// gate on the way in — it is where you come to drill part of a collection,
+/// or to look at what is in it.
+/// `hedge_urls` maps topic name to the original HedgeDoc note URL, for collections
 /// backed by HedgeDoc. Pass an empty map for file-based collections.
 pub fn render_browse_page(
     collection_name: &str,
@@ -229,8 +234,9 @@ pub fn render_browse_page(
                 }
             }
             @if tree.children.is_empty() {
-                p.empty { "No decks found in this collection." }
+                p.empty { "No topics found in this collection." }
             } @else {
+                h2.section-title { "Topics" }
                 form action=(format!("/collection/{slug}/start")) method="post" {
                     div.deck-tree {
                         @for child in &tree.children {
@@ -252,7 +258,7 @@ pub fn render_browse_page(
                             }
                             input
                                 type="submit"
-                                value=(format!("Drill ({total_due} due)"))
+                                value=(format!("Start ({total_due} due)"))
                                 class="drill-button btn btn-primary"
                                 disabled[total_due == 0];
                         }
@@ -318,7 +324,10 @@ fn render_deck_node(node: &DeckNode, depth: usize, hedge_urls: &HashMap<String, 
                     span.deck-name { (node.name) }
                 }
                 span.deck-counts {
-                    span.deck-due class=@if due == 0 { "muted" } { (due) }
+                    // One `class` attribute: a second is emitted verbatim and
+                    // the browser keeps only the first, so a topic with
+                    // nothing due never dimmed.
+                    span class=(if due == 0 { "deck-due muted" } else { "deck-due" }) { (due) }
                     " / "
                     span.deck-total { (total) }
                 }
@@ -399,7 +408,7 @@ function updateDrillButton() {
         var dueEl = row.querySelector('.deck-due');
         if (dueEl) totalDue += parseInt(dueEl.textContent) || 0;
     });
-    btn.value = 'Drill (' + totalDue + ' due)';
+    btn.value = 'Start (' + totalDue + ' due)';
     btn.disabled = totalDue === 0;
 }
 "#;
@@ -477,6 +486,41 @@ mod tests {
             "the server's path to the collection must not be shown: {html}"
         );
         Ok(())
+    }
+
+    /// A topic with nothing due is dimmed. It used to be rendered with two
+    /// `class` attributes, of which a browser keeps only the first, so the
+    /// muted style never reached the page.
+    #[test]
+    fn browse_page_dims_a_topic_with_nothing_due() {
+        let tree = DeckNode {
+            name: String::new(),
+            path: String::new(),
+            total_cards: 0,
+            due_today: 0,
+            children: vec![DeckNode {
+                name: "quiet".to_string(),
+                path: "quiet".to_string(),
+                total_cards: 4,
+                due_today: 0,
+                children: vec![],
+            }],
+        };
+        let browse = BrowseData {
+            tree,
+            duplicates: Vec::new(),
+            coll_dir: PathBuf::new(),
+        };
+        let html =
+            render_browse_page("Coll", "coll", &browse, &HashMap::new(), 0, 0, None).into_string();
+        assert!(
+            html.contains(r#"class="deck-due muted""#),
+            "a topic with nothing due must be dimmed: {html}"
+        );
+        assert!(
+            !html.contains(r#"class="deck-due" class="#),
+            "one class attribute, not two: {html}"
+        );
     }
 
     /// One duplicate is one card, and the sentence has to say so.

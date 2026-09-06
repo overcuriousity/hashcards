@@ -328,6 +328,47 @@ mod tests {
         Ok(())
     }
 
+    /// The collection list starts a session in one tap. It used to lead to a
+    /// topic picker whose own button also said "Drill", so studying always
+    /// cost two presses of the same word.
+    #[tokio::test]
+    async fn test_drill_from_the_list_lands_on_a_card() -> Fallible<()> {
+        let dir = tempdir()?;
+        let coll_dir = dir.path().to_path_buf();
+        write(coll_dir.join("Alpha.md"), "Q: What is 1+1?\nA: 2\n")?;
+        write(coll_dir.join("Beta.md"), "Q: What is 2+2?\nA: 4\n")?;
+        let slug = "test-collection";
+        let port = spawn_test_server(coll_dir, slug).await?;
+        let base = format!("http://{TEST_HOST}:{port}");
+        let client = reqwest::Client::new();
+
+        // The list's Drill button carries no topic checkboxes at all.
+        let list = client.get(format!("{base}/")).send().await?.text().await?;
+        assert!(
+            list.contains(r#"name="all_topics""#),
+            "the list must post the one-tap start: {list}"
+        );
+
+        let body = client
+            .post(format!("{base}/collection/{slug}/start"))
+            .body("all_topics=1")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .send()
+            .await?
+            .text()
+            .await?;
+        // Card one, not the topic picker.
+        assert!(
+            body.contains("value=\"Reveal\""),
+            "one tap must land on a card: {body}"
+        );
+        assert!(
+            !body.contains("deck-tree"),
+            "the topic picker must not stand in the way: {body}"
+        );
+        Ok(())
+    }
+
     #[tokio::test]
     async fn test_start_with_no_decks_is_rejected_with_flash() -> Fallible<()> {
         let dir = tempdir()?;
@@ -345,7 +386,7 @@ mod tests {
             .await?;
         let body = response.text().await?;
         // The post-redirect page shows the flash and stays on the deck browser:
-        assert!(body.contains("Select at least one deck"), "body: {body}");
+        assert!(body.contains("Select at least one topic"), "body: {body}");
         assert!(body.contains("flash-error"));
         // No session was started (a session page would show the Reveal button).
         assert!(!body.contains("value=\"Reveal\""));
@@ -573,7 +614,7 @@ mod tests {
         // The landing page offers to resume the running two-card session.
         let body = client.get(format!("{base}/")).send().await?.text().await?;
         assert!(
-            body.contains("Resume session (2 cards remaining)"),
+            body.contains("Resume (2 left)"),
             "landing page must offer resume: {body}"
         );
 

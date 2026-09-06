@@ -1,5 +1,24 @@
 <changelog>
     <unreleased>
+        <changed>
+            <change author="claude">
+            **Drill** on the collection list now starts the session. It used to open a topic picker whose own button also said "Drill", so studying a collection always cost two presses of the same word — and on a first visit the picker's answer was already the one you wanted, every topic with anything due pre-ticked. The one-tap start takes every topic and no limit; a collection's own page, now reached by its name, is where you go to drill part of one, or to look at its topics, stats, bookmarks and export.
+            </change>
+            <change author="claude">
+            The drill's bottom bar holds the grades and nothing else. Undo and Bookmark sat in it at the same weight as Forgot/Hard/Good/Easy, and on a phone the bar became a column where each of them was a full-width button — three ways to lose a session's place, all the size of the buttons pressed hundreds of times an hour. Undo is now a back-arrow in the top-left corner, Bookmark a star in the top-right, and End a quiet line under the grades. The theme switch, which floats in that top-right corner on every page, is hidden during a session: a drill is not where a theme gets chosen, and it would sit on the star.
+            </change>
+            <change author="claude">
+            "Deck" now means one thing. It named both a heading inside a collection's markdown and a saved cross-collection selection, to the point where the decks page had to define itself with a sentence using the word twice. The heading is a **topic**; a **deck** is only ever the saved selection. Saved decks are also no longer kept behind a "Manage Decks" button — they are drillable in exactly the way a collection is, so they are listed among the collections, tagged, with their own counts.
+            </change>
+            <change author="claude">
+            The collection list is one list again. Four full-width bars — sign-in, decks, sources, git — announced background details above it, each as loud as the thing the page is for. They are now one line of small links beside the title and one muted status line under it, and the collections are rows carrying the due count in the one colour on the page.
+            </change>
+        </changed>
+        <fixed>
+            <change author="claude">
+            The session-completed screen no longer navigates away on a five-second timer. It is the one page in a session a user might want to sit and read.
+            </change>
+        </fixed>
         </unreleased>
     <releases>
         <release version="0.4.9" date="2026-09-05">

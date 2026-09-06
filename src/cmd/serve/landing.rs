@@ -11,8 +11,11 @@ use chrono::Duration;
 
 use crate::cmd::drill::template::page_template;
 use crate::cmd::serve::auth::CurrentUser;
+use crate::cmd::serve::decks::ResolvedCustomDeck;
 use crate::cmd::serve::files::local_collections_for;
 use crate::cmd::serve::git::refresh_collection_info;
+use crate::cmd::serve::handlers::deck_card_counts;
+use crate::cmd::serve::handlers::deck_sources;
 use crate::cmd::serve::hedgedoc::build_combined_infos;
 use crate::cmd::serve::state::AppState;
 use crate::cmd::serve::state::CollectionInfo;
@@ -99,12 +102,12 @@ pub async fn landing_handler(
         .filter(|s| s.collection.owner.as_deref() == owner.as_deref())
         .count();
     let config_available = state.config.data_dir.is_some();
-    let custom_decks: Vec<(String, String)> = state
+    let custom_decks: Vec<ResolvedCustomDeck> = state
         .custom_decks
         .lock()
         .iter()
         .filter(|d| d.owner.as_deref() == owner.as_deref())
-        .map(|d| (d.name.clone(), d.slug.clone()))
+        .cloned()
         .collect();
     // FEAT-03: surface running sessions so they can be resumed rather than
     // silently restarted.
@@ -122,6 +125,44 @@ pub async fn landing_handler(
             })
             .collect()
     };
+
+    // Collections and decks are both things you sit down and drill, so they
+    // share one list. A deck's counts are not cached anywhere — they are a
+    // selection over collections — so they are computed here.
+    let mut rows: Vec<DrillRow> = collections
+        .iter()
+        .map(|c| DrillRow {
+            name: c.name.clone(),
+            slug: c.slug.clone(),
+            due_today: c.due_today,
+            total_cards: c.total_cards,
+            is_deck: false,
+        })
+        .collect();
+    drop(all_collections);
+    for deck in custom_decks {
+        let state = state.clone();
+        let user = current_user.clone();
+        let counts = tokio::task::spawn_blocking(move || {
+            let sources = deck_sources(&state, &deck, user.as_ref().map(|u| u.email.as_str()));
+            deck_card_counts(&sources).map(|(due, total)| (deck, due, total))
+        })
+        .await;
+        match counts {
+            Ok(Ok((deck, due_today, total_cards))) => rows.push(DrillRow {
+                name: deck.name.clone(),
+                slug: deck.slug.clone(),
+                due_today,
+                total_cards,
+                is_deck: true,
+            }),
+            // A deck whose members have gone missing must not take the page
+            // down with it: it is listed, uncounted, and says so when opened.
+            Ok(Err(e)) => log::error!("Failed to count a deck: {e}"),
+            Err(e) => log::error!("Failed to count a deck: {e}"),
+        }
+    }
+
     let status = LandingStatus {
         last_synced,
         git_enabled,
@@ -130,7 +171,7 @@ pub async fn landing_handler(
         config_available,
         signed_in_as: owner.clone(),
     };
-    let html = render_landing_page(&collections, &custom_decks, &resume, &status, flash);
+    let html = render_landing_page(&rows, &resume, &status, flash);
     (StatusCode::OK, Html(html.into_string()))
 }
 
@@ -147,135 +188,162 @@ struct LandingStatus {
     signed_in_as: Option<String>,
 }
 
+/// One row of the list: a collection or a saved deck. Both are things you
+/// sit down and drill, so the list does not separate them; only the tag on a
+/// deck row says which is which.
+struct DrillRow {
+    name: String,
+    slug: String,
+    due_today: usize,
+    total_cards: usize,
+    is_deck: bool,
+}
+
+/// A row with nothing to do is dimmed, so the list reads as "these are the
+/// ones waiting for you" at a glance.
+fn row_class(row: &DrillRow, resume: &HashMap<String, usize>) -> &'static str {
+    if row.due_today == 0 && !resume.contains_key(&row.slug) {
+        "drill-row muted"
+    } else {
+        "drill-row"
+    }
+}
+
+/// "36 due · 36 cards", or "Nothing due · 11 cards".
+fn row_meta(due_today: usize, total_cards: usize) -> Markup {
+    html! {
+        @if due_today > 0 {
+            span.row-due { (format!("{due_today} due")) }
+        } @else {
+            span.row-due.muted { "Nothing due" }
+        }
+        span.row-sep { "\u{00b7}" }
+        span.row-total {
+            (format!("{total_cards} card{}", if total_cards == 1 { "" } else { "s" }))
+        }
+    }
+}
+
+/// The one status line under the title: where the cards came from and when
+/// they last arrived. It replaced a stack of full-width bars, each of which
+/// announced a background detail as loudly as the list itself.
+fn status_line(status: &LandingStatus) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+    if status.git_enabled {
+        parts.push(match status.last_synced {
+            Some(ts) => format!("git {}", ts.into_inner().format("%H:%M")),
+            None => "git not yet synced".to_string(),
+        });
+    }
+    if status.hedgedoc_count > 0 {
+        parts.push(match status.hedgedoc_last_synced {
+            Some(ts) => format!(
+                "{} HedgeDoc source(s), {}",
+                status.hedgedoc_count,
+                ts.into_inner().format("%H:%M")
+            ),
+            None => format!(
+                "{} HedgeDoc source(s), not yet synced",
+                status.hedgedoc_count
+            ),
+        });
+    }
+    if let Some(email) = &status.signed_in_as {
+        parts.push(email.clone());
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(" \u{00b7} "))
+    }
+}
+
 fn render_landing_page(
-    collections: &[&CollectionInfo],
-    custom_decks: &[(String, String)],
+    rows: &[DrillRow],
     resume: &HashMap<String, usize>,
     status: &LandingStatus,
     flash: Option<Flash>,
 ) -> Markup {
     let LandingStatus {
-        last_synced,
         git_enabled,
-        hedgedoc_count,
-        hedgedoc_last_synced,
         config_available,
         ref signed_in_as,
+        ..
     } = *status;
+    let line = status_line(status);
     page_template(html! {
         @if let Some(f) = &flash { (f.render()) }
         div.landing {
-            h1 { "hashcards-web" }
-            @if let Some(email) = signed_in_as {
-                div.sync-bar {
-                    span.sync-status { (format!("Signed in as {email}")) }
-                    // POST, so a third-party page cannot log the user out by
-                    // embedding the URL.
-                    form action="/auth/logout" method="post" style="display:inline" {
-                        input .sync-button.btn.btn-secondary type="submit" value="Log out";
+            // Title, then everything that is not the list, on one line each.
+            // The list is what the page is for; the rest is upkeep.
+            header.app-bar {
+                h1 { "hashcards-web" }
+                nav.app-nav {
+                    @if config_available {
+                        a.nav-link href="/files" { "My cards" }
+                        a.nav-link href="/sources" { "Sources" }
                     }
-                }
-            }
-            @if git_enabled {
-                div.sync-bar {
-                    span.sync-status {
-                        @if let Some(ts) = last_synced {
-                            (format!("Last synced: {}", ts.into_inner().format("%Y-%m-%d %H:%M:%S")))
-                        } @else {
-                            "Not yet synced"
+                    @if git_enabled {
+                        // POST: syncing writes.
+                        form action="/sync" method="post" {
+                            button.nav-link type="submit" { "Sync" }
                         }
                     }
-                    form action="/sync" method="post" style="display:inline" {
-                        input .sync-button.btn.btn-secondary type="submit" value="Sync Now";
-                    }
-                }
-            }
-            @if config_available {
-                div.sync-bar {
-                    span.sync-status {
-                        @if custom_decks.is_empty() {
-                            "No decks"
-                        } @else {
-                            (format!("{} deck(s)", custom_decks.len()))
-                        }
-                    }
-                    form action="/decks" method="get" style="display:inline" {
-                        input .sync-button.btn.btn-secondary type="submit" value="Manage Decks";
-                    }
-                }
-            }
-            @if !custom_decks.is_empty() {
-                h2 { "Decks" }
-                table.collection-table {
-                    tbody {
-                        @for (name, slug) in custom_decks {
-                            tr {
-                                td { (name) }
-                                td {
-                                    a.drill-link.btn.btn-primary href=(format!("/collection/{slug}")) {
-                                        "Open"
-                                    }
-                                }
-                            }
+                    @if signed_in_as.is_some() {
+                        // POST, so a third-party page cannot log the user out
+                        // by embedding the URL.
+                        form action="/auth/logout" method="post" {
+                            button.nav-link type="submit" { "Log out" }
                         }
                     }
                 }
             }
-            @if config_available {
-                div.sync-bar {
-                    span.sync-status {
-                        @if hedgedoc_count > 0 {
-                            @if let Some(ts) = hedgedoc_last_synced {
-                                (format!("HedgeDoc synced: {}", ts.into_inner().format("%Y-%m-%d %H:%M:%S")))
-                            } @else {
-                                (format!("{hedgedoc_count} HedgeDoc source(s) — not yet synced"))
-                            }
-                        } @else {
-                            "No sources"
-                        }
-                    }
-                    form action="/sources" method="get" style="display:inline" {
-                        input .sync-button.btn.btn-secondary type="submit" value="Manage sources";
-                    }
-                    form action="/files" method="get" style="display:inline" {
-                        input .sync-button.btn.btn-secondary type="submit" value="My Cards";
-                    }
-                }
+            @if let Some(line) = line {
+                p.app-status { (line) }
             }
-            @if collections.is_empty() {
+
+            @if rows.is_empty() {
                 p.empty { "No collections configured." }
             } @else {
-                table.collection-table {
-                    thead {
-                        tr {
-                            th { "Collection" }
-                            th { "Due Today" }
-                            th { "Total Cards" }
-                            th { "" }
-                        }
-                    }
-                    tbody {
-                        @for coll in collections {
-                            tr class=@if coll.due_today == 0 && !resume.contains_key(&coll.slug) { "muted" } {
-                                td { (coll.name.clone()) }
-                                td.num { (coll.due_today) }
-                                td.num { (coll.total_cards) }
-                                td {
-                                    @if let Some(remaining) = resume.get(&coll.slug) {
-                                        a.drill-link.btn.btn-primary href=(format!("/collection/{}", coll.slug)) {
-                                            (format!("Resume session ({remaining} cards remaining)"))
-                                        }
-                                    } @else if coll.due_today > 0 {
-                                        a.drill-link.btn.btn-primary href=(format!("/collection/{}", coll.slug)) {
-                                            "Drill"
-                                        }
-                                    } @else {
-                                        span.no-cards { "Nothing due" }
+                ul.drill-list {
+                    @for row in rows {
+                        // One `class` attribute: two would be emitted verbatim
+                        // and the browser would keep only the first.
+                        li class=(row_class(row, resume)) {
+                            div.drill-row-main {
+                                // The name opens the collection: topics,
+                                // stats, bookmarks, export. The button skips
+                                // all of it and starts drilling.
+                                a.drill-row-name href=(format!("/collection/{}", row.slug)) {
+                                    (row.name)
+                                    @if row.is_deck { span.row-tag { "deck" } }
+                                }
+                                div.drill-row-meta { (row_meta(row.due_today, row.total_cards)) }
+                            }
+                            div.drill-row-action {
+                                @if let Some(remaining) = resume.get(&row.slug) {
+                                    a.btn.btn-primary href=(format!("/collection/{}", row.slug)) {
+                                        (format!("Resume ({remaining} left)"))
+                                    }
+                                } @else if row.due_today > 0 {
+                                    // One tap into card one. Every topic, no
+                                    // limit — the choices live behind the name
+                                    // for the sessions that want them.
+                                    form action=(format!("/collection/{}/start", row.slug)) method="post" {
+                                        input type="hidden" name="all_topics" value="1";
+                                        input .btn.btn-primary type="submit" value="Drill";
                                     }
                                 }
                             }
                         }
                     }
+                }
+            }
+            @if config_available {
+                p.list-foot {
+                    a href="/decks" { "Decks \u{2192}" }
+                    span.row-sep { "\u{00b7}" }
+                    "a deck is a saved selection of topics from any of your collections"
                 }
             }
         }

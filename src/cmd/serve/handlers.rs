@@ -356,6 +356,10 @@ pub struct StartDrillForm {
     pub decks: Vec<String>,
     /// Optional card limit: `0` or absent means "all due cards".
     pub limit: Option<usize>,
+    /// Set by the one-tap Drill button on the collection list, which offers
+    /// no topic checkboxes at all. It is what tells an empty `decks` apart
+    /// from a topic picker with everything unticked.
+    pub all_topics: bool,
 }
 
 /// Custom `Deserialize` for `StartDrillForm`.
@@ -380,9 +384,14 @@ impl<'de> serde::Deserialize<'de> for StartDrillForm {
             fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
                 let mut decks = Vec::new();
                 let mut limit: Option<usize> = None;
+                let mut all_topics = false;
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
                         "decks" => decks.push(map.next_value::<String>()?),
+                        "all_topics" => {
+                            let _ = map.next_value::<String>()?;
+                            all_topics = true;
+                        }
                         "limit" => {
                             let raw = map.next_value::<String>()?;
                             if let Ok(n) = raw.parse::<usize>() {
@@ -396,7 +405,11 @@ impl<'de> serde::Deserialize<'de> for StartDrillForm {
                         }
                     }
                 }
-                Ok(StartDrillForm { decks, limit })
+                Ok(StartDrillForm {
+                    decks,
+                    limit,
+                    all_topics,
+                })
             }
         }
 
@@ -414,7 +427,14 @@ pub async fn collection_start_handler(
     let slug2 = slug.clone();
     let owner = current_user.map(|u| u.email);
     match run_blocking(move || {
-        collection_start_inner(&state2, &slug2, form.decks, form.limit, owner.as_deref())
+        collection_start_inner(
+            &state2,
+            &slug2,
+            form.decks,
+            form.limit,
+            form.all_topics,
+            owner.as_deref(),
+        )
     })
     .await
     {
@@ -431,6 +451,7 @@ fn collection_start_inner(
     slug: &str,
     selected_decks: Vec<String>,
     limit: Option<usize>,
+    all_topics: bool,
     owner: Option<&str>,
 ) -> Fallible<()> {
     // The slug must be the caller's own before anything else happens —
@@ -439,9 +460,10 @@ fn collection_start_inner(
     let target = find_drill_target(state, slug, owner)
         .ok_or_else(|| ErrorReport::new(format!("Unknown collection: {slug}")))?;
     // A custom deck's membership is fixed when it is saved, so it carries no
-    // deck checkboxes; a collection needs at least one.
-    if matches!(target, DrillTarget::Collection(_)) && selected_decks.is_empty() {
-        return fail("Select at least one deck.");
+    // topic checkboxes; a collection needs at least one — unless the caller
+    // asked for all of them, which an empty `decks` already means downstream.
+    if matches!(target, DrillTarget::Collection(_)) && selected_decks.is_empty() && !all_topics {
+        return fail("Select at least one topic.");
     }
     // FEAT-03: never silently discard an unfinished session. The redirect
     // to /collection/{slug} lands on the running session; the user must
@@ -643,8 +665,18 @@ pub(super) fn create_session_from_sources(
 /// How many of a custom deck's cards are due today, across every collection
 /// it draws on.
 fn due_card_count(sources: &[SessionSourceSpec]) -> Fallible<usize> {
+    Ok(deck_card_counts(sources)?.0)
+}
+
+/// `(due today, total)` over the topics a custom deck names.
+///
+/// A deck is a selection, not a collection, so its counts cannot be cached
+/// alongside the collection counts: they are recomputed from the member
+/// collections each time they are shown.
+pub(super) fn deck_card_counts(sources: &[SessionSourceSpec]) -> Fallible<(usize, usize)> {
     let today = Timestamp::now().date();
-    let mut total = 0;
+    let mut due_total = 0;
+    let mut card_total = 0;
     for spec in sources {
         let collection = Collection::with_db_path(
             spec.collection.coll_dir.clone(),
@@ -652,13 +684,18 @@ fn due_card_count(sources: &[SessionSourceSpec]) -> Fallible<usize> {
         )?;
         let due: HashSet<CardHash> = collection.db.due_today(today)?;
         let wanted: HashSet<&str> = spec.decks.iter().map(|d| d.as_str()).collect();
-        total += collection
+        for card in collection
             .cards
             .iter()
-            .filter(|c| wanted.contains(c.deck_name().as_str()) && due.contains(&c.hash()))
-            .count();
+            .filter(|c| wanted.contains(c.deck_name().as_str()))
+        {
+            card_total += 1;
+            if due.contains(&card.hash()) {
+                due_total += 1;
+            }
+        }
     }
-    Ok(total)
+    Ok((due_total, card_total))
 }
 
 /// The start page for a custom deck: what it contains, how much is due, and
@@ -697,7 +734,7 @@ fn render_custom_deck_page(
                 p.empty { "This deck has no members in collections you own." }
             } @else {
                 table.collection-table {
-                    thead { tr { th { "Collection" } th { "Decks" } } }
+                    thead { tr { th { "Collection" } th { "Topics" } } }
                     tbody {
                         @for source in sources {
                             tr {

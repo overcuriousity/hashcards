@@ -408,7 +408,74 @@ input[type="checkbox"] { accent-color: var(--color-accent); }
 .editor { max-width: 84rem; }
 
 /* The header of a subpage: the way back, then the title. */
+/* ── The collection list ───────────────────────────────────────────────────
+   The page is one list of things you can drill. Everything else — where the
+   cards sync from, who is signed in, the deck editor — is upkeep, and sits on
+   one line each above and below it rather than in a stack of bars that each
+   looked as important as the list. */
+.app-bar {
+  display: flex; flex-wrap: wrap; align-items: baseline;
+  justify-content: space-between; gap: 0.75rem 1rem;
+  margin-bottom: 0.375rem;
+}
+.app-nav { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.25rem 0.875rem; }
+.app-nav form { display: inline; }
+.nav-link {
+  -webkit-appearance: none; appearance: none;
+  padding: 0; background: none; border: none;
+  font-family: inherit; font-size: var(--text-xs); line-height: 1.5;
+  color: var(--color-fg-muted); text-decoration: none; cursor: pointer;
+}
+.nav-link:hover { color: var(--color-fg-primary); text-decoration: underline; }
+
+.app-status {
+  margin-bottom: 2rem;
+  font-size: var(--text-xs); color: var(--color-fg-muted);
+}
+
+.drill-list { list-style: none; margin: 0; padding: 0; }
+.drill-row {
+  display: flex; align-items: center; gap: 1rem;
+  padding: 0.875rem 0;
+  border-bottom: 1px solid var(--color-border);
+}
+.drill-row:first-child { border-top: 1px solid var(--color-border); }
+.drill-row-main { flex: 1; min-width: 0; }
+.drill-row-name {
+  display: inline-flex; align-items: baseline; gap: 0.5rem;
+  font-size: var(--text-md); font-weight: 600;
+  color: var(--color-fg-primary); text-decoration: none;
+}
+.drill-row-name:hover { color: var(--color-accent); text-decoration: underline; }
+.drill-row-meta {
+  margin-top: 0.125rem;
+  display: flex; align-items: baseline; gap: 0.375rem;
+  font-size: var(--text-xs); color: var(--color-fg-muted);
+}
+/* Due is the number the page exists to report, so it is the one thing on the
+   row that carries a colour. */
+.row-due { color: var(--color-due); font-weight: 600; }
+.row-due.muted { color: var(--color-fg-muted); font-weight: 400; }
+.row-sep { color: var(--color-border-strong); }
+/* Collections and decks share the list; only this says which is which. */
+.row-tag {
+  font-size: var(--text-xs); font-weight: 500; text-transform: uppercase;
+  letter-spacing: 0.04em; color: var(--color-fg-muted);
+  padding: 0.0625rem 0.375rem;
+  border: 1px solid var(--color-border-strong); border-radius: var(--radius-sm);
+}
+.drill-row.muted .drill-row-name { color: var(--color-fg-muted); font-weight: 500; }
+.drill-row-action { flex: none; }
+.drill-row-action .btn { min-height: 34px; }
+
+.list-foot {
+  margin-top: 1.5rem;
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.375rem;
+  font-size: var(--text-xs); color: var(--color-fg-muted);
+}
+
 .browse-header { margin-bottom: 2rem; }
+.section-title { margin-bottom: 0.75rem; }
 .browse-header h1 { margin-top: 0.5rem; }
 
 .back-link {
@@ -426,7 +493,6 @@ input[type="checkbox"] { accent-color: var(--color-accent); }
 }
 
 .inline-form { display: inline; }
-.spacer { flex: 1; }
 
 /* ── The theme switch ──────────────────────────────────────────────────────
    The one control on every page, and the only fixed one. In the corner rather
@@ -468,13 +534,45 @@ input[type="checkbox"] { accent-color: var(--color-accent); }
   background: var(--color-bg-base);
 }
 
+/* Three slots: undo, progress, bookmark. The progress column takes the
+   middle and the two icons hold the corners, so the bar stays centred on the
+   screen however wide the icons are. */
 .root .header {
   flex: none;
-  display: flex; justify-content: center; align-items: center;
-  padding: 1.25rem 1.5rem;
+  display: grid;
+  grid-template-columns: 2.5rem 1fr 2.5rem;
+  align-items: center;
+  padding: 0.875rem 1rem;
   background: var(--color-bg-surface);
   border-bottom: 1px solid var(--color-border);
 }
+.root .header .progress { grid-column: 2; }
+.root .header #undo { justify-self: start; }
+.root .header #bookmark { justify-self: end; }
+
+/* A control that is available but not being offered: an icon in a corner, at
+   the muted weight of a caption, sized for a thumb regardless. */
+.icon-button {
+  -webkit-appearance: none; appearance: none;
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 2.25rem; height: 2.25rem; padding: 0;
+  font-family: inherit; font-size: 1.125rem; line-height: 1;
+  cursor: pointer;
+  background: transparent; color: var(--color-fg-muted);
+  border: 1px solid transparent; border-radius: var(--radius-sm);
+  transition: color 120ms ease, background 120ms ease;
+}
+.icon-button:hover { background: var(--color-bg-hover); color: var(--color-fg-primary); }
+.icon-button:focus-visible { color: var(--color-fg-primary); }
+.icon-button:disabled { opacity: 0.3; cursor: default; background: transparent; }
+.icon-button.bookmark-active { color: var(--color-warning); }
+.icon-button.bookmark-active:hover { background: var(--color-warning-dim); color: var(--color-warning); }
+
+/* The drill is the one screen with a header of its own, so the floating
+   switch would sit on top of the bookmark star. A session is not where a
+   theme gets chosen; every other page, the completion screen included,
+   still offers it. */
+body:has(.root) .theme-toggle { display: none; }
 
 .root .progress { display: flex; flex-direction: column; align-items: center; gap: 0.5rem; }
 .root .progress-text { font-size: var(--text-xs); color: var(--color-fg-muted); }
@@ -632,14 +730,29 @@ input[type="checkbox"] { accent-color: var(--color-accent); }
   background: var(--color-bg-surface);
   border-top: 1px solid var(--color-border);
 }
-.root .controls form {
-  display: flex; align-items: center; gap: 0.5rem;
+.root .controls .grades {
+  display: flex; gap: 0.5rem; justify-content: center;
   max-width: 56rem; margin: 0 auto;
 }
-.root .controls .grades { display: flex; gap: 0.5rem; }
+.root .controls .grades > * { flex: 1; max-width: 12rem; }
+.root .controls button,
+.root .controls input[type="submit"] { min-height: 44px; font-weight: 600; }
 
+/* Ending early is a way out, not an answer. Styled as a line of text so it
+   never reads as a fifth grade. */
+.end-link {
+  display: block; margin: 0.625rem auto 0; padding: 0.25rem 0.5rem;
+  -webkit-appearance: none; appearance: none;
+  background: none; border: none;
+  font-family: inherit; font-size: var(--text-xs); line-height: 1;
+  color: var(--color-fg-muted); cursor: pointer;
+}
+.end-link:hover { color: var(--color-fg-primary); text-decoration: underline; }
+
+/* Alone in the bar, Reveal is allowed to be wider than one grade: it is the
+   only thing to press. */
 #reveal { background: var(--color-accent); color: var(--color-accent-fg);
-          border-color: transparent; font-weight: 600; }
+          border-color: transparent; font-weight: 600; max-width: 24rem; }
 #reveal:hover { background: var(--color-accent); border-color: transparent; opacity: 0.9; }
 
 #forgot { background: var(--color-danger-dim);  color: var(--color-danger);  border-color: var(--color-danger); }
@@ -651,16 +764,6 @@ input[type="checkbox"] { accent-color: var(--color-accent); }
 #hard:hover   { background: var(--color-warning); color: #fff; border-color: var(--color-warning); }
 #good:hover   { background: var(--color-success); color: #fff; border-color: var(--color-success); }
 #easy:hover   { background: var(--color-accent);  color: var(--color-accent-fg); border-color: var(--color-accent); }
-
-/* Bookmarked is a state, not an action, so the button stays lit while it
-   holds. */
-.controls button.bookmark-active {
-  background: var(--color-warning-dim); color: var(--color-warning);
-  border-color: var(--color-warning);
-}
-.controls button.bookmark-active:hover {
-  background: var(--color-warning); color: #fff; border-color: var(--color-warning);
-}
 
 /* ── The end of a session ──────────────────────────────────────────────── */
 .finished {
@@ -1189,11 +1292,14 @@ a.file-name:hover { text-decoration: underline; }
   h1 { font-size: var(--text-xl); }
   h2 { font-size: var(--text-lg); }
 
-  .root .header { padding: 0.75rem 1rem; }
-  /* The theme switch is fixed in the top-right corner, and on a phone the
-     centred progress bar reaches it. The bar gives way: it is the thing whose
-     exact width means nothing. */
-  .root .progress-bar { width: min(24rem, 58vw); }
+  /* The row keeps the button beside the name — a list you scan with a thumb
+     wants its action where the thumb already is — but the button stops
+     shrinking the name and takes a fixed share instead. */
+  .drill-row { gap: 0.75rem; }
+  .drill-row-action .btn { min-height: 40px; padding: 0 1rem; }
+
+  .root .header { padding: 0.625rem 0.5rem; }
+  .root .progress-bar { width: min(24rem, 100%); }
   .root .card-container { padding: 0; }
   .root .card {
     width: 100%; height: 100%; max-height: none;
@@ -1203,15 +1309,10 @@ a.file-name:hover { text-decoration: underline; }
 
   .rich-text { font-size: 1.125rem; }
 
-  .root .controls { padding: 0.75rem; }
-  .root .controls form { flex-direction: column; align-items: stretch; gap: 0.5rem; }
-  .root .controls .grades { flex-direction: row; justify-content: space-between; }
-  .root .controls .grades > * { flex: 1; }
-  .root .controls button,
-  .root .controls input[type="submit"] { min-height: 44px; }
-  /* The spacers exist to push the grades to the middle of a row. In a column
-     they are empty flex children that only add gaps. */
-  .root .controls .spacer { display: none; }
+  .root .controls { padding: 0.75rem 0.75rem 0.5rem; }
+  /* Every grade gets an equal share of the width: the row is aimed at with
+     the thumb, and an even row is aimed at by position alone. */
+  .root .controls .grades > * { max-width: none; }
 
   .btn { min-height: 44px; }
 
