@@ -347,7 +347,7 @@ input[type="checkbox"] { accent-color: var(--color-accent); }
    One shape — tinted panel, matching border, matching text — and the tint is
    the only difference, so they are recognisably the same object speaking in
    different registers. */
-.notice, .flash, .error, .edit-warning {
+.notice, .flash, .error {
   padding: 0.75rem 1rem;
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
@@ -1009,11 +1009,6 @@ fieldset label {
   border: 1px solid var(--color-border-subtle);
   border-radius: var(--radius-sm);
   padding: 0.1em 0.35em;
-}
-
-.edit-warning {
-  margin-bottom: 1rem;
-  border-color: var(--color-warning); background: var(--color-warning-dim);
 }
 
 .edit-textarea { min-height: 24rem; margin-bottom: 1rem; font-size: var(--text-sm); }

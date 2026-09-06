@@ -32,7 +32,11 @@ mod tests {
     use crate::cmd::serve::config::ResolvedServeConfig;
     use crate::cmd::serve::server::start_serve;
     use crate::db::Database;
+    use crate::error::ErrorReport;
     use crate::error::Fallible;
+    use crate::error::fail;
+    use crate::types::card_hash::CardHash;
+    use crate::types::performance::Performance;
     use crate::types::timestamp::Timestamp;
     use crate::utils::wait_for_server;
 
@@ -84,6 +88,31 @@ mod tests {
         };
         spawn(async move { start_serve(config).await });
         wait_for_server(TEST_HOST, port).await
+    }
+
+    /// The hash of the card the drill page is showing, out of its hidden
+    /// `card` input.
+    fn extract_card_hash(html: &str) -> Fallible<String> {
+        extract_input_value(html, "card")
+    }
+
+    /// The `value` of the first `<input name="{name}" … value="…">` on the
+    /// page. Deliberately crude: it exists so a test can act as a browser
+    /// would, not to parse HTML in general.
+    fn extract_input_value(html: &str, name: &str) -> Fallible<String> {
+        let needle = format!("name=\"{name}\"");
+        let after = match html.split_once(&needle) {
+            Some((_, rest)) => rest,
+            None => return fail(format!("no input named `{name}` on the page")),
+        };
+        let after = match after.split_once("value=\"") {
+            Some((_, rest)) => rest,
+            None => return fail(format!("input `{name}` has no value")),
+        };
+        match after.split_once('"') {
+            Some((value, _)) => Ok(value.to_string()),
+            None => fail(format!("input `{name}` has an unterminated value")),
+        }
     }
 
     /// A server whose card tree holds one collection named `name`. Returns
@@ -777,6 +806,113 @@ A: 2
             Some("image/png")
         );
         assert_eq!(served.bytes().await?.to_vec(), png);
+        Ok(())
+    }
+
+    /// Editing the card you are drilling used to be refused outright. Now
+    /// the session follows the card to its new hash, so the grade that
+    /// comes next lands on the card that is actually on screen — and the
+    /// old card's review history came with it.
+    #[tokio::test]
+    async fn test_a_card_can_be_edited_mid_session_and_then_graded() -> Fallible<()> {
+        let (port, dir) =
+            spawn_test_server("Spanish", &[("verbs.md", "Q: the cat\nA: el gato\n")]).await?;
+        let base = format!("http://{TEST_HOST}:{port}");
+        let client = reqwest::Client::new();
+
+        // Start a drill on the whole collection.
+        client
+            .post(format!("{base}/collection/Spanish/start"))
+            .form(&[("decks", "verbs")])
+            .send()
+            .await?;
+        let page = client
+            .get(format!("{base}/collection/Spanish"))
+            .send()
+            .await?
+            .text()
+            .await?;
+        let old_hash = extract_card_hash(&page)?;
+
+        // Reveal, then edit the card that is on screen.
+        client
+            .post(format!("{base}/collection/Spanish"))
+            .form(&[("action", "Reveal"), ("card", old_hash.as_str())])
+            .send()
+            .await?;
+
+        let form = client
+            .get(format!("{base}/collection/Spanish/edit/{old_hash}"))
+            .send()
+            .await?
+            .text()
+            .await?;
+        let mtime = extract_input_value(&form, "mtime_ms")?;
+        let save = client
+            .post(format!("{base}/collection/Spanish/edit/{old_hash}"))
+            .form(&[
+                ("new_text", "Q: the cat\nA: el gato (masc.)"),
+                ("mtime_ms", mtime.as_str()),
+            ])
+            .send()
+            .await?;
+        assert!(
+            save.status().is_success(),
+            "save returned {}",
+            save.status()
+        );
+
+        // The session is still live, and now shows the edited card.
+        let page = client
+            .get(format!("{base}/collection/Spanish"))
+            .send()
+            .await?
+            .text()
+            .await?;
+        let new_hash = extract_card_hash(&page)?;
+        assert_ne!(new_hash, old_hash, "the edit must have renamed the card");
+
+        // Grading it must be accepted, not answered with "already graded".
+        client
+            .post(format!("{base}/collection/Spanish"))
+            .form(&[("action", "Reveal"), ("card", new_hash.as_str())])
+            .send()
+            .await?;
+        client
+            .post(format!("{base}/collection/Spanish"))
+            .form(&[("action", "Good"), ("card", new_hash.as_str())])
+            .send()
+            .await?;
+
+        // The review landed on the new hash, in the collection's own
+        // database, with the old card's row carried over.
+        let folder = dir.path().join("cards").join("default").join("Spanish");
+        let id = crate::cmd::serve::cards::existing_collection_id(&folder)?
+            .ok_or_else(|| ErrorReport::new("the collection has no id"))?;
+        let db_path = dir.path().join("db").join(format!("{id}.db"));
+        let db_str = match db_path.to_str() {
+            Some(p) => p,
+            None => return fail("temp path is not UTF-8"),
+        };
+        let db = Database::new(db_str)?;
+        let hash = CardHash::from_hex(&new_hash)?;
+        assert!(db.card_exists(hash)?, "the edited card has no row");
+        match db.get_card_performance_opt(hash)? {
+            Some(Performance::Reviewed(rp)) => assert_eq!(
+                rp.review_count, 1,
+                "the grade did not land on the edited card"
+            ),
+            other => {
+                return fail(format!(
+                    "the edited card was never reviewed: {}",
+                    if other.is_some() {
+                        "still New"
+                    } else {
+                        "no row"
+                    }
+                ));
+            }
+        }
         Ok(())
     }
 }

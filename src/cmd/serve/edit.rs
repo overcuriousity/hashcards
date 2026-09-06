@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::collections::HashMap;
+use std::collections::HashSet;
 use std::path::Path;
 use std::path::PathBuf;
 use std::time::UNIX_EPOCH;
@@ -14,12 +16,14 @@ use maud::Markup;
 use maud::html;
 use serde::Deserialize;
 
+use crate::cmd::drill::state::CardMigration;
+use crate::cmd::drill::state::MigrationEffect;
 use crate::cmd::drill::template::page_template;
 use crate::cmd::run_blocking;
 use crate::cmd::serve::auth::CurrentUser;
 use crate::cmd::serve::handlers::find_collection;
 use crate::cmd::serve::state::AppState;
-use crate::cmd::serve::state::sessions_touching;
+use crate::cmd::serve::state::migrate_sessions;
 use crate::db::Database;
 use crate::error::ErrorReport;
 use crate::error::Fallible;
@@ -74,16 +78,7 @@ fn edit_get_inner(
         .display()
         .to_string();
 
-    let active_session = !sessions_touching(state, &coll_dir).is_empty();
-    let html = render_edit_form(
-        &rc.name,
-        slug,
-        hash_hex,
-        &rel_path,
-        &block,
-        mtime_ms,
-        active_session,
-    );
+    let html = render_edit_form(&rc.name, slug, hash_hex, &rel_path, &block, mtime_ms);
     Ok(html.into_string())
 }
 
@@ -94,7 +89,6 @@ fn render_edit_form(
     rel_path: &str,
     block: &str,
     mtime_ms: u64,
-    active_session: bool,
 ) -> Markup {
     page_template(html! {
         div.edit-page {
@@ -105,11 +99,6 @@ fn render_edit_form(
                 h1 { "Edit Card" }
             }
             p.edit-path { code { (rel_path) } }
-            @if active_session {
-                div.edit-warning {
-                    "\u{26a0} A drill session is active. End it before saving to avoid stale state."
-                }
-            }
             form action=(format!("/collection/{slug}/edit/{hash_hex}")) method="post" {
                 input type="hidden" name="mtime_ms" value=(mtime_ms);
                 textarea
@@ -148,6 +137,8 @@ pub struct EditOutcome {
     pub migrated: usize,
     /// New cards that could not be matched to prior history and start fresh.
     pub skipped: usize,
+    /// What the edit did to any live drill session on this collection.
+    pub session: MigrationEffect,
 }
 
 pub async fn edit_post_handler(
@@ -165,12 +156,20 @@ pub async fn edit_post_handler(
     {
         Ok(outcome) => {
             log::debug!(
-                "Edit saved: {} card(s) migrated, {} skipped",
+                "Edit saved: {} card(s) migrated, {} skipped, {} session card(s) renamed, {} dropped",
                 outcome.migrated,
-                outcome.skipped
+                outcome.skipped,
+                outcome.session.renamed,
+                outcome.session.dropped
             );
             let target = format!("/collection/{slug}/bookmarks");
-            let msg = String::from("Card saved.");
+            let mut msg = String::from("Card saved.");
+            if outcome.session.renamed > 0 || outcome.session.dropped > 0 {
+                msg.push_str(" Your running session was updated.");
+            }
+            if outcome.session.session_finished {
+                msg.push_str(" It has no cards left, so it is finished.");
+            }
             let flash = if outcome.skipped > 0 {
                 Flash::error(format!(
                     "{msg} {} card(s) could not be matched to their previous review history and will start fresh.",
@@ -197,9 +196,6 @@ fn edit_post_inner(
 
     let hash = CardHash::from_hex(hash_hex)?;
     let coll_dir = rc.coll_dir.canonicalize()?;
-    if !sessions_touching(state, &coll_dir).is_empty() {
-        return fail("A drill session is active. End it before editing.");
-    }
     let cards = parse_deck(&coll_dir)?.cards;
     let card = find_card_by_hash(&cards, hash)?;
 
@@ -276,6 +272,12 @@ fn edit_post_inner(
         }
     };
 
+    // The file is written and the transaction has committed, so nothing
+    // below can fail: a live session is re-keyed onto the cards that now
+    // exist, or it is not, and there is no state left to roll back to.
+    let migration = build_card_migration(&plan, &old_cards, &new_cards);
+    let session = migrate_sessions(state, &coll_dir, &migration);
+
     Ok(EditOutcome {
         migrated: counts.renamed,
         // A rename the database declined as a true collision (its target
@@ -283,6 +285,7 @@ fn edit_post_inner(
         // user should hear about. A rename whose old hash had no history of
         // its own is not: there was nothing to lose.
         skipped: plan.skipped + counts.collided,
+        session,
     })
 }
 
@@ -407,6 +410,33 @@ pub struct MigrationPlan {
     /// How many fresh cards may have lost history (old history existed but
     /// could not be matched unambiguously). Reported to the user via flash.
     pub skipped: usize,
+}
+
+/// Join a `MigrationPlan` with the re-parsed cards, in the terms a live
+/// session needs.
+///
+/// `plan.renames` already pairs old and new *hashes*; this looks each new
+/// hash up among the re-parsed cards so the session gets the whole card,
+/// and works out which old cards the edit removed: the ones that were
+/// neither renamed nor still present under their own hash.
+pub(crate) fn build_card_migration(
+    plan: &MigrationPlan,
+    old_cards: &[&Card],
+    new_cards: &[Card],
+) -> CardMigration {
+    let by_hash: HashMap<CardHash, &Card> = new_cards.iter().map(|c| (c.hash(), c)).collect();
+    let renamed: Vec<(CardHash, Card)> = plan
+        .renames
+        .iter()
+        .filter_map(|(old, new)| by_hash.get(new).map(|card| (*old, (*card).clone())))
+        .collect();
+    let renamed_from: HashSet<CardHash> = plan.renames.iter().map(|(old, _)| *old).collect();
+    let removed: Vec<CardHash> = old_cards
+        .iter()
+        .map(|c| c.hash())
+        .filter(|h| !by_hash.contains_key(h) && !renamed_from.contains(h))
+        .collect();
+    CardMigration { renamed, removed }
 }
 
 /// The matching key for a card: the cloze deletion's text for cloze cards

@@ -8,6 +8,8 @@ use chrono::Duration;
 use parking_lot::Mutex;
 
 use crate::cmd::drill::render::AnswerControls;
+use crate::cmd::drill::state::CardMigration;
+use crate::cmd::drill::state::MigrationEffect;
 use crate::cmd::drill::state::MutableState;
 use crate::cmd::serve::auth::OidcRuntime;
 use crate::cmd::serve::config::ResolvedServeConfig;
@@ -198,6 +200,40 @@ pub fn sessions_touching(state: &AppState, coll_dir: &Path) -> Vec<SharedSession
             !routed && same_dir(&session.directory, coll_dir)
         })
         .collect()
+}
+
+/// Apply `migration` to every live session drawing on `coll_dir`, and
+/// report the total effect.
+///
+/// Called only after the file has been written and the database
+/// transaction has committed, which is what lets it be infallible.
+///
+/// A session that started between the write and this call looks like a
+/// race and is not: a session parses its collection when it starts, so one
+/// beginning after the write already holds the new hashes, and the
+/// migration — which looks up old ones — finds nothing and does nothing. A
+/// session that began before the write is in the map.
+pub fn migrate_sessions(
+    state: &AppState,
+    coll_dir: &Path,
+    migration: &CardMigration,
+) -> MigrationEffect {
+    let mut total = MigrationEffect {
+        renamed: 0,
+        dropped: 0,
+        session_finished: false,
+    };
+    for shared in sessions_touching(state, coll_dir) {
+        let mut session = shared.lock();
+        let effect = session.mutable.apply_card_migration(migration);
+        // The progress bar's denominator counts the cards the session set
+        // out with; an edit that removed some must not leave it stuck.
+        session.total_cards = session.total_cards.saturating_sub(effect.dropped);
+        total.renamed += effect.renamed;
+        total.dropped += effect.dropped;
+        total.session_finished |= effect.session_finished;
+    }
+    total
 }
 
 /// Whether two paths name the same directory.
