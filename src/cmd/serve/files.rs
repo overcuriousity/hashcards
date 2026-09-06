@@ -23,6 +23,7 @@ use crate::cmd::serve::cards::discover_local_collections;
 use crate::cmd::serve::cards::existing_collection_id;
 use crate::cmd::serve::config::ResolvedCollection;
 use crate::cmd::serve::config::slugify;
+use crate::cmd::serve::edit::build_card_migration;
 use crate::cmd::serve::edit::file_mtime_ms;
 use crate::cmd::serve::edit::plan_hash_migration;
 use crate::cmd::serve::edit::revert_file;
@@ -32,6 +33,7 @@ use crate::cmd::serve::files_ui::render_preview;
 use crate::cmd::serve::files_ui::render_tree_page;
 use crate::cmd::serve::href::encoded_path;
 use crate::cmd::serve::state::AppState;
+use crate::cmd::serve::state::migrate_sessions;
 use crate::cmd::serve::state::sessions_touching;
 use crate::cmd::serve::upload::MEDIA_DIR;
 use crate::db::Database;
@@ -809,13 +811,7 @@ fn save_file(
         return fail(format!("`{rel}` is not a file."));
     }
 
-    // A live session drills the cards it cached when it started. Rewriting
-    // their hashes underneath it strands the grades it is about to write —
-    // the same reason `edit_post_inner` refuses a card edit mid-session.
     let coll_dir = collection_folder(&root, rel)?;
-    if !sessions_touching(state, &coll_dir).is_empty() {
-        return fail("A drill session is active on this collection. End it before editing.");
-    }
 
     if file_mtime_ms(&path)? != form.mtime {
         return fail(
@@ -898,14 +894,27 @@ fn save_file(
     // nobody has drilled, every card is "unmatched" and saying so is noise.
     let skipped = plan.skipped + counts.collided;
     let worth_reporting = skipped > 0 && any_card_has_history(db_path_str, &old_cards)?;
-    if worth_reporting {
-        Ok(format!(
+    let mut message = if worth_reporting {
+        format!(
             "Saved {} cards. {skipped} could not be matched to their old review history and start fresh.",
             new_cards.len()
-        ))
+        )
     } else {
-        Ok(format!("Saved {} cards.", new_cards.len()))
+        format!("Saved {} cards.", new_cards.len())
+    };
+
+    // Written and committed: from here the session is re-keyed onto the
+    // cards that now exist, and nothing left can fail.
+    let old_refs: Vec<&Card> = old_cards.iter().collect();
+    let migration = build_card_migration(&plan, &old_refs, &new_cards);
+    let session = migrate_sessions(state, &coll_dir, &migration);
+    if session.renamed > 0 || session.dropped > 0 {
+        message.push_str(" Your running session was updated.");
     }
+    if session.session_finished {
+        message.push_str(" It has no cards left, so it is finished.");
+    }
+    Ok(message)
 }
 
 #[derive(Deserialize)]
@@ -1569,29 +1578,35 @@ mod tests {
         Ok(())
     }
 
+    /// The whole-file editor refused to save while a session was running,
+    /// for the same reason the card editor did. It now re-keys the session
+    /// onto the rewritten file instead.
     #[test]
-    fn a_save_is_refused_while_a_session_drills_the_collection() -> Fallible<()> {
+    fn a_save_migrates_a_running_session_instead_of_refusing() -> Fallible<()> {
         let dir = create_tmp_directory()?;
         let state = state_for(&dir);
         let root = user_root(&state, None)?;
         let folder = root.path().join("Spanish");
         std::fs::create_dir_all(&folder)?;
         let path = folder.join("verbs.md");
-        let original = "Q: the cat\nA: el gato\n";
-        std::fs::write(&path, original)?;
+        std::fs::write(&path, "Q: the cat\nA: el gato\n")?;
 
         start_session(&state, &dir, &folder, "Spanish")?;
 
-        let form = SaveForm {
-            content: "Q: the dog\nA: el perro\n".to_string(),
-            mtime: file_mtime_ms(&path)?,
-        };
-        let error = match save_file(&state, None, "Spanish/verbs.md", &form) {
-            Ok(_) => return fail("expected an active session to refuse the save"),
-            Err(e) => e.to_string(),
-        };
-        assert!(error.contains("drill session"), "got: {error}");
-        assert_eq!(std::fs::read_to_string(&path)?, original);
+        let saved = save_file(
+            &state,
+            None,
+            "Spanish/verbs.md",
+            &SaveForm {
+                content: "Q: the cat\nA: el gato (masc.)\n".to_string(),
+                mtime: file_mtime_ms(&path)?,
+            },
+        )?;
+        assert!(saved.starts_with("Saved"), "got: {saved}");
+        assert!(
+            std::fs::read_to_string(&path)?.contains("masc."),
+            "the edit is not on disk"
+        );
         Ok(())
     }
 
