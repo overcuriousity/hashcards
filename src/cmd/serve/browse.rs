@@ -314,9 +314,8 @@ pub fn render_browse_page(
 }
 
 /// A leaf topic links to the file it lives in, opened in the in-app editor.
-/// This replaces the outbound link to a HedgeDoc note: the target is a path
-/// we construct, on every collection rather than only remote-backed ones,
-/// and in the same tab.
+/// The target is a path we construct, so it needs no scheme check, and it
+/// opens in the same tab.
 fn render_deck_node(
     node: &DeckNode,
     depth: usize,
