@@ -224,8 +224,13 @@ max_interval_days = 90
 ```
 
 Either key may be omitted, in which case the value from `[defaults]` applies.
-A value out of range is ignored with a warning rather than hiding the
-collection. `jitter` is not overridable: it spreads one person's review peaks
+A value out of range, or one written as something other than a number, is
+ignored with a warning rather than hiding the collection; so is the rest of
+the file if TOML cannot parse it, as long as the `id` line is still legible.
+The `id` is the one thing that cannot be recovered by hand — it names the
+collection's review database — so a file with no readable `id` at all is left
+alone and the collection is skipped with a warning rather than being given a
+fresh id on top of your edits. `jitter` is not overridable: it spreads one person's review peaks
 across everything they study, so one collection deciding it alone would be
 deciding nothing. A card is always scheduled by the collection that holds it,
 including when it is drilled inside a deck spanning several.

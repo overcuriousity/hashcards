@@ -21,11 +21,13 @@ use maud::DOCTYPE;
 use maud::Markup;
 use maud::html;
 
+use crate::cmd::drill::fonts::FONT_DIR_URL;
 use crate::cmd::drill::hljs::HLJS_CSS_URL;
 use crate::cmd::drill::hljs::HLJS_JS_URL;
 use crate::cmd::drill::katex::KATEX_CSS_URL;
 use crate::cmd::drill::katex::KATEX_JS_URL;
 use crate::cmd::drill::katex::KATEX_MHCHEM_JS_URL;
+use crate::utils::revision;
 
 const MANIFEST_JSON: &str = r##"{
   "name": "hashcards-web",
@@ -40,21 +42,33 @@ const MANIFEST_JSON: &str = r##"{
   ]
 }"##;
 
-/// The stylesheet, and the path it is served from.
-///
-/// The path names sixteen hex characters of the hash of these very bytes, so
-/// a build that changes the stylesheet changes the URL that asks for it. It
-/// has to: the response is `immutable`, which does not merely permit a cache
-/// to skip revalidation but forbids it, so at a fixed path a client that had
-/// fetched the stylesheet once ran it against freshly rendered HTML for the
-/// next week. Two devices on the same server would then disagree about the
-/// layout, and nothing shipped could be seen on the device that had cached.
-pub const STYLE_CSS: &[u8] = include_bytes!("style.css");
+/// The fixed font directory `style.css` is written against.
+const FONT_DIR: &str = "url(\"/fonts/";
 
-pub static STYLE_URL: LazyLock<String> = LazyLock::new(|| {
-    let hash = blake3::hash(STYLE_CSS).to_hex();
-    format!("/style-{}.css", &hash[..16])
+const STYLE_CSS_SOURCE: &[u8] = include_bytes!("style.css");
+
+/// The stylesheet, with its font references pointed at the revisioned font
+/// directory. Written by hand against the plain `/fonts/` path, because the
+/// revision is a hash and cannot be typed into a source file.
+pub static STYLE_CSS: LazyLock<String> = LazyLock::new(|| {
+    String::from_utf8_lossy(STYLE_CSS_SOURCE)
+        .replace(FONT_DIR, &format!("url(\"{}/", *FONT_DIR_URL))
 });
+
+/// The path the stylesheet is served from.
+///
+/// It names sixteen hex characters of the hash of the very bytes served, so
+/// a build that changes the stylesheet — or the fonts it names — changes the
+/// URL that asks for it. It has to: the response is `immutable`, which does
+/// not merely permit a cache to skip revalidation but forbids it, so at a
+/// fixed path a client that had fetched the stylesheet once ran it against
+/// freshly rendered HTML for the next week. Two devices on the same server
+/// would then disagree about the layout, and nothing shipped could be seen
+/// on the device that had cached.
+pub static STYLE_REV: LazyLock<String> = LazyLock::new(|| revision(&[STYLE_CSS.as_bytes()]));
+
+pub static STYLE_URL: LazyLock<String> =
+    LazyLock::new(|| format!("/style/{}/style.css", *STYLE_REV));
 
 const ICON_192: &[u8] = include_bytes!("icon-192.png");
 const ICON_512: &[u8] = include_bytes!("icon-512.png");
@@ -118,11 +132,11 @@ pub fn page_template_with_script(script_url: &str, body: Markup) -> Markup {
                 meta name="theme-color" media="(prefers-color-scheme: dark)" content="#14171d";
                 title { "hashcards-web" }
                 link rel="manifest" href="/manifest.json";
-                link rel="stylesheet" href=(KATEX_CSS_URL);
-                link rel="stylesheet" href=(HLJS_CSS_URL);
-                script defer src=(KATEX_JS_URL) {};
-                script defer src=(KATEX_MHCHEM_JS_URL) {};
-                script defer src=(HLJS_JS_URL) {};
+                link rel="stylesheet" href=(KATEX_CSS_URL.as_str());
+                link rel="stylesheet" href=(HLJS_CSS_URL.as_str());
+                script defer src=(KATEX_JS_URL.as_str()) {};
+                script defer src=(KATEX_MHCHEM_JS_URL.as_str()) {};
+                script defer src=(HLJS_JS_URL.as_str()) {};
                 link rel="stylesheet" href=(STYLE_URL.as_str());
                 style { ".card-content { opacity: 0; }" }
                 noscript { style { ".card-content { opacity: 1; }" }}
@@ -138,6 +152,7 @@ pub fn page_template_with_script(script_url: &str, body: Markup) -> Markup {
 
 #[cfg(test)]
 mod tests {
+    use super::FONT_DIR_URL;
     use super::STYLE_CSS;
     use super::STYLE_URL;
     use super::page_template;
@@ -146,9 +161,23 @@ mod tests {
     /// revalidating it. That is only safe while the path names the bytes.
     #[test]
     fn test_stylesheet_url_names_its_contents() {
-        let hash = blake3::hash(STYLE_CSS).to_hex();
-        let expected = format!("/style-{}.css", &hash[..16]);
+        let hash = blake3::hash(STYLE_CSS.as_bytes()).to_hex();
+        let expected = format!("/style/{}/style.css", &hash[..16]);
         assert_eq!(STYLE_URL.as_str(), expected);
+    }
+
+    /// The stylesheet is `immutable`, so a font it names has to move when the
+    /// font changes — and the stylesheet's own hash then moves with it.
+    #[test]
+    fn test_stylesheet_asks_for_revisioned_fonts() {
+        assert!(
+            STYLE_CSS.contains(&format!("url(\"{}/inter-400.woff2\")", *FONT_DIR_URL)),
+            "the stylesheet still names a font at the unrevisioned path"
+        );
+        assert!(
+            !STYLE_CSS.contains("url(\"/fonts/inter"),
+            "a font reference was left at the unrevisioned path"
+        );
     }
 
     /// A page that still asks for the fixed path would be served a stylesheet
@@ -172,7 +201,7 @@ mod tests {
     /// They must not match it at all.
     #[test]
     fn test_grade_button_rules_do_not_match_the_end_link() {
-        let css = std::str::from_utf8(STYLE_CSS).expect("the stylesheet is utf-8");
+        let css: &str = &STYLE_CSS;
         assert!(css.contains(".end-link {"), "the End button lost its rule");
         for block in css.split('}') {
             let Some((selectors, _)) = block.split_once('{') else {

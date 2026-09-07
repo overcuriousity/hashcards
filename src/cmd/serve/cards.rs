@@ -177,19 +177,25 @@ struct CollectionMeta {
     id: String,
     /// Scheduling this collection asks for. Optional, and skipped when
     /// absent so that the file the server writes for itself stays one line.
+    ///
+    /// Deliberately untyped: a `f64` here makes `desired_retention = "0.95"`
+    /// a *parse* error, and the parse is what `existing_collection_id` reads
+    /// the id out of. One mistyped preference would then take the whole
+    /// collection off the landing page along with its review history — the
+    /// exact outcome the leniency below exists to avoid.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    desired_retention: Option<f64>,
+    desired_retention: Option<toml::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    max_interval_days: Option<f64>,
+    max_interval_days: Option<toml::Value>,
 }
 
 /// The scheduling a collection asks for in its own `.hashcards.toml`.
 ///
-/// A file that cannot be read, or a value out of range, yields no override
-/// rather than an error: the number is a preference, and losing a whole
-/// collection from the landing page over one is a worse answer than
-/// scheduling it the way every other collection is scheduled. A folder with
-/// metadata broken enough to matter is already dropped by `folder_id`.
+/// A file that cannot be read, a value of the wrong type, or a value out of
+/// range all yield no override rather than an error: the number is a
+/// preference, and losing a whole collection from the landing page over one
+/// is a worse answer than scheduling it the way every other collection is
+/// scheduled.
 pub fn collection_overrides(folder: &Path) -> SchedulingOverrides {
     let meta_path = folder.join(COLLECTION_META_FILE);
     let Ok(text) = read_to_string(&meta_path) else {
@@ -202,16 +208,41 @@ pub fn collection_overrides(folder: &Path) -> SchedulingOverrides {
         log::warn!("Ignoring `{what}` in {}: {e}", meta_path.display());
     };
     SchedulingOverrides {
-        retention: meta.desired_retention.and_then(|v| {
-            DesiredRetention::new(v)
-                .inspect_err(|e| complain("desired_retention", e))
-                .ok()
-        }),
-        max_interval: meta.max_interval_days.and_then(|v| {
-            MaxInterval::new(v)
-                .inspect_err(|e| complain("max_interval_days", e))
-                .ok()
-        }),
+        retention: meta
+            .desired_retention
+            .and_then(|v| override_number(&v, "desired_retention", &meta_path))
+            .and_then(|v| {
+                DesiredRetention::new(v)
+                    .inspect_err(|e| complain("desired_retention", e))
+                    .ok()
+            }),
+        max_interval: meta
+            .max_interval_days
+            .and_then(|v| override_number(&v, "max_interval_days", &meta_path))
+            .and_then(|v| {
+                MaxInterval::new(v)
+                    .inspect_err(|e| complain("max_interval_days", e))
+                    .ok()
+            }),
+    }
+}
+
+/// The number an override was written as, or `None` with a warning when it
+/// was not written as a number at all. TOML tells integers and floats apart
+/// and `max_interval_days = 256` is the natural way to write a whole number
+/// of days, so both are numbers here.
+fn override_number(value: &toml::Value, what: &str, meta_path: &Path) -> Option<f64> {
+    match value {
+        toml::Value::Float(f) => Some(*f),
+        toml::Value::Integer(i) => Some(*i as f64),
+        other => {
+            log::warn!(
+                "Ignoring `{what}` in {}: expected a number, found {}.",
+                meta_path.display(),
+                other.type_str()
+            );
+            None
+        }
     }
 }
 
@@ -259,17 +290,60 @@ pub enum IdPolicy {
 }
 
 /// The id already recorded for `folder`, if any. Never writes.
+///
+/// A file TOML itself cannot parse is not given up on until the id has been
+/// looked for by eye: the id names the review database, so failing here
+/// costs the collection every review it has ever recorded, and the file is
+/// one a user is invited to hand-edit. Only a file with no recognisable id
+/// at all is an error — and it has to be, because the alternative is minting
+/// a fresh id and writing over whatever the user was in the middle of.
 pub fn existing_collection_id(folder: &Path) -> Fallible<Option<String>> {
     let meta_path = folder.join(COLLECTION_META_FILE);
     if !meta_path.exists() {
         return Ok(None);
     }
     let text = read_to_string(&meta_path)?;
-    let meta: CollectionMeta = toml::from_str(&text)?;
+    let meta: CollectionMeta = match toml::from_str(&text) {
+        Ok(meta) => meta,
+        Err(e) => {
+            let Some(id) = salvage_id(&text) else {
+                return fail(format!(
+                    "{} is not valid TOML ({e}), and no `id` line could be found in it. \
+                     Fix the file, or delete it to start the collection's history over.",
+                    meta_path.display()
+                ));
+            };
+            log::warn!(
+                "{} is not valid TOML ({e}). Reading its id as `{id}` and ignoring \
+                 everything else in the file.",
+                meta_path.display()
+            );
+            return Ok(Some(id));
+        }
+    };
     if meta.id.is_empty() {
         return Ok(None);
     }
     Ok(Some(meta.id))
+}
+
+/// The `id` of a metadata file the TOML parser has rejected.
+///
+/// The id is always written as one plain `id = "..."` line, so it stays
+/// legible however badly the rest of the file has been mangled. Nothing else
+/// is recovered this way: the overrides are preferences and can wait for the
+/// file to be fixed, whereas the id cannot be guessed again.
+fn salvage_id(text: &str) -> Option<String> {
+    text.lines().find_map(|line| {
+        let value = line.trim_start().strip_prefix("id")?.trim_start();
+        let value = value.strip_prefix('=')?.trim();
+        let quote = value.chars().next()?;
+        if quote != '"' && quote != '\'' {
+            return None;
+        }
+        let id = value[quote.len_utf8()..].split(quote).next()?;
+        (!id.is_empty()).then(|| id.to_string())
+    })
 }
 
 /// Every top-level folder in `root`, as a collection.
@@ -633,6 +707,86 @@ mod tests {
                 .retention
                 .into_inner(),
             DesiredRetention::DEFAULT
+        );
+        Ok(())
+    }
+
+    /// An override of the wrong *type* is no different from one out of
+    /// range: `desired_retention = "0.95"` is a slip a hand-editor makes,
+    /// and it used to fail the strict parse in `existing_collection_id` and
+    /// take the whole collection — review history and all — off the landing
+    /// page.
+    #[test]
+    fn a_mistyped_override_falls_back_to_the_default() -> Fallible<()> {
+        let (dir, root) = fixture()?;
+        let folder = root.path().join("Spanish");
+        std::fs::create_dir_all(&folder)?;
+        let id = collection_id(&folder)?;
+        std::fs::write(
+            folder.join(COLLECTION_META_FILE),
+            format!("id = \"{id}\"\ndesired_retention = \"0.95\"\nmax_interval_days = true\n"),
+        )?;
+
+        let found =
+            discover_local_collections(&root, &dir.join("db"), None, IdPolicy::CreateMissing)?;
+        assert_eq!(found.len(), 1, "the collection must still be listed");
+        assert_eq!(found[0].db_path, dir.join("db").join(format!("{id}.db")));
+        let scheduling = found[0].scheduling(Scheduling::default());
+        assert_eq!(scheduling.retention.into_inner(), DesiredRetention::DEFAULT);
+        assert_eq!(scheduling.max_interval.into_inner(), MaxInterval::DEFAULT);
+        Ok(())
+    }
+
+    /// An integer is a number: `max_interval_days = 256` must not be read as
+    /// a type error now that the value arrives as a `toml::Value`.
+    #[test]
+    fn an_integer_override_is_read_as_a_number() -> Fallible<()> {
+        let (dir, root) = fixture()?;
+        let folder = root.path().join("Spanish");
+        std::fs::create_dir_all(&folder)?;
+        let id = collection_id(&folder)?;
+        std::fs::write(
+            folder.join(COLLECTION_META_FILE),
+            format!("id = \"{id}\"\nmax_interval_days = 256\n"),
+        )?;
+
+        let found =
+            discover_local_collections(&root, &dir.join("db"), None, IdPolicy::CreateMissing)?;
+        assert_eq!(
+            found[0]
+                .scheduling(Scheduling::default())
+                .max_interval
+                .into_inner(),
+            256.0
+        );
+        Ok(())
+    }
+
+    /// A syntax slip anywhere in the file still leaves the id readable by
+    /// eye, and the id is what names the review database. Losing it would
+    /// lose every review the collection has ever recorded, so it is worth
+    /// scanning for by hand once the parser has given up.
+    #[test]
+    fn a_syntax_error_keeps_the_collection_by_salvaging_its_id() -> Fallible<()> {
+        let (dir, root) = fixture()?;
+        let folder = root.path().join("Spanish");
+        std::fs::create_dir_all(&folder)?;
+        let id = collection_id(&folder)?;
+        let broken = format!("id = \"{id}\"\ndesired retention = 0.95\n");
+        std::fs::write(folder.join(COLLECTION_META_FILE), &broken)?;
+
+        let found =
+            discover_local_collections(&root, &dir.join("db"), None, IdPolicy::CreateMissing)?;
+        assert_eq!(found.len(), 1, "the collection must still be listed");
+        assert_eq!(
+            found[0].db_path,
+            dir.join("db").join(format!("{id}.db")),
+            "the salvaged id must still name the same review database"
+        );
+        assert_eq!(
+            std::fs::read_to_string(folder.join(COLLECTION_META_FILE))?,
+            broken,
+            "the user's file must not be rewritten under them"
         );
         Ok(())
     }

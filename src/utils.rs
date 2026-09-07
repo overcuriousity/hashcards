@@ -33,6 +33,36 @@ pub const CACHE_CONTROL_IMMUTABLE: &str = "public, max-age=604800, immutable";
 /// nothing else to tell a client its copy has gone stale.
 pub const CACHE_CONTROL_REVALIDATE: &str = "no-cache";
 
+/// Sixteen hex characters naming this build's copy of an asset.
+///
+/// Short enough to read in a URL, long enough that two builds of the same
+/// asset never collide. Several parts may be hashed together when they are
+/// only ever shipped as a set — the KaTeX stylesheet, script and fonts are
+/// one vendored package and change as one.
+pub fn revision(parts: &[&[u8]]) -> String {
+    let mut hasher = blake3::Hasher::new();
+    for part in parts {
+        hasher.update(part);
+    }
+    hasher.finalize().to_hex()[..16].to_string()
+}
+
+/// What a client asking for `requested` may do with the answer.
+///
+/// `immutable` does not merely permit a cache to skip revalidation, it
+/// forbids revalidation, so it is only honest when the path names the bytes.
+/// A request carrying this build's revision gets that promise. One carrying
+/// a stale revision comes from HTML rendered by an older build — it is
+/// served the current bytes, so the page still works, but it may not keep
+/// them: the next load will ask for the right revision anyway.
+pub fn revisioned_cache_control(requested: &str, current: &str) -> &'static str {
+    if requested == current {
+        CACHE_CONTROL_IMMUTABLE
+    } else {
+        CACHE_CONTROL_REVALIDATE
+    }
+}
+
 /// `create_dir_all`, but the error says which directory and why.
 ///
 /// `std::io::Error` carries no path, so the bare `?` on a `create_dir_all`

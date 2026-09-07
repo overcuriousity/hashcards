@@ -52,6 +52,44 @@
             of step with the HTML that loads it is the same bug, quieter.
             </change>
             <change author="claude">
+            **Every asset served `immutable` now comes from a path that names
+            it, and every such path answers a revision it has never heard
+            of.** The stylesheet was the loud case, but KaTeX, highlight.js
+            and the fonts were served `immutable` from fixed paths too:
+            bumping a vendored library left every browser that had fetched it
+            running the old copy for a week, with no way to invalidate — the
+            same bug, one asset class over. All of them now carry sixteen hex
+            characters of the hash of what this build ships, and because the
+            fonts are named by stylesheets rather than by HTML, both `style.css`
+            and KaTeX's stylesheet have their `url()` references rewritten to
+            carry that revision as they are served. The other half matters as
+            much: HTML a browser already holds asks for the *previous*
+            revision, and a 404 there is a page with no styling, no maths and
+            no highlighting — strictly worse than the staleness being fixed.
+            An unrecognised revision is therefore answered with the current
+            bytes, marked `no-cache` so the client keeps nothing it cannot
+            name. The old fixed paths still answer on the same terms, for
+            pages rendered before any of this.
+            </change>
+            <change author="claude">
+            **A mistyped preference in a collection's `.hashcards.toml` no
+            longer makes the collection disappear.** The override reader was
+            careful to ignore a value out of range, but the file was parsed a
+            second time — strictly — to read the `id`, so
+            `desired_retention = "0.95"` was a parse error and the folder was
+            skipped: the collection vanished from the landing page along with
+            every review it had recorded. This was newly reachable, since
+            per-collection scheduling is the first thing that invites anyone
+            to hand-edit that file. Overrides are now read untyped and
+            validated leniently, so a value of the wrong type is ignored with
+            a warning exactly as an out-of-range one is. A file TOML cannot
+            parse at all is not given up on either: the `id` is looked for by
+            eye, since it is always one plain line and is the one thing that
+            cannot be worked out again. Only a file with no readable `id` is
+            skipped — and it has to be, because the alternative is minting a
+            fresh id and writing over what you were in the middle of typing.
+            </change>
+            <change author="claude">
             **End session is a line of text again, not a fifth grade button.**
             It was written to be one — `.end-link` sets no background, no
             border, and small muted type — but `.controls button` is a class
