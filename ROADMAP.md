@@ -53,14 +53,14 @@ stability-on-failure kept apart, difficulty with mean reversion, and ±5%
 interval fuzz (`types/performance.rs:47`). What is missing is everything
 around it.
 
-1. **Desired retention is a constant.** `TARGET_RECALL = 0.9`
-   (`types/performance.rs:36`). It belongs in a collection's configuration:
-   it is the one FSRS knob a user has an opinion about, and the trade it
-   makes — more reviews for better recall — is the whole point of the
-   algorithm being tunable.
-2. **No maximum interval.** Nothing caps the interval, so a card graded
-   `Easy` a few times can leave for a decade. A per-collection ceiling,
-   applied after the fuzz.
+1. ~~**Desired retention is a constant.**~~ Done: `[defaults]
+   desired_retention`, overridable per collection.
+2. ~~**The maximum interval is a constant.**~~ Done: `[defaults]
+   max_interval_days`, overridable per collection. Note the earlier entry
+   here claimed there was *no* cap; there was one, hardcoded at 256 days,
+   which is low enough that it was doing real scheduling invisibly. The
+   default is unchanged so no existing schedule moved, but raising it is
+   worth considering as a separate decision.
 3. **No parameter optimisation.** The weights are the published defaults, so
    the scheduler is calibrated to a population rather than to the person
    using it. The `reviews` table already stores every input an optimiser

@@ -11,10 +11,13 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use crate::cmd::serve::config::ResolvedCollection;
+use crate::cmd::serve::config::SchedulingOverrides;
 use crate::cmd::serve::config::slugify;
 use crate::error::ErrorReport;
 use crate::error::Fallible;
 use crate::error::fail;
+use crate::types::performance::DesiredRetention;
+use crate::types::performance::MaxInterval;
 use crate::utils::ensure_dir;
 
 /// One user's markdown tree, at `{data_dir}/cards/{user}`.
@@ -172,6 +175,44 @@ pub const COLLECTION_META_FILE: &str = ".hashcards.toml";
 #[derive(Deserialize, Serialize)]
 struct CollectionMeta {
     id: String,
+    /// Scheduling this collection asks for. Optional, and skipped when
+    /// absent so that the file the server writes for itself stays one line.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    desired_retention: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_interval_days: Option<f64>,
+}
+
+/// The scheduling a collection asks for in its own `.hashcards.toml`.
+///
+/// A file that cannot be read, or a value out of range, yields no override
+/// rather than an error: the number is a preference, and losing a whole
+/// collection from the landing page over one is a worse answer than
+/// scheduling it the way every other collection is scheduled. A folder with
+/// metadata broken enough to matter is already dropped by `folder_id`.
+pub fn collection_overrides(folder: &Path) -> SchedulingOverrides {
+    let meta_path = folder.join(COLLECTION_META_FILE);
+    let Ok(text) = read_to_string(&meta_path) else {
+        return SchedulingOverrides::default();
+    };
+    let Ok(meta) = toml::from_str::<CollectionMeta>(&text) else {
+        return SchedulingOverrides::default();
+    };
+    let complain = |what: &str, e: &ErrorReport| {
+        log::warn!("Ignoring `{what}` in {}: {e}", meta_path.display());
+    };
+    SchedulingOverrides {
+        retention: meta.desired_retention.and_then(|v| {
+            DesiredRetention::new(v)
+                .inspect_err(|e| complain("desired_retention", e))
+                .ok()
+        }),
+        max_interval: meta.max_interval_days.and_then(|v| {
+            MaxInterval::new(v)
+                .inspect_err(|e| complain("max_interval_days", e))
+                .ok()
+        }),
+    }
 }
 
 /// The stable id of a local collection folder, creating it on first sight.
@@ -186,7 +227,11 @@ pub fn collection_id(folder: &Path) -> Fallible<String> {
     }
     let meta_path = folder.join(COLLECTION_META_FILE);
     let id = fresh_id(folder)?;
-    let meta = CollectionMeta { id: id.clone() };
+    let meta = CollectionMeta {
+        id: id.clone(),
+        desired_retention: None,
+        max_interval_days: None,
+    };
     write(&meta_path, toml::to_string(&meta)?)?;
     Ok(id)
 }
@@ -282,6 +327,7 @@ pub fn discover_local_collections(
         collections.push(ResolvedCollection {
             slug,
             name,
+            overrides: collection_overrides(&path),
             coll_dir: path,
             db_path: db_dir.join(format!("{id}.db")),
             owner: owner.map(|o| o.to_lowercase()),
@@ -336,6 +382,7 @@ fn folder_id(path: &Path, policy: IdPolicy) -> Fallible<Option<String>> {
 mod tests {
     use super::*;
     use crate::helper::create_tmp_directory;
+    use crate::types::performance::Scheduling;
 
     /// `create_tmp_directory` returns a `PathBuf`, not a `TempDir`.
     fn fixture() -> Fallible<(PathBuf, CardRoot)> {
@@ -536,6 +583,72 @@ mod tests {
         let db_dir = dir.join("db");
         let found = discover_local_collections(&root, &db_dir, None, IdPolicy::CreateMissing)?;
         assert_eq!(found[0].db_path, db_dir.join(format!("{id}.db")));
+        Ok(())
+    }
+
+    /// A collection may name its own retention and ceiling; anything it does
+    /// not name falls through to the instance's.
+    #[test]
+    fn discovery_reads_a_collections_scheduling_overrides() -> Fallible<()> {
+        let (dir, root) = fixture()?;
+        let folder = root.path().join("Spanish");
+        std::fs::create_dir_all(&folder)?;
+        let id = collection_id(&folder)?;
+        std::fs::write(
+            folder.join(COLLECTION_META_FILE),
+            format!("id = \"{id}\"\ndesired_retention = 0.95\n"),
+        )?;
+
+        let found =
+            discover_local_collections(&root, &dir.join("db"), None, IdPolicy::CreateMissing)?;
+        let scheduling = found[0].scheduling(Scheduling::default());
+        assert_eq!(scheduling.retention.into_inner(), 0.95);
+        assert_eq!(
+            scheduling.max_interval.into_inner(),
+            MaxInterval::DEFAULT,
+            "an unnamed value must fall through to the instance default"
+        );
+        Ok(())
+    }
+
+    /// An override out of range is not worth losing the collection over: the
+    /// landing page still lists it and it schedules by the instance default.
+    #[test]
+    fn an_out_of_range_override_falls_back_to_the_default() -> Fallible<()> {
+        let (dir, root) = fixture()?;
+        let folder = root.path().join("Spanish");
+        std::fs::create_dir_all(&folder)?;
+        let id = collection_id(&folder)?;
+        std::fs::write(
+            folder.join(COLLECTION_META_FILE),
+            format!("id = \"{id}\"\ndesired_retention = 2.0\n"),
+        )?;
+
+        let found =
+            discover_local_collections(&root, &dir.join("db"), None, IdPolicy::CreateMissing)?;
+        assert_eq!(found.len(), 1, "the collection must still be listed");
+        assert_eq!(
+            found[0]
+                .scheduling(Scheduling::default())
+                .retention
+                .into_inner(),
+            DesiredRetention::DEFAULT
+        );
+        Ok(())
+    }
+
+    /// The metadata file the server writes for itself holds the id and
+    /// nothing else: an override it did not put there must not appear as a
+    /// value someone has to reason about.
+    #[test]
+    fn a_fresh_metadata_file_holds_only_the_id() -> Fallible<()> {
+        let (_dir, root) = fixture()?;
+        let folder = root.path().join("Spanish");
+        std::fs::create_dir_all(&folder)?;
+        collection_id(&folder)?;
+        let written = std::fs::read_to_string(folder.join(COLLECTION_META_FILE))?;
+        assert!(!written.contains("retention"), "wrote: {written}");
+        assert!(!written.contains("interval"), "wrote: {written}");
         Ok(())
     }
 

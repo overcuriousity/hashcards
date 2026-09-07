@@ -206,6 +206,29 @@ jitter = 0.05
   deletion's text does not spoil its sibling's answer.
 - `jitter`: random ±fraction applied to review intervals to spread review
   peaks. `0.0` to `0.5`.
+- `desired_retention`: the chance FSRS aims for that a card is still
+  remembered when it comes back. `0.7` to `0.99`. Raising it shortens every
+  interval — more reviews, more of them remembered; lowering it lengthens
+  them. This is the one FSRS number worth having an opinion about.
+- `max_interval_days`: the furthest ahead a review may be scheduled. `1` to
+  `36500`. The default of `256` was a hardcoded constant before it was
+  configurable; a collection you intend to keep for years wants more.
+
+`desired_retention` and `max_interval_days` may be overridden per collection
+in that collection's `.hashcards.toml`:
+
+```toml
+id = "a1b2c3d4"          # written by the server; leave it alone
+desired_retention = 0.95
+max_interval_days = 90
+```
+
+Either key may be omitted, in which case the value from `[defaults]` applies.
+A value out of range is ignored with a warning rather than hiding the
+collection. `jitter` is not overridable: it spreads one person's review peaks
+across everything they study, so one collection deciding it alone would be
+deciding nothing. A card is always scheduled by the collection that holds it,
+including when it is drilled inside a deck spanning several.
 
 ### `[oidc]`
 

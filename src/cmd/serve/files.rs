@@ -1431,6 +1431,7 @@ mod tests {
         use crate::cmd::serve::state::SessionKey;
         use crate::rng::TinyRng;
         use crate::types::performance::Jitter;
+        use crate::types::performance::Scheduling;
 
         let db_dir = data_dir.join("db");
         ensure_dir(&db_dir, "review database directory")?;
@@ -1443,10 +1444,16 @@ mod tests {
         let db = Database::new(db_str)?;
         let session_id = db.create_session(started_at)?;
         let mutable = MutableState::new(
-            SessionDbs::single(db, session_id),
+            SessionDbs::single(
+                db,
+                session_id,
+                Scheduling {
+                    jitter: Jitter::none(),
+                    ..Scheduling::default()
+                },
+            ),
             crate::cmd::drill::cache::Cache::new(),
             Vec::new(),
-            Jitter::none(),
             TinyRng::from_seed(1),
         );
         let session = std::sync::Arc::new(parking_lot::Mutex::new(DrillSession::new(
@@ -1481,7 +1488,7 @@ mod tests {
         use crate::cmd::serve::state::DrillSession;
         use crate::cmd::serve::state::SessionKey;
         use crate::rng::TinyRng;
-        use crate::types::performance::Jitter;
+        use crate::types::performance::Scheduling;
 
         let db_dir = data_dir.join("db");
         ensure_dir(&db_dir, "review database directory")?;
@@ -1501,6 +1508,7 @@ mod tests {
                     coll_dir: folder.to_path_buf(),
                     file_url_prefix: format!("/collection/{deck_slug}/file"),
                 }),
+                scheduling: Scheduling::default(),
             }],
             std::collections::HashMap::new(),
         );
@@ -1508,7 +1516,6 @@ mod tests {
             dbs,
             crate::cmd::drill::cache::Cache::new(),
             Vec::new(),
-            Jitter::none(),
             TinyRng::from_seed(1),
         );
         let session = std::sync::Arc::new(parking_lot::Mutex::new(DrillSession::new(

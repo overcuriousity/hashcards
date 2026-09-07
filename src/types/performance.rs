@@ -32,14 +32,95 @@ use crate::rng::TinyRng;
 use crate::types::date::Date;
 use crate::types::timestamp::Timestamp;
 
-/// The desired recall probability.
-const TARGET_RECALL: f64 = 0.9;
-
 /// The minimum review interval in days.
 const MIN_INTERVAL: f64 = 1.0;
 
-/// The maximum review interval in days.
-const MAX_INTERVAL: f64 = 256.0;
+/// The recall probability a schedule aims for: the chance that a card is
+/// still remembered when it comes back.
+///
+/// It is the one FSRS number a person has an opinion about, because it names
+/// the trade the algorithm exists to make. Raising it shortens every
+/// interval — more reviews, more of them remembered; lowering it lengthens
+/// them. Bounded at both ends because the interval formula degenerates
+/// outside them: at 1.0 it asks for an interval of zero.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DesiredRetention(f64);
+
+impl DesiredRetention {
+    /// FSRS's own default, and what every schedule written before this was
+    /// configurable used.
+    pub const DEFAULT: f64 = 0.9;
+
+    pub fn new(retention: f64) -> Fallible<DesiredRetention> {
+        if !retention.is_finite() || !(0.7..=0.99).contains(&retention) {
+            return fail(format!(
+                "desired retention must be a number between 0.7 and 0.99, got: {retention}"
+            ));
+        }
+        Ok(DesiredRetention(retention))
+    }
+
+    pub fn into_inner(self) -> f64 {
+        self.0
+    }
+}
+
+impl Default for DesiredRetention {
+    fn default() -> Self {
+        DesiredRetention(Self::DEFAULT)
+    }
+}
+
+/// The ceiling on a review interval, in days.
+///
+/// FSRS will happily leave a well-known card for years. A ceiling says how
+/// far ahead a schedule is willing to plan — which is a statement about the
+/// person, not the card: material you intend to keep for a career tolerates
+/// a longer one than material you need until an exam.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MaxInterval(f64);
+
+impl MaxInterval {
+    /// What the hardcoded ceiling was, kept as the default so that making it
+    /// configurable moves nobody's existing schedule.
+    pub const DEFAULT: f64 = 256.0;
+
+    /// A hundred years. Past this the due date is fiction.
+    pub const LIMIT: f64 = 36500.0;
+
+    pub fn new(days: f64) -> Fallible<MaxInterval> {
+        if !days.is_finite() || !(MIN_INTERVAL..=Self::LIMIT).contains(&days) {
+            return fail(format!(
+                "the maximum interval must be a number of days between {} and {}, got: {days}",
+                MIN_INTERVAL,
+                Self::LIMIT
+            ));
+        }
+        Ok(MaxInterval(days))
+    }
+
+    pub fn into_inner(self) -> f64 {
+        self.0
+    }
+}
+
+impl Default for MaxInterval {
+    fn default() -> Self {
+        MaxInterval(Self::DEFAULT)
+    }
+}
+
+/// Everything that shapes an interval besides the card's own history.
+///
+/// Carried as one value rather than as three arguments: each of these is
+/// configurable per collection, and a card is scheduled by the collection it
+/// belongs to however it was reached.
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub struct Scheduling {
+    pub retention: DesiredRetention,
+    pub max_interval: MaxInterval,
+    pub jitter: Jitter,
+}
 
 /// Fractional random jitter applied to computed review intervals.
 ///
@@ -47,6 +128,12 @@ const MAX_INTERVAL: f64 = 256.0;
 /// random factor in [0.95, 1.05], to diffuse review peaks over time.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Jitter(f64);
+
+impl Default for Jitter {
+    fn default() -> Self {
+        Jitter(Self::DEFAULT_FRACTION)
+    }
+}
 
 impl Jitter {
     /// The default jitter fraction: plus or minus 5%.
@@ -113,7 +200,7 @@ pub fn update_performance(
     perf: Performance,
     grade: Grade,
     reviewed_at: Timestamp,
-    jitter: Jitter,
+    scheduling: Scheduling,
     rng: &mut TinyRng,
 ) -> ReviewedPerformance {
     let today: NaiveDate = reviewed_at.date().into_inner();
@@ -137,12 +224,15 @@ pub fn update_performance(
             (stability, difficulty, review_count)
         }
     };
-    let interval_raw: Interval = interval(TARGET_RECALL, stability);
+    let interval_raw: Interval = interval(scheduling.retention.into_inner(), stability);
     // FEAT-05: scale the realized interval by a small random factor to
-    // diffuse review peaks. `interval_raw` stays un-jittered.
-    let interval_jittered: Interval = interval_raw * jitter.factor(rng);
+    // diffuse review peaks. `interval_raw` stays un-jittered — and so
+    // uncapped, so that raising the ceiling later does not have to recover a
+    // stability the ceiling threw away.
+    let interval_jittered: Interval = interval_raw * scheduling.jitter.factor(rng);
     let interval_rounded: Interval = interval_jittered.round();
-    let interval_clamped: Interval = interval_rounded.clamp(MIN_INTERVAL, MAX_INTERVAL);
+    let interval_clamped: Interval =
+        interval_rounded.clamp(MIN_INTERVAL, scheduling.max_interval.into_inner());
     let interval_days: i64 = interval_clamped as i64;
     let interval_duration: Duration = Duration::days(interval_days);
     let due_date: Date = Date::new(today + interval_duration);
@@ -174,7 +264,10 @@ mod tests {
             Performance::New,
             Grade::Good,
             reviewed_at,
-            Jitter::none(),
+            Scheduling {
+                jitter: Jitter::none(),
+                ..Scheduling::default()
+            },
             &mut rng,
         );
         assert!(!Performance::Reviewed(reviewed_perf).is_new());
@@ -188,7 +281,10 @@ mod tests {
             Performance::New,
             Grade::Good,
             reviewed_at,
-            Jitter::none(),
+            Scheduling {
+                jitter: Jitter::none(),
+                ..Scheduling::default()
+            },
             &mut rng,
         );
         let ReviewedPerformance {
@@ -229,7 +325,10 @@ mod tests {
             Performance::Reviewed(initial_perf),
             Grade::Easy,
             reviewed_at,
-            Jitter::none(),
+            Scheduling {
+                jitter: Jitter::none(),
+                ..Scheduling::default()
+            },
             &mut rng,
         );
         let ReviewedPerformance {
@@ -274,7 +373,10 @@ mod tests {
             Performance::Reviewed(perf),
             Grade::Good,
             now,
-            Jitter::none(),
+            Scheduling {
+                jitter: Jitter::none(),
+                ..Scheduling::default()
+            },
             &mut rng,
         );
         assert!(result.stability.is_finite());
@@ -301,12 +403,111 @@ mod tests {
             Performance::Reviewed(perf),
             Grade::Good,
             now,
-            Jitter::none(),
+            Scheduling {
+                jitter: Jitter::none(),
+                ..Scheduling::default()
+            },
             &mut rng,
         );
         assert!(result.stability.is_finite());
         assert!(result.interval_raw.is_finite());
         assert!(result.interval_days >= 1);
+    }
+
+    #[test]
+    fn test_desired_retention_validates_range() {
+        assert!(DesiredRetention::new(0.7).is_ok());
+        assert!(DesiredRetention::new(0.9).is_ok());
+        assert!(DesiredRetention::new(0.99).is_ok());
+        assert!(DesiredRetention::new(0.69).is_err());
+        assert!(DesiredRetention::new(1.0).is_err());
+        assert!(DesiredRetention::new(f64::NAN).is_err());
+        let err = DesiredRetention::new(2.0).err().unwrap().to_string();
+        assert!(err.contains("2"), "message was: {err}");
+    }
+
+    #[test]
+    fn test_max_interval_validates_range() {
+        assert!(MaxInterval::new(1.0).is_ok());
+        assert!(MaxInterval::new(256.0).is_ok());
+        assert!(MaxInterval::new(36500.0).is_ok());
+        assert!(MaxInterval::new(0.9).is_err());
+        assert!(MaxInterval::new(36501.0).is_err());
+        assert!(MaxInterval::new(f64::NAN).is_err());
+        let err = MaxInterval::new(0.0).err().unwrap().to_string();
+        assert!(err.contains("0"), "message was: {err}");
+    }
+
+    /// The ceiling was 256 days, hardcoded and invisible. Making it
+    /// configurable must not move it for anyone who does not configure it:
+    /// every card already scheduled was scheduled under this number.
+    #[test]
+    fn test_defaults_preserve_the_previous_constants() {
+        let scheduling = Scheduling::default();
+        assert_eq!(scheduling.retention.into_inner(), 0.9);
+        assert_eq!(scheduling.max_interval.into_inner(), 256.0);
+    }
+
+    /// Wanting to remember more of what you learned means seeing it sooner.
+    #[test]
+    fn test_higher_retention_shortens_the_interval() {
+        let reviewed_at = Timestamp::now();
+        let at = |retention: f64| {
+            let mut rng = TinyRng::from_seed(0);
+            update_performance(
+                Performance::New,
+                Grade::Easy,
+                reviewed_at,
+                Scheduling {
+                    retention: DesiredRetention::new(retention).expect("in range"),
+                    ..Scheduling::default()
+                },
+                &mut rng,
+            )
+            .interval_raw
+        };
+        assert!(
+            at(0.95) < at(0.9) && at(0.9) < at(0.85),
+            "raising retention did not shorten the interval: {} {} {}",
+            at(0.95),
+            at(0.9),
+            at(0.85)
+        );
+    }
+
+    #[test]
+    fn test_max_interval_caps_the_interval() {
+        let reviewed_at = Timestamp::now();
+        let mut rng = TinyRng::from_seed(0);
+        // A card known well enough that FSRS would leave it for years.
+        let perf = Performance::Reviewed(ReviewedPerformance {
+            last_reviewed_at: reviewed_at,
+            stability: 10_000.0,
+            difficulty: 1.0,
+            interval_raw: 10_000.0,
+            interval_days: 10_000,
+            due_date: reviewed_at.date(),
+            review_count: 40,
+        });
+        let result = update_performance(
+            perf,
+            Grade::Easy,
+            reviewed_at,
+            Scheduling {
+                max_interval: MaxInterval::new(30.0).expect("in range"),
+                jitter: Jitter::none(),
+                ..Scheduling::default()
+            },
+            &mut rng,
+        );
+        assert_eq!(result.interval_days, 30);
+        // The uncapped figure is kept, so the cap can be raised later
+        // without the card's real stability having been thrown away.
+        assert!(
+            result.interval_raw > 30.0,
+            "the raw interval was capped too: {}",
+            result.interval_raw
+        );
     }
 
     #[test]
@@ -359,14 +560,17 @@ mod tests {
             due_date: Date::new(today.into_inner()),
             review_count: 3,
         };
-        let jitter = Jitter::new(0.05).unwrap();
+        let scheduling = Scheduling {
+            jitter: Jitter::new(0.05).unwrap(),
+            ..Scheduling::default()
+        };
         let run = |seed: u64| {
             let mut rng = TinyRng::from_seed(seed);
             update_performance(
                 Performance::Reviewed(perf),
                 Grade::Good,
                 reviewed_at,
-                jitter,
+                scheduling,
                 &mut rng,
             )
         };
@@ -392,7 +596,10 @@ mod tests {
                 Performance::Reviewed(perf),
                 Grade::Good,
                 reviewed_at,
-                Jitter::none(),
+                Scheduling {
+                    jitter: Jitter::none(),
+                    ..Scheduling::default()
+                },
                 &mut rng,
             )
         };

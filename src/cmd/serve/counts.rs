@@ -87,6 +87,7 @@ mod tests {
             coll_dir: dir.path().to_path_buf(),
             db_path: dir.path().join("hashcards.db"),
             owner: Some("me@example.com".to_string()),
+            overrides: Default::default(),
         };
         let infos = refresh_collection_info(&[rc]);
         assert_eq!(infos[0].owner.as_deref(), Some("me@example.com"));

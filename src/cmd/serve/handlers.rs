@@ -60,7 +60,6 @@ use crate::rng::shuffle;
 use crate::types::card::Card;
 use crate::types::card_hash::CardHash;
 use crate::types::date::Date;
-use crate::types::performance::Jitter;
 use crate::types::timestamp::Timestamp;
 
 /// Run blocking filesystem/SQLite work on tokio's blocking thread pool.
@@ -496,6 +495,9 @@ pub(super) fn create_session_from_sources(
         return Ok(None);
     }
     let multi_source = sources.len() > 1;
+    // Checked once at startup too; resolved here because a collection may
+    // override it and a deck may draw on several that disagree.
+    let defaults = state.config.defaults.scheduling()?;
     let session_started_at = Timestamp::now();
     let today: Date = session_started_at.date();
 
@@ -565,6 +567,11 @@ pub(super) fn create_session_from_sources(
                 coll_dir,
                 file_url_prefix: format!("/collection/{}/file", rc.slug),
             }),
+            // The collection's own settings where it has them, the
+            // instance's elsewhere. Resolved per database, so a deck
+            // spanning collections schedules each card by the collection it
+            // came from.
+            scheduling: rc.scheduling(defaults),
         });
         if first_directory.is_none() {
             first_directory = Some(collection.directory);
@@ -619,13 +626,7 @@ pub(super) fn create_session_from_sources(
         macros,
         session_started_at,
         answer_controls,
-        MutableState::new(
-            dbs,
-            cache,
-            due_cards,
-            Jitter::new(state.config.defaults.jitter)?,
-            rng,
-        ),
+        MutableState::new(dbs, cache, due_cards, rng),
     )))
 }
 
@@ -993,6 +994,7 @@ mod tests {
     use crate::error::Fallible;
     use crate::rng::TinyRng;
     use crate::types::performance::Jitter;
+    use crate::types::performance::Scheduling;
     use crate::types::timestamp::Timestamp;
 
     /// Every image format the paste path will store has to be served as
@@ -1097,10 +1099,16 @@ mod tests {
         let db = Database::new(db_str)?;
         let session_id = db.create_session(started_at)?;
         let mutable = MutableState::new(
-            SessionDbs::single(db, session_id),
+            SessionDbs::single(
+                db,
+                session_id,
+                Scheduling {
+                    jitter: Jitter::none(),
+                    ..Scheduling::default()
+                },
+            ),
             crate::cmd::drill::cache::Cache::new(),
             Vec::new(),
-            Jitter::none(),
             TinyRng::from_seed(1),
         );
         let session = std::sync::Arc::new(parking_lot::Mutex::new(DrillSession::new(
@@ -1377,6 +1385,7 @@ mod tests {
             coll_dir: one_dir.path().to_path_buf(),
             db_path: one_dir.path().join("one.db"),
             owner: None,
+            overrides: Default::default(),
         };
         let two = ResolvedCollection {
             name: "Two".to_string(),
@@ -1384,6 +1393,7 @@ mod tests {
             coll_dir: two_dir.path().to_path_buf(),
             db_path: two_dir.path().join("two.db"),
             owner: None,
+            overrides: Default::default(),
         };
         let data_dir = tempfile::tempdir()?;
         let state = crate::cmd::serve::state::test_support::state_with_data_dir(

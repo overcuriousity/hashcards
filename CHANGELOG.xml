@@ -1,5 +1,37 @@
 <changelog>
     <unreleased>
+        <added>
+            <change author="claude">
+            **Desired retention and the maximum interval are configurable,
+            per instance and per collection.** Both were constants:
+            `TARGET_RECALL = 0.9` and `MAX_INTERVAL = 256.0` days. Retention
+            is the one FSRS number a person has an opinion about, because it
+            names the trade the algorithm exists to make — raise it and every
+            interval shortens, so you see more cards and remember more of
+            them. The ceiling was doing more scheduling than anyone knew: a
+            card known well enough for FSRS to ask for two years was silently
+            handed back after eight and a half months, and nothing on screen
+            said so. `[defaults]` now takes `desired_retention` (0.7 to 0.99)
+            and `max_interval_days` (1 to 36500), and a collection's own
+            `.hashcards.toml` may override either — retention is genuinely
+            per-subject, since an exam in a fortnight and a language you
+            intend to keep are not the same promise. Both default to the old
+            constants, so no existing schedule moves. A value out of range in
+            the instance config stops the server at startup, where it can be
+            attributed; one in a collection's file is ignored with a warning
+            and the collection still appears, because losing a collection
+            from the landing page over a preference is the worse answer. The
+            settings are resolved per review database rather than per
+            session, so a deck drawing on several collections schedules each
+            card by the collection that holds it — a card keeps exactly one
+            schedule however it was reached. Jitter stays per instance: it
+            spreads one person's review peaks across everything they study,
+            so one collection deciding it alone would decide nothing. The
+            uncapped interval is still recorded alongside the capped one, so
+            raising the ceiling later does not have to recover a stability
+            the ceiling threw away.
+            </change>
+            </added>
         <fixed>
             <change author="claude">
             **The stylesheet is served from a path that names its own hash.** It
