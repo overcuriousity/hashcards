@@ -1,7 +1,10 @@
 <changelog>
     <unreleased>
-        <added>
-            <change author="claude">
+        </unreleased>
+    <releases>
+        <release version="0.4.11" date="2026-09-07">
+            <added>
+                <change author="claude">
             **Desired retention and the maximum interval are configurable,
             per instance and per collection.** Both were constants:
             `TARGET_RECALL = 0.9` and `MAX_INTERVAL = 256.0` days. Retention
@@ -32,8 +35,8 @@
             the ceiling threw away.
             </change>
             </added>
-        <fixed>
-            <change author="claude">
+            <fixed>
+                <change author="claude">
             **The stylesheet is served from a path that names its own hash.** It
             was served `immutable` from `/style.css`, and `immutable` does not
             merely permit a cache to skip revalidation — it forbids it. So for
@@ -51,7 +54,7 @@
             `script.js` say the same, for the same reason — a script a week out
             of step with the HTML that loads it is the same bug, quieter.
             </change>
-            <change author="claude">
+                <change author="claude">
             **Every asset served `immutable` now comes from a path that names
             it, and every such path answers a revision it has never heard
             of.** The stylesheet was the loud case, but KaTeX, highlight.js
@@ -71,7 +74,7 @@
             name. The old fixed paths still answer on the same terms, for
             pages rendered before any of this.
             </change>
-            <change author="claude">
+                <change author="claude">
             **A mistyped preference in a collection's `.hashcards.toml` no
             longer makes the collection disappear.** The override reader was
             careful to ignore a value out of range, but the file was parsed a
@@ -89,7 +92,7 @@
             skipped — and it has to be, because the alternative is minting a
             fresh id and writing over what you were in the middle of typing.
             </change>
-            <change author="claude">
+                <change author="claude">
             **End session is a line of text again, not a fifth grade button.**
             It was written to be one — `.end-link` sets no background, no
             border, and small muted type — but `.controls button` is a class
@@ -100,9 +103,8 @@
             that it holds grades and nothing else. The grade rules now exclude
             it by name rather than being argued with.
             </change>
-        </fixed>
-        </unreleased>
-    <releases>
+            </fixed>
+        </release>
         <release version="0.4.10" date="2026-09-06">
             <added>
                 <change author="claude">
