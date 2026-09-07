@@ -13,12 +13,14 @@ use axum::extract::Query;
 use axum::extract::State;
 use axum::http::HeaderName;
 use axum::http::StatusCode;
+use axum::http::header::CACHE_CONTROL;
 use axum::http::header::CONTENT_TYPE;
 use axum::response::Html;
 use axum::response::Redirect;
 use maud::html;
 
 use crate::flash::Flash;
+use crate::utils::CACHE_CONTROL_REVALIDATE;
 
 use crate::cmd::drill::cache::Cache;
 use crate::cmd::drill::get::RenderContext;
@@ -925,11 +927,15 @@ pub async fn collection_file_handler(
     }
 }
 
+/// The drill's script, with the collection's LaTeX macros declared ahead of
+/// it. Its contents depend on the session, so its path cannot name them: it
+/// must be revalidated rather than cached against a slug that stays put while
+/// the macros under it move.
 pub async fn collection_script_handler(
     State(state): State<AppState>,
     Path(slug): Path<String>,
     current_user: Option<CurrentUser>,
-) -> (StatusCode, [(HeaderName, &'static str); 1], String) {
+) -> (StatusCode, [(HeaderName, &'static str); 2], String) {
     let owner = current_user.map(|u| u.email);
     let script = |macros: &[(String, String)]| {
         format!(
@@ -941,7 +947,10 @@ pub async fn collection_script_handler(
     if find_drill_target(&state, &slug, owner.as_deref()).is_none() {
         return (
             StatusCode::OK,
-            [(CONTENT_TYPE, "text/javascript")],
+            [
+                (CONTENT_TYPE, "text/javascript"),
+                (CACHE_CONTROL, CACHE_CONTROL_REVALIDATE),
+            ],
             script(&[]),
         );
     }
@@ -954,7 +963,10 @@ pub async fn collection_script_handler(
     };
     (
         StatusCode::OK,
-        [(CONTENT_TYPE, "text/javascript")],
+        [
+            (CONTENT_TYPE, "text/javascript"),
+            (CACHE_CONTROL, CACHE_CONTROL_REVALIDATE),
+        ],
         script(&macros),
     )
 }

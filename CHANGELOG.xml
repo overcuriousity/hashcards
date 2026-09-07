@@ -1,5 +1,36 @@
 <changelog>
     <unreleased>
+        <fixed>
+            <change author="claude">
+            **The stylesheet is served from a path that names its own hash.** It
+            was served `immutable` from `/style.css`, and `immutable` does not
+            merely permit a cache to skip revalidation — it forbids it. So for
+            a week after any deploy, a browser that had already fetched the
+            stylesheet ran a week-old copy of it against freshly rendered HTML,
+            and nothing shipped in between could be seen on that device at all.
+            Two devices pointed at one server would disagree about the layout
+            with no way to tell which was right. The path now carries sixteen
+            hex characters of the hash of the bytes it serves, so a build that
+            changes the stylesheet changes the URL that asks for it and
+            `immutable` is honest. `/style.css` still answers, since a page
+            cached from before this change still asks for it, but it now says
+            `no-cache`: nothing may be kept against a name that does not
+            describe its contents. `/script.js` and a collection's own
+            `script.js` say the same, for the same reason — a script a week out
+            of step with the HTML that loads it is the same bug, quieter.
+            </change>
+            <change author="claude">
+            **End session is a line of text again, not a fifth grade button.**
+            It was written to be one — `.end-link` sets no background, no
+            border, and small muted type — but `.controls button` is a class
+            and an element where `.end-link` is a class alone, so it was the
+            more specific of the two and won every declaration they share. The
+            way out of a session therefore rendered as a bordered 44px button
+            directly under Forgot/Hard/Good/Easy, in a bar whose whole point is
+            that it holds grades and nothing else. The grade rules now exclude
+            it by name rather than being argued with.
+            </change>
+        </fixed>
         </unreleased>
     <releases>
         <release version="0.4.10" date="2026-09-06">

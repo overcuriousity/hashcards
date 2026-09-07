@@ -28,6 +28,11 @@ use crate::error::Fallible;
 // max-age is one week in seconds.
 pub const CACHE_CONTROL_IMMUTABLE: &str = "public, max-age=604800, immutable";
 
+/// For assets served from a path that does not name their contents. A cache
+/// may hold them, but must ask before reusing them: at a fixed path there is
+/// nothing else to tell a client its copy has gone stale.
+pub const CACHE_CONTROL_REVALIDATE: &str = "no-cache";
+
 /// `create_dir_all`, but the error says which directory and why.
 ///
 /// `std::io::Error` carries no path, so the bare `?` on a `create_dir_all`

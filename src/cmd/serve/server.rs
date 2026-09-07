@@ -24,6 +24,8 @@ use crate::cmd::drill::katex::katex_css_handler;
 use crate::cmd::drill::katex::katex_font_handler;
 use crate::cmd::drill::katex::katex_js_handler;
 use crate::cmd::drill::katex::katex_mhchem_js_handler;
+use crate::cmd::drill::template::STYLE_CSS;
+use crate::cmd::drill::template::STYLE_URL;
 use crate::cmd::drill::template::icon_192_handler;
 use crate::cmd::drill::template::icon_512_handler;
 use crate::cmd::drill::template::manifest_handler;
@@ -284,7 +286,11 @@ pub async fn start_serve(config: ResolvedServeConfig) -> Fallible<()> {
         .route("/icons/icon-192.png", get(icon_192_handler))
         .route("/icons/icon-512.png", get(icon_512_handler))
         .route("/script.js", get(script_handler))
-        .route("/style.css", get(style_handler))
+        .route(STYLE_URL.as_str(), get(style_handler))
+        // The old fixed path, kept because a page cached from before the
+        // stylesheet was content addressed still asks for it, and an
+        // unstyled drill is worse than a stale one. It revalidates.
+        .route("/style.css", get(legacy_style_handler))
         .route("/fonts/{name}", get(font_handler))
         .route(KATEX_CSS_URL, get(katex_css_handler))
         .route(KATEX_JS_URL, get(katex_js_handler))
@@ -325,19 +331,31 @@ pub async fn start_serve(config: ResolvedServeConfig) -> Fallible<()> {
     Ok(())
 }
 
+/// Served from a fixed path — the drill's copy of it is per collection, so
+/// the two cannot share one hashed name — and therefore never cached without
+/// asking first. A script a week out of step with the HTML that loads it is
+/// the same bug as a stale stylesheet, quieter.
 async fn script_handler() -> (
     axum::http::StatusCode,
-    [(axum::http::HeaderName, &'static str); 1],
+    [(axum::http::HeaderName, &'static str); 2],
     &'static str,
 ) {
     (
         axum::http::StatusCode::OK,
-        [(axum::http::header::CONTENT_TYPE, "text/javascript")],
+        [
+            (axum::http::header::CONTENT_TYPE, "text/javascript"),
+            (
+                axum::http::header::CACHE_CONTROL,
+                crate::utils::CACHE_CONTROL_REVALIDATE,
+            ),
+        ],
         // Landing/browse pages use this route and expect MACROS to be defined.
         concat!("let MACROS = {};\n\n", include_str!("../drill/script.js")),
     )
 }
 
+/// The stylesheet at its content-addressed path. `immutable` is honest here:
+/// the bytes cannot change without the path changing with them.
 async fn style_handler() -> (
     axum::http::StatusCode,
     [(axum::http::HeaderName, &'static str); 2],
@@ -352,7 +370,27 @@ async fn style_handler() -> (
                 crate::utils::CACHE_CONTROL_IMMUTABLE,
             ),
         ],
-        include_bytes!("../drill/style.css"),
+        STYLE_CSS,
+    )
+}
+
+/// The same bytes at the fixed path, for HTML that predates the hashed one.
+/// Nothing may be cached against a name that does not describe its contents.
+async fn legacy_style_handler() -> (
+    axum::http::StatusCode,
+    [(axum::http::HeaderName, &'static str); 2],
+    &'static [u8],
+) {
+    (
+        axum::http::StatusCode::OK,
+        [
+            (axum::http::header::CONTENT_TYPE, "text/css"),
+            (
+                axum::http::header::CACHE_CONTROL,
+                crate::utils::CACHE_CONTROL_REVALIDATE,
+            ),
+        ],
+        STYLE_CSS,
     )
 }
 
