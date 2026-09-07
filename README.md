@@ -23,9 +23,9 @@ scheduling reviews with [FSRS] and keeping every user's history in SQLite.
 
 This is a fork of [hashcards] by [Fernando Borretti][fb], which is a local
 command-line tool. The card format, the parser, the FSRS implementation and
-the review schema are all his work; see [Prior Art](#prior-art). This fork
-removed the command-line interface and grew the server: cross-collection
-decks, in-browser card writing and editing, and OIDC login.
+the review schema are all his work; see [Credits](#credits). This fork removed
+the command-line interface and grew the server: per-user card trees, an
+in-browser editor, cross-collection decks and OIDC login.
 
 ## Quick start
 
@@ -36,8 +36,8 @@ $ hashcards-web --config hashcards.toml
 ```
 
 The server reads everything from the configuration file — the bind address,
-the collections, the git remote, the login settings. There are no other
-command-line options:
+the data directory, the scheduling defaults, the login settings. There are no
+other command-line options:
 
 ```
 hashcards-web [--config <path>]
@@ -56,7 +56,9 @@ $ curl -fsSL https://raw.githubusercontent.com/overcuriousity/hashcards-web/mast
 ```
 
 Installs the latest release binary to `~/.local/bin` (override with
-`INSTALL_DIR`). Linux amd64, macOS arm64 and Windows amd64 are published.
+`HASHCARDS_INSTALL_DIR`). Linux amd64 and macOS arm64 install this way;
+Windows amd64 is published as a `.zip` asset to download from the
+[releases page][releases].
 
 ### From source
 
@@ -75,8 +77,9 @@ configuration.
 ## Configuration
 
 `hashcards.example.toml` is the annotated reference; this section explains
-what each part is for. Everything except `[server].data_dir` and at least one
-collection has a working default.
+what each part is for. `[server].data_dir` is the only required setting —
+everything else has a working default, and collections are not configured here
+at all: a collection is a folder you create in My Cards.
 
 ### `[server]`
 
@@ -128,69 +131,6 @@ an `[oidc]` section there is no authentication whatsoever — anyone who can
 reach the port can read your cards and edit the underlying files. Expose it
 only behind an authenticating reverse proxy, or configure OIDC.
 
-## My Cards
-
-**My Cards** (`/files`) is the folder tree hashcards keeps at
-`{data_dir}/cards/{user}`, and that only you write to.
-
-Each top-level folder is a collection; files inside it are decks. Create a
-folder, add a `.md` file, and write cards in the editor: the buttons insert
-Q/A, cloze and term skeletons, and the pane on the right shows the cards as
-hashcards parses them. A file that does not parse is never saved — you get the
-error and its line number instead.
-
-Renaming a folder is safe. Each one keeps a `.hashcards.toml` holding a stable
-id, and review databases are named from that id rather than from the folder
-name, so your history follows the rename.
-
-A collection folder cannot take the URL slug of a saved deck: both are
-addressed through `/collection/{slug}` and routing prefers the collection, so
-the deck would become unreachable. Names are rejected when you create or rename
-a folder. Two folders whose names produce the same slug are also a collision;
-the first by name order wins and the other is left out of the list with a
-warning in the log, rather than making the URL mean whichever the filesystem
-happened to yield first.
-
-Deleting a collection folder deletes its review database with it. Folders that
-still hold files are refused, so this only happens once you have emptied one.
-
-### Images
-
-Copy an image and paste it into the editor with Ctrl+V. It is stored under
-`{Collection}/media/`, named after a hash of its own bytes — so the same
-screenshot pasted twice is stored once, and whatever your screenshot tool
-called the file never reaches the disk — and the reference written into the
-card is collection-relative (`![](@/media/a1b2c3d4e5f6a7b8.png)`), which
-resolves the same from a deck at the top of a collection or one three folders
-down. PNG, JPEG, GIF and WebP, up to 10 MB per image; the format is read from
-the file's own bytes, not its name. SVG is not accepted: it is script-bearing
-markup, and media is served inline from the same origin as the app.
-
-The `media` folder is hashcards' storage rather than part of your tree, so the
-file manager does not list it, and a collection whose decks are all deleted
-counts as empty even while their images are still on disk.
-
-Rewording a card keeps its schedule: on save, hashcards matches the new cards
-against the old ones by content and carries the review history across.
-
-### `[[deck]]`
-
-```toml
-[[deck]]
-name = "Exam revision"
-members = ["japanese/Verbs", "medicine-anatomy/Bones"]
-# owner = "me@example.com"
-```
-
-A *deck* is a saved selection of decks drawn from any of your collections,
-drilled together in one session. Manage them at `/decks`.
-
-A deck owns no cards and no database. Drilling one opens each contributing
-collection's own database and routes every review back to the collection the
-card came from, so **a card keeps exactly one schedule** however many decks
-include it — it never becomes due twice on schedules that drift apart.
-Deleting a deck removes only the selection.
-
 ### `[defaults]`
 
 ```toml
@@ -198,7 +138,11 @@ Deleting a deck removes only the selection.
 answer_controls = "full"            # "full" or "binary"
 bury_siblings = true
 jitter = 0.05
+desired_retention = 0.9
+max_interval_days = 256
 ```
+
+Every key has the default shown, so the whole section may be omitted.
 
 - `answer_controls`: `"full"` shows four grading buttons (Forgot / Hard /
   Good / Easy); `"binary"` shows only Forgot and Good.
@@ -230,16 +174,19 @@ the file if TOML cannot parse it, as long as the `id` line is still legible.
 The `id` is the one thing that cannot be recovered by hand — it names the
 collection's review database — so a file with no readable `id` at all is left
 alone and the collection is skipped with a warning rather than being given a
-fresh id on top of your edits. `jitter` is not overridable: it spreads one person's review peaks
-across everything they study, so one collection deciding it alone would be
-deciding nothing. A card is always scheduled by the collection that holds it,
-including when it is drilled inside a deck spanning several.
+fresh id on top of your edits.
+
+`jitter`, `answer_controls` and `bury_siblings` are not overridable per
+collection. Jitter spreads one person's review peaks across everything they
+study, so one collection deciding it alone would be deciding nothing. A card
+is always scheduled by the collection that holds it, including when it is
+drilled inside a deck spanning several.
 
 ### `[oidc]`
 
 ```toml
 [oidc]
-issuer_url = "https://cloud.example.com/index.php/apps/oidc"
+issuer_url = "https://cloud.example.com"
 client_id = "..."
 client_secret = "..."
 external_url = "https://hashcards.example.com"
@@ -254,6 +201,11 @@ claim. Config load fails if any entry is missing one, and equally if an `owner`
 appears *without* an `[oidc]` section, since nobody would ever be logged in to
 match it.
 
+- `issuer_url` is the issuer exactly as the provider's discovery document
+  declares it, not the path the document happens to be served from. For
+  Nextcloud that is the bare base URL. Check with
+  `curl {issuer_url}/.well-known/openid-configuration` and use the `issuer`
+  field you get back.
 - `external_url` is the address a browser actually reaches the server at, even
   behind a reverse proxy. It is independent of `host`/`port`, and the redirect
   URI you register with your provider is `{external_url}/auth/callback`.
@@ -263,6 +215,10 @@ match it.
 - The session cookie is `HttpOnly` and `SameSite=Lax`, lasts 30 days (re-issued
   while you keep using it), and is marked `Secure` when `external_url` is
   HTTPS.
+- The `email` claim is read from the ID token, or from the UserInfo endpoint
+  when the provider only sends it there (Nextcloud does). A provider that
+  sends no email at all identifies users by their `sub` claim instead, and an
+  `owner` must then be written as that subject.
 - Adding a user is a config edit plus a restart. There is no signup flow, no
   admin UI, and no sharing: each collection is visible to exactly one owner. A
   logged-in user who owns nothing sees an empty landing page.
@@ -273,31 +229,110 @@ Without `[oidc]`, the server assumes a single user. Drill sessions are keyed by
 collection, so two browsers pointed at the same collection share one session:
 both see the same card, and a grade from either advances the shared queue.
 
+### `[[deck]]`
+
+```toml
+[[deck]]
+name = "Exam revision"
+members = ["japanese/Verbs", "medicine-anatomy/Bones"]
+# owner = "me@example.com"
+```
+
+Two words, kept apart throughout: a **topic** is the cards in one Markdown
+file, and a **deck** is a saved selection of topics drawn from any of your
+collections and drilled together in one session. Manage decks at `/decks`;
+`members` entries are `"{collection-slug}/{topic-name}"` pairs.
+
+A deck owns no cards and no database. Drilling one opens each contributing
+collection's own database and routes every review back to the collection the
+card came from, so **a card keeps exactly one schedule** however many decks
+include it — it never becomes due twice on schedules that drift apart.
+Deleting a deck removes only the selection.
+
+## My Cards
+
+**My Cards** (`/files`) is the folder tree hashcards keeps at
+`{data_dir}/cards/{user}`, and that only you write to.
+
+Each top-level folder is a collection; each `.md` file inside it is a topic.
+Create a folder, add a `.md` file, and write cards in the editor: the buttons
+insert Q/A, cloze and term skeletons, and the pane on the right shows the
+cards as hashcards parses them. A file that does not parse is never saved —
+you get the error and its line number instead.
+
+Renaming a folder is safe. Each one keeps a `.hashcards.toml` holding a stable
+id, and review databases are named from that id rather than from the folder
+name, so your history follows the rename.
+
+A collection folder cannot take the URL slug of a saved deck: both are
+addressed through `/collection/{slug}` and routing prefers the collection, so
+the deck would become unreachable. Names are rejected when you create or rename
+a folder. Two folders whose names produce the same slug are also a collision;
+the first by name order wins and the other is left out of the list with a
+warning in the log, rather than making the URL mean whichever the filesystem
+happened to yield first.
+
+Deleting a collection folder deletes its review database with it. Folders that
+still hold files are refused, so this only happens once you have emptied one.
+
+### Images
+
+Copy an image and paste it into the editor with Ctrl+V. It is stored under
+`{Collection}/media/`, named after a hash of its own bytes — so the same
+screenshot pasted twice is stored once, and whatever your screenshot tool
+called the file never reaches the disk — and the reference written into the
+card is collection-relative (`![](@/media/a1b2c3d4e5f6a7b8.png)`), which
+resolves the same from a topic at the top of a collection or one three
+folders down. PNG, JPEG, GIF and WebP, up to 10 MB per image; the format is
+read from the file's own bytes, not its name. SVG is not accepted: it is
+script-bearing markup, and media is served inline from the same origin as the
+app.
+
+The `media` folder is hashcards' storage rather than part of your tree, so the
+file manager does not list it, and a collection whose topics are all deleted
+counts as empty even while their images are still on disk.
+
 ## Using it
 
 The landing page lists your collections with the number of cards due. Opening
-one shows its deck tree; select decks and start a drill. From there:
+one shows its topic tree; select topics and start a drill. From there:
 
 | Route | What it does |
 |---|---|
-| `/` | Collections, due counts, sync, logout |
-| `/collection/{slug}` | Deck tree, duplicate warnings, start a drill |
-| `/collection/{slug}/stats` | Due forecast, review history, grade distribution |
+| `/` | Collections and saved decks, due counts, one-tap Drill, log out |
+| `/files` | My Cards: the folder tree, and the card editor |
+| `/collection/{slug}` | Topic tree, duplicate warnings, start a drill |
+| `/collection/{slug}/stats` | Due forecast, reviews per day, grades, retention |
 | `/collection/{slug}/export` | The whole collection as JSON |
-| `/collection/{slug}/bookmarks` | Cards you flagged while drilling |
+| `/collection/{slug}/bookmarks` | Cards you starred while drilling |
 | `/decks` | Create and delete cross-collection decks |
 
-**Editing.** Bookmark a card during a drill (shortcut: `b`), then edit it from
-the bookmark list. Edits are written to the Markdown file and committed to git.
-Because cards are content addressed, editing changes a card's hash; the server
-migrates the review history to the new hash where it can and tells you when it
-cannot.
+Saved decks appear in the landing list beside collections, tagged `deck`. A
+collection with cards due gets a **Drill** button that starts on every topic
+at once; the collection name opens the page where the choices live — which
+topics, and a cap of 10, 20, 50 or all.
+
+**Keyboard.** During a drill: `space` reveals the answer, `1`–`4` grade it
+(Forgot / Hard / Good / Easy), `u` undoes the last grade, and `b` toggles the
+bookmark star.
+
+**Editing.** A card can be edited from wherever you are looking at it: a
+pencil beside the bookmark star during a drill — shown only once the answer is
+revealed, so the editor never puts the answer in front of you while you are
+still recalling it — an *Edit* link beside every topic on the collection page,
+and the whole-file editor in My Cards. Edits are written straight to the
+Markdown file. Because cards are content addressed, editing changes a card's
+hash; the server migrates the review history to the new hash where it can and
+tells you when it cannot, and a running session follows the card so the grade
+after an edit lands on the card in front of you.
+
+Rewording a card keeps its schedule: on save, hashcards matches the new cards
+against the old ones by content and carries the review history across.
 
 **Export.** `/collection/{slug}/export` returns every card, its scheduling
-state, and the full review history as JSON. Your Markdown lives in git, but the
-review databases live under `data_dir` and are in nobody's repository — and
-under OIDC you have no filesystem access — so this is how you get your own
-history out.
+state, and the full review history as JSON. Your Markdown is yours on disk,
+but the review databases live under `data_dir` — and under OIDC you have no
+filesystem access at all — so this is how you get your own history out.
 
 **Duplicates.** Byte-identical cards are deduplicated when a collection loads:
 one copy is dropped, and only the other carries review history. The collection
@@ -476,11 +511,12 @@ cards/
 ```
 
 Media files are validated when a collection loads, and served through
-`/file/{path}` with path traversal blocked.
+`/collection/{slug}/file/{path}` with path traversal blocked. Audio is
+rendered as a player for `.mp3`, `.wav`, `.ogg` and `.m4a`.
 
-### Deck names
+### Topic names
 
-A deck is named after its filename: `Medicine.md` is the deck `Medicine`.
+A topic is named after its filename: `Medicine.md` is the topic `Medicine`.
 Override that with TOML frontmatter:
 
 ```
@@ -491,7 +527,7 @@ name = "Medicine"
 C: The mitochondria is the [powerhouse] of the cell.
 ```
 
-This lets many files share one deck name — useful when taking notes from a
+This lets many files share one topic name — useful when taking notes from a
 book chapter by chapter:
 
 ```
@@ -502,57 +538,94 @@ Principles of Neural Science/
 
 ## Database
 
-Each collection has an SQLite database at `{data_dir}/db/{slug}.db`. Reviews
-are written as they happen and in the same transaction as the card's
-performance, so an interrupted session keeps its progress. Undo marks a review
-`voided` rather than deleting it, and read paths filter on `voided = 0`.
+Each collection has an SQLite database at `{data_dir}/db/{id}.db`, where `id`
+is the stable id in the collection folder's `.hashcards.toml` — not the folder
+name, so renaming a folder keeps its history. Reviews are written as they
+happen and in the same transaction as the card's performance, so an
+interrupted session keeps its progress. Undo marks a review `voided` rather
+than deleting it, and read paths filter on `voided = 0`.
 
 The `cards` table:
 
-| Column             | Type               | Description                                                                                                                        |
-|--------------------|--------------------|------------------------------------------------------------------------------------------------------------------------------------|
-| `card_hash`        | `text primary key` | The hash of the card.                                                                                                              |
-| `added_at`         | `text not null`    | When the card was first added to the database.                                                                                     |
-| `last_reviewed_at` | `text`             | When the card was most recently reviewed. `null` if the card is new.                                                               |
-| `stability`        | `real`             | The card's stability. `null` if the card is new.                                                                                   |
-| `difficulty`       | `real`             | The card's difficulty. `null` if the card is new.                                                                                  |
-| `interval_raw`     | `real`             | The FSRS-calculated interval, before rounding and clamping, in days. `null` if the card is new.                                    |
-| `interval_days`    | `real`             | The interval as an integer number of days, after rounding and clamping. `null` if the card is new.                                 |
-| `due_date`         | `text`             | When the card is next due, `YYYY-MM-DD`. `null` if the card is new.                                                                |
-| `review_count`     | `integer not null` | How many times the card has been reviewed.                                                                                         |
+| Column             | Type               | Description                                                                        |
+|--------------------|--------------------|------------------------------------------------------------------------------------|
+| `card_hash`        | `text primary key` | The hash of the card.                                                              |
+| `added_at`         | `text not null`    | When the card was first added to the database.                                     |
+| `last_reviewed_at` | `text`             | When the card was most recently reviewed. `null` if the card is new.               |
+| `stability`        | `real`             | The card's stability. `null` if the card is new.                                   |
+| `difficulty`       | `real`             | The card's difficulty. `null` if the card is new.                                  |
+| `interval_raw`     | `real`             | The FSRS-calculated interval, before rounding and clamping, in days.               |
+| `interval_days`    | `integer`          | The interval in whole days, after rounding and clamping.                           |
+| `due_date`         | `text`             | When the card is next due, `YYYY-MM-DD`. `null` if the card is new.                |
+| `review_count`     | `integer not null` | How many times the card has been reviewed.                                         |
 
 The `sessions` table:
 
-| Column       | Type                  | Description                        |
-|--------------|-----------------------|------------------------------------|
-| `session_id` | `integer primary key` | The ID of the session.             |
-| `started_at` | `text not null`       | When the session started.          |
-| `ended_at`   | `text not null`       | When the session ended.            |
+| Column         | Type                  | Description                                                                     |
+|----------------|-----------------------|---------------------------------------------------------------------------------|
+| `session_id`   | `integer primary key` | The ID of the session.                                                          |
+| `started_at`   | `text not null`       | When the session started.                                                       |
+| `ended_at`     | `text not null`       | When the session ended.                                                         |
+| `last_seen_at` | `text`                | Stamped as the owning process serves the session, so the startup sweep can tell a session abandoned by a crash from one still live elsewhere. |
+| `closed`       | `integer not null`    | Whether the row has been closed. A session whose reviews were all undone is rewritten back to `ended_at = started_at`, so that cannot serve as the marker. |
 
 The `reviews` table:
 
-| Column          | Type                  | Description                                                                                        |
-|-----------------|-----------------------|----------------------------------------------------------------------------------------------------|
-| `review_id`     | `integer primary key` | The review ID.                                                                                     |
-| `session_id`    | `integer not null`    | The session this review was performed in, a foreign key.                                           |
-| `card_hash`     | `text not null`       | The card that was reviewed, a foreign key.                                                         |
-| `reviewed_at`   | `text not null`       | When the grade was submitted.                                                                      |
-| `grade`         | `text not null`       | One of `forgot`, `hard`, `good`, or `easy`.                                                        |
-| `stability`     | `real not null`       | The card's stability after this review.                                                            |
-| `difficulty`    | `real not null`       | The card's difficulty after this review.                                                           |
-| `interval_raw`  | `real`                | The FSRS-calculated interval, before rounding and clamping, in days.                               |
-| `interval_days` | `real`                | The interval as an integer number of days, after rounding and clamping.                            |
-| `due_date`      | `text not null`       | When the card is next due, `YYYY-MM-DD`.                                                           |
+| Column          | Type                  | Description                                                                     |
+|-----------------|-----------------------|---------------------------------------------------------------------------------|
+| `review_id`     | `integer primary key` | The review ID.                                                                  |
+| `session_id`    | `integer not null`    | The session this review was performed in, a foreign key.                        |
+| `card_hash`     | `text not null`       | The card that was reviewed, a foreign key.                                      |
+| `reviewed_at`   | `text not null`       | When the grade was submitted.                                                   |
+| `grade`         | `text not null`       | One of `forgot`, `hard`, `good`, or `easy`.                                     |
+| `stability`     | `real not null`       | The card's stability after this review.                                         |
+| `difficulty`    | `real not null`       | The card's difficulty after this review.                                        |
+| `interval_raw`  | `real not null`       | The FSRS-calculated interval, before rounding and clamping, in days.            |
+| `interval_days` | `integer not null`    | The interval in whole days, after rounding and clamping.                        |
+| `due_date`      | `text not null`       | When the card is next due, `YYYY-MM-DD`.                                        |
+| `duration_ms`   | `integer`             | How long the card was on screen, when that is known.                            |
+| `voided`        | `integer not null`    | Set by undo. Read paths filter on `voided = 0`; the row itself is never deleted. |
+| `reviewed_date` | `text` (generated)    | The date half of `reviewed_at`, indexed so the stats page can group by day.     |
+
+The `bookmarks` table:
+
+| Column       | Type               | Description                                                    |
+|--------------|--------------------|----------------------------------------------------------------|
+| `card_hash`  | `text primary key` | The bookmarked card, a foreign key that cascades on rename.    |
+| `note`       | `text`             | The note attached to the bookmark, if any.                     |
+| `created_at` | `text not null`    | When the bookmark was made.                                    |
+
+Two more tables are hashcards' own bookkeeping and hold no review data:
+`schema_version`, which drives the migrations run at open, and `meta`.
 
 Timestamps are `YYYY-MM-DDTHH:MM:SS.MMM`, e.g. `2025-10-04T17:09:51.517`.
 Dates are naive by design: a due date is closer to the date on a journal entry
 than to a precise point in time, so there are no timezones anywhere.
 
-## Prior art
+## Credits
 
 hashcards-web is a fork of [hashcards] by [Fernando Borretti][fb]
-([announcement post][blog]). His [essay on effective spaced repetition][esr]
-explains the reasoning behind the design.
+([announcement post][blog]), and most of what makes it work is still his: the
+card format, the Markdown parser, the FSRS implementation, the review schema
+and the database design. His [essay on effective spaced repetition][esr]
+explains the reasoning behind the whole thing, and is worth reading before you
+write your first card.
+
+The fork is maintained by [overcuriousity], with [mstoeck3] — it removed the
+command-line interface and grew the server around what was left: My Cards and
+the in-browser editor, cross-collection decks, OIDC login and per-user card
+trees, bookmarks, the statistics page, JSON export, and configurable
+scheduling. The upstream project also has its
+[own contributors](https://github.com/eudoxia0/hashcards/graphs/contributors),
+whose work came across with the fork; the fork's are listed
+[here](https://github.com/overcuriousity/hashcards-web/graphs/contributors).
+
+hashcards-web vendors [KaTeX] for maths, [highlight.js] for code blocks, and
+the [Inter] and [JetBrains Mono] typefaces. Scheduling is [FSRS].
+
+## Prior art
+
+Other plain-text and file-backed spaced repetition systems, for comparison:
 
 - [org-fc](https://github.com/l3kn/org-fc)
 - [org-drill](https://orgmode.org/worg/org-contrib/org-drill.html)
@@ -565,11 +638,18 @@ explains the reasoning behind the design.
 [blog]: https://borretti.me/article/hashcards-plain-text-spaced-repetition
 [esr]: https://borretti.me/article/effective-spaced-repetition
 [rustup]: https://rustup.rs/
+[releases]: https://github.com/overcuriousity/hashcards-web/releases/latest
+[overcuriousity]: https://github.com/overcuriousity
+[mstoeck3]: https://github.com/mstoeck3
+[KaTeX]: https://katex.org/
+[highlight.js]: https://highlightjs.org/
+[Inter]: https://rsms.me/inter/
+[JetBrains Mono]: https://www.jetbrains.com/lp/mono/
 
 ## License
 
-© 2025 by [Fernando Borretti][fb], and contributors to this fork. Licensed
-under the [Apache 2.0][apache2] license.
+© 2025 [Fernando Borretti][fb] and the contributors to hashcards and this
+fork. Licensed under the [Apache 2.0][apache2] license.
 
 [fb]: https://borretti.me/
 [apache2]: https://www.apache.org/licenses/LICENSE-2.0
