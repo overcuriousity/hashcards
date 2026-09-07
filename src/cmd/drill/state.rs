@@ -24,8 +24,8 @@ use crate::fsrs::Grade;
 use crate::rng::TinyRng;
 use crate::types::card::Card;
 use crate::types::card_hash::CardHash;
-use crate::types::performance::Jitter;
 use crate::types::performance::Performance;
+use crate::types::performance::Scheduling;
 use crate::types::timestamp::Timestamp;
 
 /// One collection's database, with the session row opened in it.
@@ -37,6 +37,11 @@ pub struct SessionDb {
     /// from. `None` means "use the session's own collection", which is the
     /// CLI drill and the ordinary single-collection serve.
     pub source: Option<SessionSource>,
+    /// How this collection's cards are scheduled. Held per database rather
+    /// than per session because a deck's collections may each ask for their
+    /// own retention, and a card keeps exactly one schedule however it was
+    /// reached.
+    pub scheduling: Scheduling,
 }
 
 /// Where a routed card's files live, and how to address them over HTTP.
@@ -62,12 +67,13 @@ pub struct SessionDbs {
 
 impl SessionDbs {
     /// A session over a single collection: every card routes to this database.
-    pub fn single(db: Database, session_id: i64) -> Self {
+    pub fn single(db: Database, session_id: i64, scheduling: Scheduling) -> Self {
         Self {
             dbs: vec![SessionDb {
                 db,
                 session_id,
                 source: None,
+                scheduling,
             }],
             routes: HashMap::new(),
         }
@@ -94,6 +100,11 @@ impl SessionDbs {
         let idx = self.routes.get(&hash).copied().unwrap_or(0);
         let idx = idx.min(self.dbs.len().saturating_sub(1));
         &mut self.dbs[idx]
+    }
+
+    /// How the collection owning `hash` schedules it.
+    pub fn scheduling_for(&self, hash: CardHash) -> Scheduling {
+        self.for_card(hash).scheduling
     }
 
     /// The first database. Used for session-wide bookkeeping that is not
@@ -184,21 +195,13 @@ pub struct MutableState {
     pub finished_at: Option<Timestamp>,
     /// Timestamp when the current card was first shown (for per-card timing).
     pub card_shown_at: Option<Timestamp>,
-    /// Fractional random jitter applied to computed intervals (FEAT-05).
-    pub jitter: Jitter,
     /// RNG for interval jitter, seeded once per session.
     pub rng: TinyRng,
 }
 
 impl MutableState {
     /// State for a freshly started session: nothing revealed, nothing graded.
-    pub fn new(
-        dbs: SessionDbs,
-        cache: Cache,
-        cards: Vec<Card>,
-        jitter: Jitter,
-        rng: TinyRng,
-    ) -> Self {
+    pub fn new(dbs: SessionDbs, cache: Cache, cards: Vec<Card>, rng: TinyRng) -> Self {
         Self {
             reveal: false,
             dbs,
@@ -207,7 +210,6 @@ impl MutableState {
             reviews: Vec::new(),
             finished_at: None,
             card_shown_at: None,
-            jitter,
             rng,
         }
     }
@@ -380,8 +382,10 @@ mod tests {
     use crate::cmd::drill::cache::Cache;
     use crate::db::Database;
     use crate::types::card::CardContent;
+    use crate::types::performance::DesiredRetention;
     use crate::types::performance::Jitter;
     use crate::types::performance::Performance;
+    use crate::types::performance::Scheduling;
 
     fn make_card(question: &str) -> Card {
         Card::new(
@@ -422,12 +426,54 @@ mod tests {
             let _ = cache.insert(card.hash(), Performance::New);
         }
         Ok(MutableState::new(
-            SessionDbs::single(db, session_id),
+            SessionDbs::single(
+                db,
+                session_id,
+                Scheduling {
+                    jitter: Jitter::none(),
+                    ..Scheduling::default()
+                },
+            ),
             cache,
             cards,
-            Jitter::none(),
             TinyRng::from_seed(1),
         ))
+    }
+
+    /// A deck draws on several collections, and each may ask for its own
+    /// retention. A card must be scheduled by the collection it belongs to
+    /// however it was reached: the alternative is one card carrying two
+    /// schedules depending on which deck you opened.
+    #[test]
+    fn scheduling_follows_the_card_to_its_own_collection() -> Fallible<()> {
+        let strict = Scheduling {
+            retention: DesiredRetention::new(0.95)?,
+            ..Scheduling::default()
+        };
+        let relaxed = Scheduling {
+            retention: DesiredRetention::new(0.8)?,
+            ..Scheduling::default()
+        };
+        let a = make_card("belongs to the strict collection");
+        let b = make_card("belongs to the relaxed collection");
+        let db = |scheduling| -> Fallible<SessionDb> {
+            let db = Database::new(":memory:")?;
+            let session_id = db.create_session(Timestamp::now())?;
+            Ok(SessionDb {
+                db,
+                session_id,
+                source: None,
+                scheduling,
+            })
+        };
+        let routes = HashMap::from([(a.hash(), 0), (b.hash(), 1)]);
+        let dbs = SessionDbs::routed(vec![db(strict)?, db(relaxed)?], routes);
+
+        assert_eq!(dbs.scheduling_for(a.hash()), strict);
+        assert_eq!(dbs.scheduling_for(b.hash()), relaxed);
+        // An unrouted card is the single-collection case: the first database.
+        assert_eq!(dbs.scheduling_for(make_card("unrouted").hash()), strict);
+        Ok(())
     }
 
     /// FEAT-08: the bar advances on the first grade of each card; further
@@ -440,10 +486,16 @@ mod tests {
         let a = make_card("question a");
         let b = make_card("question b");
         let mut mutable = MutableState::new(
-            SessionDbs::single(db, session_id),
+            SessionDbs::single(
+                db,
+                session_id,
+                Scheduling {
+                    jitter: Jitter::none(),
+                    ..Scheduling::default()
+                },
+            ),
             Cache::new(),
             vec![a.clone(), b.clone()],
-            Jitter::none(),
             TinyRng::from_seed(1),
         );
         assert_eq!(mutable.progress(), (0, 0));
@@ -623,24 +675,20 @@ mod tests {
                     db: db_a,
                     session_id: session_a,
                     source: Some(source.clone()),
+                    scheduling: Scheduling::default(),
                 },
                 SessionDb {
                     db: db_b,
                     session_id: session_b,
                     source: Some(source),
+                    scheduling: Scheduling::default(),
                 },
             ],
             HashMap::from([(old.hash(), 1)]),
         );
         let mut cache = Cache::new();
         cache.insert(old.hash(), Performance::New)?;
-        let mut mutable = MutableState::new(
-            dbs,
-            cache,
-            vec![old.clone()],
-            Jitter::none(),
-            TinyRng::from_seed(1),
-        );
+        let mut mutable = MutableState::new(dbs, cache, vec![old.clone()], TinyRng::from_seed(1));
 
         mutable.apply_card_migration(&CardMigration {
             renamed: vec![(old.hash(), new.clone())],

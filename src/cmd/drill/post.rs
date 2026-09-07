@@ -218,12 +218,12 @@ pub fn handle_action(
                 }
             };
             let prev_performance: Performance = mutable.cache.get(hash)?;
-            let jitter = mutable.jitter;
+            let scheduling = mutable.dbs.scheduling_for(hash);
             let performance: ReviewedPerformance = update_performance(
                 prev_performance,
                 grade,
                 reviewed_at,
-                jitter,
+                scheduling,
                 &mut mutable.rng,
             );
             let record = ReviewRecord {
@@ -293,6 +293,7 @@ mod tests {
     use crate::types::card::CardContent;
     use crate::types::performance::Jitter;
     use crate::types::performance::Performance;
+    use crate::types::performance::Scheduling;
     use crate::types::timestamp::Timestamp;
     use chrono::NaiveDateTime;
     use std::path::PathBuf;
@@ -302,13 +303,19 @@ mod tests {
         let session_id = db.create_session(Timestamp::now()).unwrap();
         MutableState {
             reveal: false,
-            dbs: SessionDbs::single(db, session_id),
+            dbs: SessionDbs::single(
+                db,
+                session_id,
+                Scheduling {
+                    jitter: Jitter::none(),
+                    ..Scheduling::default()
+                },
+            ),
             cache: Cache::new(),
             cards: Vec::new(),
             reviews: Vec::new(),
             finished_at: None,
             card_shown_at: None,
-            jitter: Jitter::none(),
             rng: TinyRng::from_seed(0),
         }
     }
@@ -334,13 +341,19 @@ mod tests {
         let session_id = db.create_session(now).unwrap();
         MutableState {
             reveal: false,
-            dbs: SessionDbs::single(db, session_id),
+            dbs: SessionDbs::single(
+                db,
+                session_id,
+                Scheduling {
+                    jitter: Jitter::none(),
+                    ..Scheduling::default()
+                },
+            ),
             cache,
             cards,
             reviews: Vec::new(),
             finished_at: None,
             card_shown_at: None,
-            jitter: Jitter::none(),
             rng: TinyRng::from_seed(1),
         }
     }
@@ -424,13 +437,19 @@ mod tests {
         cache.insert(card.hash(), Performance::New).unwrap();
         let mut mutable = MutableState {
             reveal: true,
-            dbs: SessionDbs::single(db, session_id),
+            dbs: SessionDbs::single(
+                db,
+                session_id,
+                Scheduling {
+                    jitter: Jitter::none(),
+                    ..Scheduling::default()
+                },
+            ),
             cache,
             cards: vec![card.clone()],
             reviews: Vec::new(),
             finished_at: None,
             card_shown_at: Some(Timestamp::now()),
-            jitter: Jitter::none(),
             rng: TinyRng::from_seed(1),
         };
         let result = handle_action(&mut mutable, Action::Good, None, None);
@@ -583,13 +602,19 @@ mod tests {
         cache.insert(card.hash(), Performance::New).unwrap();
         let mut mutable = MutableState {
             reveal: false,
-            dbs: SessionDbs::single(db, session_id),
+            dbs: SessionDbs::single(
+                db,
+                session_id,
+                Scheduling {
+                    jitter: Jitter::none(),
+                    ..Scheduling::default()
+                },
+            ),
             cache,
             cards: vec![card],
             reviews: Vec::new(),
             finished_at: None,
             card_shown_at: None,
-            jitter: Jitter::none(),
             rng: TinyRng::from_seed(1),
         };
         // Grade the only card: the session finishes and the DB row is closed.

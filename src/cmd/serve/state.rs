@@ -329,6 +329,7 @@ mod tests {
     use crate::error::Fallible;
     use crate::rng::TinyRng;
     use crate::types::performance::Jitter;
+    use crate::types::performance::Scheduling;
 
     fn session_started_at(at: &str, dir: &Path) -> Fallible<SharedSession> {
         let db_path = dir.join("test.db");
@@ -339,10 +340,16 @@ mod tests {
         let started_at = Timestamp::try_from(at.to_string())?;
         let session_id = db.create_session(started_at)?;
         let mutable = MutableState::new(
-            SessionDbs::single(db, session_id),
+            SessionDbs::single(
+                db,
+                session_id,
+                Scheduling {
+                    jitter: Jitter::none(),
+                    ..Scheduling::default()
+                },
+            ),
             Cache::new(),
             Vec::new(),
-            Jitter::none(),
             TinyRng::from_seed(1),
         );
         Ok(Arc::new(Mutex::new(DrillSession::new(

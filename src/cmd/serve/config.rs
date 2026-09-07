@@ -9,7 +9,10 @@ use serde::Serialize;
 use crate::cmd::drill::render::AnswerControls;
 use crate::error::Fallible;
 use crate::error::fail;
+use crate::types::performance::DesiredRetention;
 use crate::types::performance::Jitter;
+use crate::types::performance::MaxInterval;
+use crate::types::performance::Scheduling;
 
 // --- TOML deserialization structs ---
 
@@ -134,10 +137,36 @@ pub struct DefaultsSection {
     pub bury_siblings: bool,
     #[serde(default = "default_jitter")]
     pub jitter: f64,
+    #[serde(default = "default_desired_retention")]
+    pub desired_retention: f64,
+    #[serde(default = "default_max_interval_days")]
+    pub max_interval_days: f64,
+}
+
+impl DefaultsSection {
+    /// The instance-wide schedule shape, with every value checked. A
+    /// collection may override the two FSRS numbers; jitter is per instance,
+    /// since it exists to spread one person's review peaks and means nothing
+    /// to one collection alone.
+    pub fn scheduling(&self) -> Fallible<Scheduling> {
+        Ok(Scheduling {
+            retention: DesiredRetention::new(self.desired_retention)?,
+            max_interval: MaxInterval::new(self.max_interval_days)?,
+            jitter: Jitter::new(self.jitter)?,
+        })
+    }
 }
 
 fn default_jitter() -> f64 {
     Jitter::DEFAULT_FRACTION
+}
+
+fn default_desired_retention() -> f64 {
+    DesiredRetention::DEFAULT
+}
+
+fn default_max_interval_days() -> f64 {
+    MaxInterval::DEFAULT
 }
 
 impl Default for DefaultsSection {
@@ -146,6 +175,8 @@ impl Default for DefaultsSection {
             answer_controls: default_answer_controls(),
             bury_siblings: true,
             jitter: default_jitter(),
+            desired_retention: default_desired_retention(),
+            max_interval_days: default_max_interval_days(),
         }
     }
 }
@@ -189,11 +220,19 @@ pub fn slugify(s: &str) -> String {
 pub fn load_config(path: &Path) -> Fallible<ServeConfig> {
     let content = read_to_string(path)?;
     let config: ServeConfig = toml::from_str(&content)?;
-    Jitter::new(config.defaults.jitter)?;
+    config.defaults.scheduling()?;
     Ok(config)
 }
 
 // --- Resolved runtime config ---
+
+/// What a collection's own `.hashcards.toml` says about how its cards are
+/// scheduled. Absent means "whatever the instance says".
+#[derive(Clone, Copy, Default)]
+pub struct SchedulingOverrides {
+    pub retention: Option<DesiredRetention>,
+    pub max_interval: Option<MaxInterval>,
+}
 
 #[derive(Clone)]
 pub struct ResolvedCollection {
@@ -203,6 +242,24 @@ pub struct ResolvedCollection {
     pub db_path: PathBuf,
     /// Owning user's email (lowercased), when `[oidc]` is configured.
     pub owner: Option<String>,
+    /// Scheduling this collection asks for in place of the instance's.
+    pub overrides: SchedulingOverrides,
+}
+
+impl ResolvedCollection {
+    /// How this collection's cards are scheduled: its own settings where it
+    /// has them, the instance's everywhere else.
+    ///
+    /// Jitter is never overridden. It spreads one person's review peaks
+    /// across all their collections, so a collection deciding it alone would
+    /// be deciding nothing.
+    pub fn scheduling(&self, defaults: Scheduling) -> Scheduling {
+        Scheduling {
+            retention: self.overrides.retention.unwrap_or(defaults.retention),
+            max_interval: self.overrides.max_interval.unwrap_or(defaults.max_interval),
+            jitter: defaults.jitter,
+        }
+    }
 }
 
 pub struct ResolvedServeConfig {
@@ -338,6 +395,51 @@ mod tests {
     use super::*;
     use crate::error::ErrorReport;
     use crate::error::Fallible;
+
+    /// The two FSRS knobs default to what the hardcoded constants were, so a
+    /// config that says nothing about scheduling schedules as it always did.
+    #[test]
+    fn test_scheduling_defaults_to_the_previous_constants() -> Fallible<()> {
+        let toml = "[server]\ndata_dir = \"/var/lib/hashcards\"\n";
+        let config: ServeConfig = toml::from_str(toml)?;
+        let scheduling = config.defaults.scheduling()?;
+        assert_eq!(scheduling.retention.into_inner(), DesiredRetention::DEFAULT);
+        assert_eq!(scheduling.max_interval.into_inner(), MaxInterval::DEFAULT);
+        Ok(())
+    }
+
+    #[test]
+    fn test_scheduling_is_read_from_defaults() -> Fallible<()> {
+        let toml = "[server]\ndata_dir = \"/var/lib/hashcards\"\n\n\
+                    [defaults]\ndesired_retention = 0.95\nmax_interval_days = 3650\n";
+        let config: ServeConfig = toml::from_str(toml)?;
+        let scheduling = config.defaults.scheduling()?;
+        assert_eq!(scheduling.retention.into_inner(), 0.95);
+        assert_eq!(scheduling.max_interval.into_inner(), 3650.0);
+        Ok(())
+    }
+
+    /// A scheduling value out of range must stop the server at startup. It
+    /// cannot wait to be noticed: the first symptom otherwise is a due date
+    /// that is wrong, weeks later, with nothing to attribute it to.
+    #[test]
+    fn test_out_of_range_scheduling_is_refused_at_load() {
+        let bad = |line: &str| {
+            format!("[server]\ndata_dir = \"/var/lib/hashcards\"\n\n[defaults]\n{line}\n")
+        };
+        for line in [
+            "desired_retention = 1.0",
+            "desired_retention = 0.5",
+            "max_interval_days = 0",
+            "max_interval_days = 40000",
+        ] {
+            let config: ServeConfig = toml::from_str(&bad(line)).expect("the toml itself parses");
+            assert!(
+                config.defaults.scheduling().is_err(),
+                "`{line}` was accepted"
+            );
+        }
+    }
 
     /// Regression test for BUG-47: with no `host` key in the config, the
     /// server must bind to localhost, not to all interfaces.

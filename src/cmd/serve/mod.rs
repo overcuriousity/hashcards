@@ -28,6 +28,13 @@ mod tests {
     use tempfile::tempdir;
     use tokio::spawn;
 
+    use crate::cmd::drill::fonts::FONT_DIR_URL;
+    use crate::cmd::drill::hljs::HLJS_CSS_URL;
+    use crate::cmd::drill::hljs::HLJS_JS_URL;
+    use crate::cmd::drill::katex::KATEX_CSS_URL;
+    use crate::cmd::drill::katex::KATEX_JS_URL;
+    use crate::cmd::drill::katex::KATEX_MHCHEM_JS_URL;
+    use crate::cmd::drill::template::STYLE_URL;
     use crate::cmd::serve::config::DefaultsSection;
     use crate::cmd::serve::config::ResolvedServeConfig;
     use crate::cmd::serve::server::start_serve;
@@ -38,6 +45,8 @@ mod tests {
     use crate::types::card_hash::CardHash;
     use crate::types::performance::Performance;
     use crate::types::timestamp::Timestamp;
+    use crate::utils::CACHE_CONTROL_IMMUTABLE;
+    use crate::utils::CACHE_CONTROL_REVALIDATE;
     use crate::utils::wait_for_server;
 
     const TEST_HOST: &str = "127.0.0.1";
@@ -221,7 +230,8 @@ A: 2
         )
         .await?;
 
-        let css = reqwest::get(format!("http://{TEST_HOST}:{port}/style.css"))
+        let dir = FONT_DIR_URL.as_str();
+        let css = reqwest::get(format!("http://{TEST_HOST}:{port}{}", STYLE_URL.as_str()))
             .await?
             .text()
             .await?;
@@ -233,10 +243,10 @@ A: 2
             "jetbrains-mono-400.woff2",
         ] {
             assert!(
-                css.contains(&format!("/fonts/{name}")),
+                css.contains(&format!("{dir}/{name}")),
                 "{name} not in style.css"
             );
-            let response = reqwest::get(format!("http://{TEST_HOST}:{port}/fonts/{name}")).await?;
+            let response = reqwest::get(format!("http://{TEST_HOST}:{port}{dir}/{name}")).await?;
             assert!(
                 response.status().is_success(),
                 "{name}: {:?}",
@@ -255,8 +265,125 @@ A: 2
 
         // A name that is not one of the four is a 404, not a path to read.
         let response =
-            reqwest::get(format!("http://{TEST_HOST}:{port}/fonts/..%2Fstyle.css")).await?;
+            reqwest::get(format!("http://{TEST_HOST}:{port}{dir}/..%2Fstyle.css")).await?;
         assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND);
+        Ok(())
+    }
+
+    /// Every asset served `immutable` is served from a path that names this
+    /// build's copy of it, and every one of those paths answers a revision it
+    /// does not recognise with the current bytes.
+    ///
+    /// Regression: `immutable` forbids revalidation, so an asset at a fixed
+    /// path is frozen in a client's cache for a week after it changes. The
+    /// first half of the fix — a revisioned path — is only half of it: HTML
+    /// a client already holds still asks for the *old* revision, and a 404
+    /// there is a page with no stylesheet, no maths and no highlighting,
+    /// which is worse than the staleness being fixed.
+    #[tokio::test]
+    async fn test_revisioned_assets_answer_a_stale_revision() -> Fallible<()> {
+        let slug = "test-collection";
+        let (port, _dir) =
+            spawn_test_server(slug, &[("Alpha.md", "Q: What is 1+1?\nA: 2\n")]).await?;
+
+        let font = format!("{}/inter-400.woff2", FONT_DIR_URL.as_str());
+        let katex_font = format!(
+            "/katex/fonts/{}/KaTeX_Main-Regular.woff2",
+            crate::cmd::drill::katex::KATEX_REV.as_str()
+        );
+        let current = [
+            STYLE_URL.as_str(),
+            KATEX_CSS_URL.as_str(),
+            KATEX_JS_URL.as_str(),
+            KATEX_MHCHEM_JS_URL.as_str(),
+            HLJS_CSS_URL.as_str(),
+            HLJS_JS_URL.as_str(),
+            font.as_str(),
+            katex_font.as_str(),
+        ];
+
+        for url in current {
+            let response = reqwest::get(format!("http://{TEST_HOST}:{port}{url}")).await?;
+            assert!(
+                response.status().is_success(),
+                "{url}: {:?}",
+                response.status()
+            );
+            assert_eq!(
+                response
+                    .headers()
+                    .get("cache-control")
+                    .and_then(|v| v.to_str().ok()),
+                Some(CACHE_CONTROL_IMMUTABLE),
+                "{url} is not cacheable, so the revision buys nothing"
+            );
+
+            // The same asset as an older build's HTML asks for it.
+            let stale = stale_revision(url);
+            let response = reqwest::get(format!("http://{TEST_HOST}:{port}{stale}")).await?;
+            assert!(
+                response.status().is_success(),
+                "{stale} 404s, so a client with cached HTML loses the asset entirely"
+            );
+            assert_eq!(
+                response
+                    .headers()
+                    .get("cache-control")
+                    .and_then(|v| v.to_str().ok()),
+                Some(CACHE_CONTROL_REVALIDATE),
+                "{stale} must not be kept: the path does not name what was served"
+            );
+            assert!(!response.bytes().await?.is_empty(), "{stale} is empty");
+        }
+        Ok(())
+    }
+
+    /// The same URL with a revision no build ever produced.
+    fn stale_revision(url: &str) -> String {
+        let mut parts: Vec<&str> = url.split('/').collect();
+        let rev = parts
+            .iter()
+            .position(|p| p.len() == 16 && p.chars().all(|c| c.is_ascii_hexdigit()))
+            .expect("every revisioned URL names a revision");
+        parts[rev] = "00000000deadbeef";
+        parts.join("/")
+    }
+
+    /// The fixed paths every build before revisioning rendered into its HTML.
+    /// A page from such a build is still in caches, and must still find its
+    /// assets — served so that it cannot keep them.
+    #[tokio::test]
+    async fn test_legacy_asset_paths_still_serve() -> Fallible<()> {
+        let slug = "test-collection";
+        let (port, _dir) =
+            spawn_test_server(slug, &[("Alpha.md", "Q: What is 1+1?\nA: 2\n")]).await?;
+
+        for url in [
+            "/style.css",
+            "/fonts/inter-400.woff2",
+            "/katex/katex.css",
+            "/katex/katex.js",
+            "/katex/mhchem.js",
+            "/katex/fonts/KaTeX_Main-Regular.woff2",
+            "/hljs/github.css",
+            "/hljs/highlight.js",
+        ] {
+            let response = reqwest::get(format!("http://{TEST_HOST}:{port}{url}")).await?;
+            assert!(
+                response.status().is_success(),
+                "{url}: {:?}",
+                response.status()
+            );
+            assert_eq!(
+                response
+                    .headers()
+                    .get("cache-control")
+                    .and_then(|v| v.to_str().ok()),
+                Some(CACHE_CONTROL_REVALIDATE),
+                "{url} does not name its contents and must not be cached blind"
+            );
+            assert!(!response.bytes().await?.is_empty(), "{url} is empty");
+        }
         Ok(())
     }
 

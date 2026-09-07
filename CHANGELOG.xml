@@ -1,5 +1,106 @@
 <changelog>
     <unreleased>
+        <added>
+            <change author="claude">
+            **Desired retention and the maximum interval are configurable,
+            per instance and per collection.** Both were constants:
+            `TARGET_RECALL = 0.9` and `MAX_INTERVAL = 256.0` days. Retention
+            is the one FSRS number a person has an opinion about, because it
+            names the trade the algorithm exists to make — raise it and every
+            interval shortens, so you see more cards and remember more of
+            them. The ceiling was doing more scheduling than anyone knew: a
+            card known well enough for FSRS to ask for two years was silently
+            handed back after eight and a half months, and nothing on screen
+            said so. `[defaults]` now takes `desired_retention` (0.7 to 0.99)
+            and `max_interval_days` (1 to 36500), and a collection's own
+            `.hashcards.toml` may override either — retention is genuinely
+            per-subject, since an exam in a fortnight and a language you
+            intend to keep are not the same promise. Both default to the old
+            constants, so no existing schedule moves. A value out of range in
+            the instance config stops the server at startup, where it can be
+            attributed; one in a collection's file is ignored with a warning
+            and the collection still appears, because losing a collection
+            from the landing page over a preference is the worse answer. The
+            settings are resolved per review database rather than per
+            session, so a deck drawing on several collections schedules each
+            card by the collection that holds it — a card keeps exactly one
+            schedule however it was reached. Jitter stays per instance: it
+            spreads one person's review peaks across everything they study,
+            so one collection deciding it alone would decide nothing. The
+            uncapped interval is still recorded alongside the capped one, so
+            raising the ceiling later does not have to recover a stability
+            the ceiling threw away.
+            </change>
+            </added>
+        <fixed>
+            <change author="claude">
+            **The stylesheet is served from a path that names its own hash.** It
+            was served `immutable` from `/style.css`, and `immutable` does not
+            merely permit a cache to skip revalidation — it forbids it. So for
+            a week after any deploy, a browser that had already fetched the
+            stylesheet ran a week-old copy of it against freshly rendered HTML,
+            and nothing shipped in between could be seen on that device at all.
+            Two devices pointed at one server would disagree about the layout
+            with no way to tell which was right. The path now carries sixteen
+            hex characters of the hash of the bytes it serves, so a build that
+            changes the stylesheet changes the URL that asks for it and
+            `immutable` is honest. `/style.css` still answers, since a page
+            cached from before this change still asks for it, but it now says
+            `no-cache`: nothing may be kept against a name that does not
+            describe its contents. `/script.js` and a collection's own
+            `script.js` say the same, for the same reason — a script a week out
+            of step with the HTML that loads it is the same bug, quieter.
+            </change>
+            <change author="claude">
+            **Every asset served `immutable` now comes from a path that names
+            it, and every such path answers a revision it has never heard
+            of.** The stylesheet was the loud case, but KaTeX, highlight.js
+            and the fonts were served `immutable` from fixed paths too:
+            bumping a vendored library left every browser that had fetched it
+            running the old copy for a week, with no way to invalidate — the
+            same bug, one asset class over. All of them now carry sixteen hex
+            characters of the hash of what this build ships, and because the
+            fonts are named by stylesheets rather than by HTML, both `style.css`
+            and KaTeX's stylesheet have their `url()` references rewritten to
+            carry that revision as they are served. The other half matters as
+            much: HTML a browser already holds asks for the *previous*
+            revision, and a 404 there is a page with no styling, no maths and
+            no highlighting — strictly worse than the staleness being fixed.
+            An unrecognised revision is therefore answered with the current
+            bytes, marked `no-cache` so the client keeps nothing it cannot
+            name. The old fixed paths still answer on the same terms, for
+            pages rendered before any of this.
+            </change>
+            <change author="claude">
+            **A mistyped preference in a collection's `.hashcards.toml` no
+            longer makes the collection disappear.** The override reader was
+            careful to ignore a value out of range, but the file was parsed a
+            second time — strictly — to read the `id`, so
+            `desired_retention = "0.95"` was a parse error and the folder was
+            skipped: the collection vanished from the landing page along with
+            every review it had recorded. This was newly reachable, since
+            per-collection scheduling is the first thing that invites anyone
+            to hand-edit that file. Overrides are now read untyped and
+            validated leniently, so a value of the wrong type is ignored with
+            a warning exactly as an out-of-range one is. A file TOML cannot
+            parse at all is not given up on either: the `id` is looked for by
+            eye, since it is always one plain line and is the one thing that
+            cannot be worked out again. Only a file with no readable `id` is
+            skipped — and it has to be, because the alternative is minting a
+            fresh id and writing over what you were in the middle of typing.
+            </change>
+            <change author="claude">
+            **End session is a line of text again, not a fifth grade button.**
+            It was written to be one — `.end-link` sets no background, no
+            border, and small muted type — but `.controls button` is a class
+            and an element where `.end-link` is a class alone, so it was the
+            more specific of the two and won every declaration they share. The
+            way out of a session therefore rendered as a bordered 44px button
+            directly under Forgot/Hard/Good/Easy, in a bar whose whole point is
+            that it holds grades and nothing else. The grade rules now exclude
+            it by name rather than being argued with.
+            </change>
+        </fixed>
         </unreleased>
     <releases>
         <release version="0.4.10" date="2026-09-06">

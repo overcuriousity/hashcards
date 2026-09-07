@@ -669,6 +669,7 @@ mod tests {
             coll_dir: std::path::PathBuf::from("/tmp/a"),
             db_path: std::path::PathBuf::from("/tmp/a.db"),
             owner: None,
+            overrides: Default::default(),
         }];
         assert!(check_deck_slug_collisions(&decks, &collections).is_err());
         assert!(check_deck_slug_collisions(&decks, &[]).is_ok());

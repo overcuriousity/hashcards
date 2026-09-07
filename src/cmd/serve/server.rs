@@ -13,17 +13,21 @@ use axum_extra::extract::cookie::Key;
 use tokio::net::TcpListener;
 
 use crate::cmd::drill::fonts::font_handler;
-use crate::cmd::drill::hljs::HLJS_CSS_URL;
-use crate::cmd::drill::hljs::HLJS_JS_URL;
+use crate::cmd::drill::fonts::legacy_font_handler;
 use crate::cmd::drill::hljs::hljs_css_handler;
 use crate::cmd::drill::hljs::hljs_js_handler;
-use crate::cmd::drill::katex::KATEX_CSS_URL;
-use crate::cmd::drill::katex::KATEX_JS_URL;
-use crate::cmd::drill::katex::KATEX_MHCHEM_JS_URL;
+use crate::cmd::drill::hljs::legacy_hljs_css_handler;
+use crate::cmd::drill::hljs::legacy_hljs_js_handler;
 use crate::cmd::drill::katex::katex_css_handler;
 use crate::cmd::drill::katex::katex_font_handler;
 use crate::cmd::drill::katex::katex_js_handler;
 use crate::cmd::drill::katex::katex_mhchem_js_handler;
+use crate::cmd::drill::katex::legacy_katex_css_handler;
+use crate::cmd::drill::katex::legacy_katex_font_handler;
+use crate::cmd::drill::katex::legacy_katex_js_handler;
+use crate::cmd::drill::katex::legacy_katex_mhchem_js_handler;
+use crate::cmd::drill::template::STYLE_CSS;
+use crate::cmd::drill::template::STYLE_REV;
 use crate::cmd::drill::template::icon_192_handler;
 use crate::cmd::drill::template::icon_512_handler;
 use crate::cmd::drill::template::manifest_handler;
@@ -284,14 +288,30 @@ pub async fn start_serve(config: ResolvedServeConfig) -> Fallible<()> {
         .route("/icons/icon-192.png", get(icon_192_handler))
         .route("/icons/icon-512.png", get(icon_512_handler))
         .route("/script.js", get(script_handler))
-        .route("/style.css", get(style_handler))
-        .route("/fonts/{name}", get(font_handler))
-        .route(KATEX_CSS_URL, get(katex_css_handler))
-        .route(KATEX_JS_URL, get(katex_js_handler))
-        .route(KATEX_MHCHEM_JS_URL, get(katex_mhchem_js_handler))
-        .route("/katex/fonts/{*path}", get(katex_font_handler))
-        .route(HLJS_CSS_URL, get(hljs_css_handler))
-        .route(HLJS_JS_URL, get(hljs_js_handler));
+        // Every asset below is served `immutable` under a revision that
+        // names this build's copy of it, and the handlers accept *any*
+        // revision: a client working from HTML older than the running build
+        // asks for a revision that no longer exists, and must be answered
+        // with the current bytes rather than a 404. An unstyled page, or one
+        // with no maths, is worse than a stale one.
+        .route("/style/{rev}/style.css", get(style_handler))
+        // The fixed paths every build before revisioning rendered into its
+        // HTML. Kept for as long as such a page can still be in a cache.
+        .route("/style.css", get(legacy_style_handler))
+        .route("/fonts/{rev}/{name}", get(font_handler))
+        .route("/fonts/{name}", get(legacy_font_handler))
+        .route("/katex/{rev}/katex.css", get(katex_css_handler))
+        .route("/katex/{rev}/katex.js", get(katex_js_handler))
+        .route("/katex/{rev}/mhchem.js", get(katex_mhchem_js_handler))
+        .route("/katex/fonts/{rev}/{name}", get(katex_font_handler))
+        .route("/katex/katex.css", get(legacy_katex_css_handler))
+        .route("/katex/katex.js", get(legacy_katex_js_handler))
+        .route("/katex/mhchem.js", get(legacy_katex_mhchem_js_handler))
+        .route("/katex/fonts/{name}", get(legacy_katex_font_handler))
+        .route("/hljs/{rev}/github.css", get(hljs_css_handler))
+        .route("/hljs/{rev}/highlight.js", get(hljs_js_handler))
+        .route("/hljs/github.css", get(legacy_hljs_css_handler))
+        .route("/hljs/highlight.js", get(legacy_hljs_js_handler));
 
     // `/auth/*` must NOT go through `require_auth` — gating the login route
     // itself behind login is the classic OIDC redirect loop.
@@ -325,35 +345,59 @@ pub async fn start_serve(config: ResolvedServeConfig) -> Fallible<()> {
     Ok(())
 }
 
+/// Served from a fixed path — the drill's copy of it is per collection, so
+/// the two cannot share one hashed name — and therefore never cached without
+/// asking first. A script a week out of step with the HTML that loads it is
+/// the same bug as a stale stylesheet, quieter.
 async fn script_handler() -> (
     axum::http::StatusCode,
-    [(axum::http::HeaderName, &'static str); 1],
+    [(axum::http::HeaderName, &'static str); 2],
     &'static str,
 ) {
     (
         axum::http::StatusCode::OK,
-        [(axum::http::header::CONTENT_TYPE, "text/javascript")],
+        [
+            (axum::http::header::CONTENT_TYPE, "text/javascript"),
+            (
+                axum::http::header::CACHE_CONTROL,
+                crate::utils::CACHE_CONTROL_REVALIDATE,
+            ),
+        ],
         // Landing/browse pages use this route and expect MACROS to be defined.
         concat!("let MACROS = {};\n\n", include_str!("../drill/script.js")),
     )
 }
 
-async fn style_handler() -> (
+type StaticResponse = (
     axum::http::StatusCode,
     [(axum::http::HeaderName, &'static str); 2],
     &'static [u8],
-) {
+);
+
+fn stylesheet(cache_control: &'static str) -> StaticResponse {
     (
         axum::http::StatusCode::OK,
         [
             (axum::http::header::CONTENT_TYPE, "text/css"),
-            (
-                axum::http::header::CACHE_CONTROL,
-                crate::utils::CACHE_CONTROL_IMMUTABLE,
-            ),
+            (axum::http::header::CACHE_CONTROL, cache_control),
         ],
-        include_bytes!("../drill/style.css"),
+        STYLE_CSS.as_bytes(),
     )
+}
+
+/// The stylesheet at its content-addressed path. `immutable` is honest at
+/// this build's revision: the bytes cannot change without the path changing
+/// with them. At any other revision the request comes from HTML this build
+/// did not render, so it is answered with the current stylesheet — which is
+/// the one that page's successor will ask for — but may not be kept.
+async fn style_handler(axum::extract::Path(rev): axum::extract::Path<String>) -> StaticResponse {
+    stylesheet(crate::utils::revisioned_cache_control(&rev, &STYLE_REV))
+}
+
+/// The same bytes at the fixed path, for HTML that predates the hashed one.
+/// Nothing may be cached against a name that does not describe its contents.
+async fn legacy_style_handler() -> StaticResponse {
+    stylesheet(crate::utils::CACHE_CONTROL_REVALIDATE)
 }
 
 async fn shutdown_signal() {

@@ -226,7 +226,7 @@ code, pre, .mono { font-family: var(--font-mono); }
    inside a `<form>` also does but which the existing markup does with
    inputs. Styling both here keeps them one control. */
 .btn,
-.controls button,
+.controls button:not(.end-link),
 .controls input[type="submit"] {
   -webkit-appearance: none;
   appearance: none;
@@ -241,14 +241,14 @@ code, pre, .mono { font-family: var(--font-mono); }
 }
 
 .btn:hover,
-.controls button:hover,
+.controls button:not(.end-link):hover,
 .controls input[type="submit"]:hover {
   background: var(--color-bg-hover);
   border-color: var(--color-fg-muted);
 }
 
 .btn:disabled,
-.controls button:disabled,
+.controls button:not(.end-link):disabled,
 .controls input[type="submit"]:disabled {
   opacity: 0.4; cursor: not-allowed; pointer-events: none;
 }
@@ -741,11 +741,15 @@ body:has(.root) .theme-toggle { display: none; }
   max-width: 56rem; margin: 0 auto;
 }
 .root .controls .grades > * { flex: 1; max-width: 12rem; }
-.root .controls button,
+.root .controls button:not(.end-link),
 .root .controls input[type="submit"] { min-height: 44px; font-weight: 600; }
 
 /* Ending early is a way out, not an answer. Styled as a line of text so it
-   never reads as a fifth grade. */
+   never reads as a fifth grade — which is why the grade-button rules above
+   exclude it by name rather than being overridden here. They are more
+   specific than a bare class, so for as long as they matched, every
+   declaration below that they also set was discarded and the way out of a
+   session rendered as a bordered 44px button. */
 .end-link {
   display: block; margin: 0.625rem auto 0; padding: 0.25rem 0.5rem;
   -webkit-appearance: none; appearance: none;

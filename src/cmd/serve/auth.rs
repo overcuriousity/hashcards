@@ -177,7 +177,7 @@ fn session_expired_page() -> String {
                 // stored theme rather than starting over at the system's.
                 script { (maud::PreEscaped(crate::cmd::drill::template::THEME_BOOT)) }
                 title { "Session expired" }
-                link rel="stylesheet" href="/style.css";
+                link rel="stylesheet" href=(crate::cmd::drill::template::STYLE_URL.as_str());
             }
             body {
                 div.error {

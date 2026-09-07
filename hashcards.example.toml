@@ -27,6 +27,8 @@ data_dir = "/var/lib/hashcards"       # Directory for the card trees, the review
 # answer_controls = "full"            # "full" or "binary" (default: full)
 # bury_siblings = true                # Hide sibling cards in same session (default: true)
 # jitter = 0.05                       # Random +/- fraction applied to review intervals (0.0 to 0.5, default: 0.05)
+# desired_retention = 0.9             # Chance a card is still remembered when it comes back (0.7 to 0.99, default: 0.9)
+# max_interval_days = 256             # Ceiling on a review interval (1 to 36500, default: 256)
 
 # Optional: OIDC login. Adding this section gates every route except /auth/*
 # behind a login, and then *requires* an `owner` on every [[deck]] entry

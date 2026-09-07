@@ -461,6 +461,7 @@ mod tests {
     use crate::types::card::CardContent;
     use crate::types::performance::Jitter;
     use crate::types::performance::Performance;
+    use crate::types::performance::Scheduling;
 
     #[test]
     fn test_completion_page_without_reviews_skips_stats() -> Fallible<()> {
@@ -468,13 +469,19 @@ mod tests {
         let session_id = db.create_session(Timestamp::now()).unwrap();
         let mutable = MutableState {
             reveal: false,
-            dbs: SessionDbs::single(db, session_id),
+            dbs: SessionDbs::single(
+                db,
+                session_id,
+                Scheduling {
+                    jitter: Jitter::none(),
+                    ..Scheduling::default()
+                },
+            ),
             cache: Cache::new(),
             cards: Vec::new(),
             reviews: Vec::new(),
             finished_at: Some(Timestamp::now()),
             card_shown_at: None,
-            jitter: Jitter::none(),
             rng: TinyRng::from_seed(1),
         };
         let ctx = RenderContext {
@@ -497,10 +504,16 @@ mod tests {
         let db = Database::new(":memory:").unwrap();
         let session_id = db.create_session(Timestamp::now()).unwrap();
         MutableState::new(
-            SessionDbs::single(db, session_id),
+            SessionDbs::single(
+                db,
+                session_id,
+                Scheduling {
+                    jitter: Jitter::none(),
+                    ..Scheduling::default()
+                },
+            ),
             Cache::new(),
             Vec::new(),
-            Jitter::none(),
             TinyRng::from_seed(1),
         )
     }
@@ -585,10 +598,16 @@ mod tests {
         db.insert_card(card.hash(), now)?;
         let session_id = db.create_session(now)?;
         let mut mutable = MutableState::new(
-            SessionDbs::single(db, session_id),
+            SessionDbs::single(
+                db,
+                session_id,
+                Scheduling {
+                    jitter: Jitter::none(),
+                    ..Scheduling::default()
+                },
+            ),
             Cache::new(),
             vec![card],
-            Jitter::none(),
             TinyRng::from_seed(1),
         );
         mutable.reveal = true;
@@ -723,10 +742,16 @@ mod tests {
             },
         ];
         let mut mutable = MutableState::new(
-            SessionDbs::single(db, session_id),
+            SessionDbs::single(
+                db,
+                session_id,
+                Scheduling {
+                    jitter: Jitter::none(),
+                    ..Scheduling::default()
+                },
+            ),
             Cache::new(),
             Vec::new(),
-            Jitter::none(),
             TinyRng::from_seed(1),
         );
         mutable.reviews = reviews;
